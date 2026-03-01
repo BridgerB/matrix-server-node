@@ -1,9 +1,10 @@
-import type { UserId, RoomId, RoomAlias, EventId, DeviceId, AccessToken, RefreshToken, Timestamp, ServerName } from "../types/index.ts";
+import type { UserId, RoomId, RoomAlias, EventId, DeviceId, AccessToken, RefreshToken, Timestamp, ServerName, KeyId } from "../types/index.ts";
 import type { UserAccount, DeviceSession, RoomState, StoredMedia } from "../types/index.ts";
-import type { PDU, StrippedStateEvent } from "../types/events.ts";
+import type { PDU, StrippedStateEvent, ToDeviceEvent } from "../types/events.ts";
 import type { UserProfile, Device } from "../types/user.ts";
 import type { JsonObject } from "../types/json.ts";
 import type { PresenceState } from "../types/ephemeral.ts";
+import type { DeviceKeys, OneTimeKey } from "../types/e2ee.ts";
 
 export interface StoredSession extends DeviceSession {
   access_token: AccessToken;
@@ -116,4 +117,23 @@ export interface Storage {
   // Filters
   createFilter(userId: UserId, filter: JsonObject): Promise<string>;
   getFilter(userId: UserId, filterId: string): Promise<JsonObject | undefined>;
+
+  // E2EE - Device keys
+  setDeviceKeys(userId: UserId, deviceId: DeviceId, keys: DeviceKeys): Promise<void>;
+  getDeviceKeys(userId: UserId, deviceId: DeviceId): Promise<DeviceKeys | undefined>;
+  getAllDeviceKeys(userId: UserId): Promise<Record<DeviceId, DeviceKeys>>;
+
+  // E2EE - One-time keys
+  addOneTimeKeys(userId: UserId, deviceId: DeviceId, keys: Record<KeyId, string | OneTimeKey>): Promise<void>;
+  claimOneTimeKey(userId: UserId, deviceId: DeviceId, algorithm: string): Promise<{ keyId: KeyId; key: string | OneTimeKey } | undefined>;
+  getOneTimeKeyCounts(userId: UserId, deviceId: DeviceId): Promise<Record<string, number>>;
+
+  // E2EE - Fallback keys
+  setFallbackKeys(userId: UserId, deviceId: DeviceId, keys: Record<KeyId, string | OneTimeKey>): Promise<void>;
+  getFallbackKeyTypes(userId: UserId, deviceId: DeviceId): Promise<string[]>;
+
+  // To-device messages
+  sendToDevice(userId: UserId, deviceId: DeviceId, event: ToDeviceEvent): Promise<void>;
+  getToDeviceMessages(userId: UserId, deviceId: DeviceId): Promise<ToDeviceEvent[]>;
+  clearToDeviceMessages(userId: UserId, deviceId: DeviceId): Promise<void>;
 }

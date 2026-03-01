@@ -19,6 +19,7 @@ import { putTyping } from "./handlers/typing.ts";
 import { postReceipt } from "./handlers/receipts.ts";
 import { getPresence, putPresence } from "./handlers/presence.ts";
 import { postUpload, getDownload, getThumbnail, getConfig } from "./handlers/media.ts";
+import { postKeysUpload, postKeysQuery, postKeysClaim, putSendToDevice, getKeysChanges } from "./handlers/e2ee.ts";
 
 export function registerRoutes(router: Router, storage: Storage, serverName: string): void {
   const auth = requireAuth(storage);
@@ -128,6 +129,15 @@ export function registerRoutes(router: Router, storage: Storage, serverName: str
   router.get("/_matrix/media/v3/download/:serverName/:mediaId/:fileName", getDownload(storage));
   router.get("/_matrix/media/v3/thumbnail/:serverName/:mediaId", getThumbnail(storage));
   router.get("/_matrix/media/v3/config", getConfig(), auth);
+
+  // E2EE - Key management (authenticated)
+  router.post("/_matrix/client/v3/keys/upload", postKeysUpload(storage), auth);
+  router.post("/_matrix/client/v3/keys/query", postKeysQuery(storage), auth);
+  router.post("/_matrix/client/v3/keys/claim", postKeysClaim(storage), auth);
+  router.get("/_matrix/client/v3/keys/changes", getKeysChanges(), auth);
+
+  // To-device messaging (authenticated)
+  router.put("/_matrix/client/v3/sendToDevice/:eventType/:txnId", putSendToDevice(storage), auth);
 
   // Sync
   router.get("/_matrix/client/v3/sync", getSync(storage, serverName), auth);

@@ -1,9 +1,10 @@
-import type { UserId, RoomId, RoomAlias, EventId, DeviceId, AccessToken, RefreshToken, Timestamp, ServerName } from "../types/index.ts";
+import type { UserId, RoomId, RoomAlias, EventId, DeviceId, AccessToken, RefreshToken, Timestamp, ServerName, KeyId } from "../types/index.ts";
 import type { UserAccount, RoomState, StoredMedia } from "../types/index.ts";
-import type { PDU, StrippedStateEvent } from "../types/events.ts";
+import type { PDU, StrippedStateEvent, ToDeviceEvent } from "../types/events.ts";
 import type { UserProfile, Device } from "../types/user.ts";
 import type { JsonObject } from "../types/json.ts";
 import type { PresenceState } from "../types/ephemeral.ts";
+import type { DeviceKeys, OneTimeKey } from "../types/e2ee.ts";
 import type { Storage, StoredSession } from "./interface.ts";
 import { computeEventId } from "../events.ts";
 
@@ -29,6 +30,10 @@ export class MemoryStorage implements Storage {
   private mediaStore = new Map<string, { metadata: StoredMedia; data: Buffer }>();
   private filters = new Map<UserId, Map<string, JsonObject>>();
   private filterCounter = 0;
+  private deviceKeysMap = new Map<string, DeviceKeys>();
+  private oneTimeKeysMap = new Map<string, Map<KeyId, string | OneTimeKey>>();
+  private fallbackKeysMap = new Map<string, Map<KeyId, string | OneTimeKey>>();
+  private toDeviceInbox = new Map<string, ToDeviceEvent[]>();
 
   // Users
 
@@ -656,5 +661,119 @@ export class MemoryStorage implements Storage {
 
   async getFilter(userId: UserId, filterId: string): Promise<JsonObject | undefined> {
     return this.filters.get(userId)?.get(filterId);
+  }
+
+  // E2EE - Device keys
+
+  async setDeviceKeys(userId: UserId, deviceId: DeviceId, keys: DeviceKeys): Promise<void> {
+    this.deviceKeysMap.set(`${userId}\0${deviceId}`, keys);
+  }
+
+  async getDeviceKeys(userId: UserId, deviceId: DeviceId): Promise<DeviceKeys | undefined> {
+    return this.deviceKeysMap.get(`${userId}\0${deviceId}`);
+  }
+
+  async getAllDeviceKeys(userId: UserId): Promise<Record<DeviceId, DeviceKeys>> {
+    const result: Record<DeviceId, DeviceKeys> = {};
+    const prefix = `${userId}\0`;
+    for (const [key, value] of this.deviceKeysMap) {
+      if (key.startsWith(prefix)) {
+        const deviceId = key.slice(prefix.length) as DeviceId;
+        result[deviceId] = value;
+      }
+    }
+    return result;
+  }
+
+  // E2EE - One-time keys
+
+  async addOneTimeKeys(userId: UserId, deviceId: DeviceId, keys: Record<KeyId, string | OneTimeKey>): Promise<void> {
+    const mapKey = `${userId}\0${deviceId}`;
+    let otks = this.oneTimeKeysMap.get(mapKey);
+    if (!otks) {
+      otks = new Map();
+      this.oneTimeKeysMap.set(mapKey, otks);
+    }
+    for (const [keyId, key] of Object.entries(keys)) {
+      otks.set(keyId as KeyId, key);
+    }
+  }
+
+  async claimOneTimeKey(userId: UserId, deviceId: DeviceId, algorithm: string): Promise<{ keyId: KeyId; key: string | OneTimeKey } | undefined> {
+    const mapKey = `${userId}\0${deviceId}`;
+    const otks = this.oneTimeKeysMap.get(mapKey);
+    if (otks) {
+      for (const [keyId, key] of otks) {
+        if (keyId.startsWith(algorithm + ":")) {
+          otks.delete(keyId);
+          return { keyId, key };
+        }
+      }
+    }
+    // Fall back to fallback keys
+    const fallbacks = this.fallbackKeysMap.get(mapKey);
+    if (fallbacks) {
+      for (const [keyId, key] of fallbacks) {
+        if (keyId.startsWith(algorithm + ":")) {
+          return { keyId, key };  // Don't delete fallback keys
+        }
+      }
+    }
+    return undefined;
+  }
+
+  async getOneTimeKeyCounts(userId: UserId, deviceId: DeviceId): Promise<Record<string, number>> {
+    const mapKey = `${userId}\0${deviceId}`;
+    const otks = this.oneTimeKeysMap.get(mapKey);
+    if (!otks) return {};
+    const counts: Record<string, number> = {};
+    for (const keyId of otks.keys()) {
+      const algorithm = keyId.split(":")[0]!;
+      counts[algorithm] = (counts[algorithm] ?? 0) + 1;
+    }
+    return counts;
+  }
+
+  // E2EE - Fallback keys
+
+  async setFallbackKeys(userId: UserId, deviceId: DeviceId, keys: Record<KeyId, string | OneTimeKey>): Promise<void> {
+    const mapKey = `${userId}\0${deviceId}`;
+    const fallbacks = new Map<KeyId, string | OneTimeKey>();
+    for (const [keyId, key] of Object.entries(keys)) {
+      fallbacks.set(keyId as KeyId, key);
+    }
+    this.fallbackKeysMap.set(mapKey, fallbacks);
+  }
+
+  async getFallbackKeyTypes(userId: UserId, deviceId: DeviceId): Promise<string[]> {
+    const mapKey = `${userId}\0${deviceId}`;
+    const fallbacks = this.fallbackKeysMap.get(mapKey);
+    if (!fallbacks) return [];
+    const types = new Set<string>();
+    for (const keyId of fallbacks.keys()) {
+      types.add(keyId.split(":")[0]!);
+    }
+    return [...types];
+  }
+
+  // To-device messages
+
+  async sendToDevice(userId: UserId, deviceId: DeviceId, event: ToDeviceEvent): Promise<void> {
+    const key = `${userId}\0${deviceId}`;
+    let inbox = this.toDeviceInbox.get(key);
+    if (!inbox) {
+      inbox = [];
+      this.toDeviceInbox.set(key, inbox);
+    }
+    inbox.push(event);
+    this.wakeWaiters();
+  }
+
+  async getToDeviceMessages(userId: UserId, deviceId: DeviceId): Promise<ToDeviceEvent[]> {
+    return this.toDeviceInbox.get(`${userId}\0${deviceId}`) ?? [];
+  }
+
+  async clearToDeviceMessages(userId: UserId, deviceId: DeviceId): Promise<void> {
+    this.toDeviceInbox.delete(`${userId}\0${deviceId}`);
   }
 }

@@ -1,6 +1,6 @@
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { UserId, RoomId } from "../types/index.ts";
+import type { UserId, RoomId, DeviceId } from "../types/index.ts";
 import type { SyncResponse, JoinedRoom, InvitedRoom, LeftRoom } from "../types/sync.ts";
 import type { ClientEvent } from "../types/events.ts";
 import { pduToClientEvent } from "../events.ts";
@@ -11,6 +11,7 @@ const MAX_TIMEOUT = 30000;
 export function getSync(storage: Storage, _serverName: string): Handler {
   return async (req) => {
     const userId = req.userId!;
+    const deviceId = req.deviceId!;
     const sinceStr = req.query.get("since");
     const since = sinceStr !== null ? parseInt(sinceStr, 10) : undefined;
     const timeout = Math.min(
@@ -27,8 +28,8 @@ export function getSync(storage: Storage, _serverName: string): Handler {
     const nextBatch = await storage.getStreamPosition();
 
     const response: SyncResponse = since === undefined
-      ? await buildInitialSync(storage, userId, nextBatch)
-      : await buildIncrementalSync(storage, userId, since, nextBatch, fullState);
+      ? await buildInitialSync(storage, userId, deviceId, nextBatch)
+      : await buildIncrementalSync(storage, userId, deviceId, since, nextBatch, fullState);
 
     return { status: 200, body: response };
   };
@@ -37,6 +38,7 @@ export function getSync(storage: Storage, _serverName: string): Handler {
 async function buildInitialSync(
   storage: Storage,
   userId: UserId,
+  deviceId: DeviceId,
   nextBatch: number,
 ): Promise<SyncResponse> {
   const userRooms = await storage.getRoomsForUserWithMembership(userId);
@@ -129,6 +131,16 @@ async function buildInitialSync(
     }
   }
 
+  // To-device messages
+  const toDeviceEvents = await storage.getToDeviceMessages(userId, deviceId);
+  if (toDeviceEvents.length > 0) {
+    await storage.clearToDeviceMessages(userId, deviceId);
+  }
+
+  // E2EE key counts
+  const otkCounts = await storage.getOneTimeKeyCounts(userId, deviceId);
+  const fallbackKeyTypes = await storage.getFallbackKeyTypes(userId, deviceId);
+
   return {
     next_batch: String(nextBatch),
     account_data: accountDataEvents.length > 0 ? { events: accountDataEvents } : undefined,
@@ -137,12 +149,16 @@ async function buildInitialSync(
       join: Object.keys(join).length > 0 ? join : undefined,
       invite: Object.keys(invite).length > 0 ? invite : undefined,
     },
+    to_device: toDeviceEvents.length > 0 ? { events: toDeviceEvents } : undefined,
+    device_one_time_keys_count: otkCounts,
+    device_unused_fallback_key_types: fallbackKeyTypes,
   };
 }
 
 async function buildIncrementalSync(
   storage: Storage,
   userId: UserId,
+  deviceId: DeviceId,
   since: number,
   nextBatch: number,
   fullState: boolean,
@@ -242,6 +258,16 @@ async function buildIncrementalSync(
     }
   }
 
+  // To-device messages
+  const toDeviceEvents = await storage.getToDeviceMessages(userId, deviceId);
+  if (toDeviceEvents.length > 0) {
+    await storage.clearToDeviceMessages(userId, deviceId);
+  }
+
+  // E2EE key counts
+  const otkCounts = await storage.getOneTimeKeyCounts(userId, deviceId);
+  const fallbackKeyTypes = await storage.getFallbackKeyTypes(userId, deviceId);
+
   return {
     next_batch: String(nextBatch),
     presence: presenceEvents.length > 0 ? { events: presenceEvents } : undefined,
@@ -250,6 +276,9 @@ async function buildIncrementalSync(
       invite: Object.keys(invite).length > 0 ? invite : undefined,
       leave: Object.keys(leave).length > 0 ? leave : undefined,
     },
+    to_device: toDeviceEvents.length > 0 ? { events: toDeviceEvents } : undefined,
+    device_one_time_keys_count: otkCounts,
+    device_unused_fallback_key_types: fallbackKeyTypes,
   };
 }
 
