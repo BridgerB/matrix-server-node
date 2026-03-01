@@ -6,6 +6,8 @@ import type { JsonObject } from "../types/json.ts";
 import type { PresenceState } from "../types/ephemeral.ts";
 import type { DeviceKeys, OneTimeKey } from "../types/e2ee.ts";
 import type { Pusher } from "../types/push.ts";
+import type { ServerKeys } from "../types/federation.ts";
+import type { RoomVersion } from "../types/room-versions.ts";
 import type { Storage, StoredSession } from "./interface.ts";
 import { computeEventId } from "../events.ts";
 
@@ -40,6 +42,8 @@ export class MemoryStorage implements Storage {
   private reports: { userId: UserId; roomId: RoomId; eventId: EventId; score?: number; reason?: string; ts: number }[] = [];
   private openIdTokens = new Map<string, { userId: UserId; expiresAt: number }>();
   private threePidsMap = new Map<UserId, { medium: string; address: string; added_at: number }[]>();
+  private serverKeysCache = new Map<string, { key: string; validUntil: number }>();
+  private federationTxns = new Set<string>();
 
   // Users
 
@@ -1107,5 +1111,128 @@ export class MemoryStorage implements Storage {
       : undefined;
 
     return { events: results, nextBatch };
+  }
+
+  // Federation - Remote server key cache
+
+  async storeServerKeys(serverName: ServerName, keys: ServerKeys): Promise<void> {
+    for (const [keyId, val] of Object.entries(keys.verify_keys)) {
+      this.serverKeysCache.set(`${serverName}\0${keyId}`, {
+        key: val.key,
+        validUntil: keys.valid_until_ts,
+      });
+    }
+  }
+
+  async getServerKeys(serverName: ServerName, keyId: KeyId): Promise<{ key: string; validUntil: number } | undefined> {
+    return this.serverKeysCache.get(`${serverName}\0${keyId}`);
+  }
+
+  // Federation - Auth chain
+
+  async getAuthChain(eventIds: EventId[]): Promise<PDU[]> {
+    const visited = new Set<EventId>();
+    const result: PDU[] = [];
+    const queue = [...eventIds];
+
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      if (visited.has(id)) continue;
+      visited.add(id);
+
+      const event = this.events.get(id);
+      if (!event) continue;
+      result.push(event);
+
+      for (const authId of event.auth_events) {
+        if (!visited.has(authId)) {
+          queue.push(authId);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  async getServersInRoom(roomId: RoomId): Promise<ServerName[]> {
+    const room = this.rooms.get(roomId);
+    if (!room) return [];
+
+    const servers = new Set<ServerName>();
+    for (const [key, event] of room.state_events) {
+      if (key.startsWith("m.room.member\0")) {
+        if ((event.content as Record<string, unknown>)["membership"] === "join") {
+          const userId = event.state_key!;
+          const serverName = userId.split(":").slice(1).join(":") as ServerName;
+          servers.add(serverName);
+        }
+      }
+    }
+
+    return [...servers];
+  }
+
+  async getStateAtEvent(_roomId: RoomId, _eventId: EventId): Promise<Map<string, PDU> | undefined> {
+    // Simplified: return current room state (future: snapshot per event)
+    const room = this.rooms.get(_roomId);
+    if (!room) return undefined;
+    return new Map(room.state_events);
+  }
+
+  // Federation - Transaction dedup
+
+  async getFederationTxn(origin: ServerName, txnId: string): Promise<boolean> {
+    return this.federationTxns.has(`${origin}\0${txnId}`);
+  }
+
+  async setFederationTxn(origin: ServerName, txnId: string): Promise<void> {
+    this.federationTxns.add(`${origin}\0${txnId}`);
+  }
+
+  // Federation - Room import
+
+  async importRoomState(roomId: RoomId, roomVersion: RoomVersion, stateEvents: PDU[], authChain: PDU[]): Promise<void> {
+    // Store all auth chain events
+    for (const event of authChain) {
+      const eventId = computeEventId(event);
+      this.events.set(eventId, event);
+    }
+
+    // Create room state from state events
+    const stateMap = new Map<string, PDU>();
+    let maxDepth = 0;
+    const extremities: EventId[] = [];
+
+    for (const event of stateEvents) {
+      const eventId = computeEventId(event);
+      this.events.set(eventId, event);
+
+      const key = event.type + "\0" + (event.state_key ?? "");
+      stateMap.set(key, event);
+
+      // Track timeline
+      const timeline = this.roomTimeline.get(roomId) ?? [];
+      this.streamCounter++;
+      timeline.push({ eventId, streamPos: this.streamCounter });
+      this.roomTimeline.set(roomId, timeline);
+
+      if (event.depth > maxDepth) maxDepth = event.depth;
+      extremities.length = 0;
+      extremities.push(eventId);
+    }
+
+    const roomState: RoomState = {
+      room_id: roomId,
+      room_version: roomVersion,
+      state_events: stateMap,
+      depth: maxDepth + 1,
+      forward_extremities: extremities,
+    };
+
+    this.rooms.set(roomId, roomState);
+
+    // Notify waiters
+    for (const waiter of this.eventWaiters) waiter();
+    this.eventWaiters.clear();
   }
 }

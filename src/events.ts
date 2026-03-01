@@ -4,6 +4,8 @@ import type { PDU, ClientEvent, UnsignedData } from "./types/events.ts";
 import type { RoomState } from "./types/internal.ts";
 import type { JsonObject } from "./types/json.ts";
 import type { RoomPowerLevelsContent } from "./types/state-events.ts";
+import type { SigningKey } from "./signing.ts";
+import { signEvent } from "./signing.ts";
 import { forbidden } from "./errors.ts";
 
 // =============================================================================
@@ -117,6 +119,7 @@ export function buildEvent(params: {
   redacts?: EventId;
   unsigned?: UnsignedData;
   serverName: ServerName;
+  signingKey?: SigningKey;
 }): { event: PDU; eventId: EventId } {
   const event: PDU = {
     auth_events: params.authEvents,
@@ -144,6 +147,11 @@ export function buildEvent(params: {
   // Compute content hash and event ID
   event.hashes = { sha256: computeContentHash(event) };
   const eventId = computeEventId(event);
+
+  // Sign if a signing key is provided
+  if (params.signingKey) {
+    return { event: signEvent(event, params.serverName, params.signingKey), eventId };
+  }
 
   return { event, eventId };
 }

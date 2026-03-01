@@ -39,7 +39,19 @@ import { postSearch } from "./handlers/search.ts";
 import { getSpaceHierarchy } from "./handlers/spaces.ts";
 import { postRoomUpgrade } from "./handlers/room-upgrade.ts";
 
-export function registerRoutes(router: Router, storage: Storage, serverName: string): void {
+import type { SigningKey } from "./signing.ts";
+import { getServerKeys } from "./handlers/federation/keys.ts";
+import { getQueryProfile, getQueryDirectory, getFederationPublicRooms } from "./handlers/federation/query.ts";
+import { getFederationEvent, getFederationRoomState, getFederationRoomStateIds, getFederationEventAuth, postFederationBackfill, postFederationMissingEvents } from "./handlers/federation/events.ts";
+import { postFederationUserDevices, postFederationKeysQuery, postFederationKeysClaim } from "./handlers/federation/devices.ts";
+import { putFederationSend } from "./handlers/federation/transactions.ts";
+import { getMakeJoin, putSendJoin, getMakeLeave, putSendLeave, putFederationInvite } from "./handlers/federation/membership.ts";
+import { requireFederationAuth } from "./middleware/federation-auth.ts";
+import { FederationClient } from "./federation/client.ts";
+import { RemoteKeyStore } from "./federation/key-store.ts";
+import type { ServerName } from "./types/index.ts";
+
+export function registerRoutes(router: Router, storage: Storage, serverName: string, signingKey?: SigningKey): void {
   const auth = requireAuth(storage);
 
   // Discovery (public + authenticated)
@@ -212,4 +224,46 @@ export function registerRoutes(router: Router, storage: Storage, serverName: str
 
   // Sync
   router.get("/_matrix/client/v3/sync", getSync(storage, serverName), auth);
+
+  // ===========================================================================
+  // FEDERATION (Server-Server API)
+  // ===========================================================================
+
+  if (signingKey) {
+    const federationClient = new FederationClient(serverName as ServerName, signingKey);
+    const remoteKeyStore = new RemoteKeyStore(storage);
+    const fedAuth = requireFederationAuth(serverName, remoteKeyStore, federationClient);
+
+    // Key server (public)
+    router.get("/_matrix/key/v2/server", getServerKeys(serverName, signingKey));
+    router.get("/_matrix/key/v2/server/:keyId", getServerKeys(serverName, signingKey));
+
+    // Federation queries (authenticated)
+    router.get("/_matrix/federation/v1/query/profile", getQueryProfile(storage), fedAuth);
+    router.get("/_matrix/federation/v1/query/directory", getQueryDirectory(storage), fedAuth);
+    router.get("/_matrix/federation/v1/publicRooms", getFederationPublicRooms(storage), fedAuth);
+
+    // Federation events (authenticated)
+    router.get("/_matrix/federation/v1/event/:eventId", getFederationEvent(storage, serverName), fedAuth);
+    router.get("/_matrix/federation/v1/state/:roomId", getFederationRoomState(storage), fedAuth);
+    router.get("/_matrix/federation/v1/state_ids/:roomId", getFederationRoomStateIds(storage), fedAuth);
+    router.get("/_matrix/federation/v1/event_auth/:roomId/:eventId", getFederationEventAuth(storage), fedAuth);
+    router.post("/_matrix/federation/v1/backfill/:roomId", postFederationBackfill(storage, serverName), fedAuth);
+    router.post("/_matrix/federation/v1/get_missing_events/:roomId", postFederationMissingEvents(storage), fedAuth);
+
+    // Federation devices (authenticated)
+    router.post("/_matrix/federation/v1/user/devices/:userId", postFederationUserDevices(storage), fedAuth);
+    router.post("/_matrix/federation/v1/user/keys/query", postFederationKeysQuery(storage), fedAuth);
+    router.post("/_matrix/federation/v1/user/keys/claim", postFederationKeysClaim(storage), fedAuth);
+
+    // Federation transactions (authenticated)
+    router.put("/_matrix/federation/v1/send/:txnId", putFederationSend(storage, serverName, signingKey, remoteKeyStore, federationClient), fedAuth);
+
+    // Federation membership (authenticated)
+    router.get("/_matrix/federation/v1/make_join/:roomId/:userId", getMakeJoin(storage, serverName), fedAuth);
+    router.put("/_matrix/federation/v2/send_join/:roomId/:eventId", putSendJoin(storage, serverName, signingKey, remoteKeyStore, federationClient), fedAuth);
+    router.get("/_matrix/federation/v1/make_leave/:roomId/:userId", getMakeLeave(storage, serverName), fedAuth);
+    router.put("/_matrix/federation/v2/send_leave/:roomId/:eventId", putSendLeave(storage, serverName, signingKey, remoteKeyStore, federationClient), fedAuth);
+    router.put("/_matrix/federation/v2/invite/:roomId/:eventId", putFederationInvite(storage, serverName, signingKey, remoteKeyStore, federationClient), fedAuth);
+  }
 }

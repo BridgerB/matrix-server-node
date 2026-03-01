@@ -6,6 +6,8 @@ import type { JsonObject } from "../types/json.ts";
 import type { PresenceState } from "../types/ephemeral.ts";
 import type { DeviceKeys, OneTimeKey } from "../types/e2ee.ts";
 import type { Pusher } from "../types/push.ts";
+import type { ServerKeys } from "../types/federation.ts";
+import type { RoomVersion } from "../types/room-versions.ts";
 
 export interface StoredSession extends DeviceSession {
   access_token: AccessToken;
@@ -174,4 +176,20 @@ export interface Storage {
 
   // Search
   searchRoomEvents(roomIds: RoomId[], searchTerm: string, keys: string[], limit: number, from?: string): Promise<{ events: { event: PDU; eventId: EventId; streamPos: number }[]; nextBatch?: string }>;
+
+  // Federation - Remote server key cache
+  storeServerKeys(serverName: ServerName, keys: ServerKeys): Promise<void>;
+  getServerKeys(serverName: ServerName, keyId: KeyId): Promise<{ key: string; validUntil: number } | undefined>;
+
+  // Federation - Auth chain & state queries
+  getAuthChain(eventIds: EventId[]): Promise<PDU[]>;
+  getServersInRoom(roomId: RoomId): Promise<ServerName[]>;
+  getStateAtEvent(roomId: RoomId, eventId: EventId): Promise<Map<string, PDU> | undefined>;
+
+  // Federation - Transaction dedup
+  getFederationTxn(origin: ServerName, txnId: string): Promise<boolean>;
+  setFederationTxn(origin: ServerName, txnId: string): Promise<void>;
+
+  // Federation - Room import
+  importRoomState(roomId: RoomId, roomVersion: RoomVersion, stateEvents: PDU[], authChain: PDU[]): Promise<void>;
 }

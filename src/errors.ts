@@ -83,3 +83,15 @@ export function roomNotFound(msg = "Room not found") {
 export function notJoined(msg = "You are not joined to this room") {
   return new MatrixError("M_FORBIDDEN", msg, 403);
 }
+
+export function serverNotTrusted(msg = "Server not trusted") {
+  return new MatrixError("M_SERVER_NOT_TRUSTED", msg, 403);
+}
+
+export function unableToAuthoriseJoin(msg = "Unable to authorise join") {
+  return new MatrixError("M_UNABLE_TO_AUTHORISE_JOIN", msg, 403);
+}
+
+export function incompatibleRoomVersion(msg = "Incompatible room version") {
+  return new MatrixError("M_INCOMPATIBLE_ROOM_VERSION", msg, 400);
+}

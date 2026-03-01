@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { UserId, DeviceId, AccessToken } from "./types/index.ts";
+import type { UserId, DeviceId, AccessToken, ServerName } from "./types/index.ts";
 import { MatrixError } from "./errors.ts";
 
 export interface RouterRequest {
@@ -14,6 +14,7 @@ export interface RouterRequest {
   userId?: UserId;
   deviceId?: DeviceId;
   accessToken?: AccessToken;
+  origin?: ServerName;
 }
 
 export interface RouterResponse {
