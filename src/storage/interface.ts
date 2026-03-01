@@ -1,6 +1,6 @@
 import type { UserId, RoomId, EventId, DeviceId, AccessToken, RefreshToken, Timestamp } from "../types/index.ts";
 import type { UserAccount, DeviceSession, RoomState } from "../types/index.ts";
-import type { PDU } from "../types/events.ts";
+import type { PDU, StrippedStateEvent } from "../types/events.ts";
 
 export interface StoredSession extends DeviceSession {
   access_token: AccessToken;
@@ -52,4 +52,10 @@ export interface Storage {
   // Transaction idempotency
   getTxnEventId(userId: UserId, deviceId: DeviceId, txnId: string): Promise<EventId | undefined>;
   setTxnEventId(userId: UserId, deviceId: DeviceId, txnId: string, eventId: EventId): Promise<void>;
+
+  // Sync
+  getRoomsForUserWithMembership(userId: UserId): Promise<{ roomId: RoomId; membership: string }[]>;
+  getEventsByRoomSince(roomId: RoomId, since: number, limit: number): Promise<{ events: { event: PDU; eventId: EventId; streamPos: number }[]; limited: boolean }>;
+  getStrippedState(roomId: RoomId): Promise<StrippedStateEvent[]>;
+  waitForEvents(since: number, timeoutMs: number): Promise<void>;
 }

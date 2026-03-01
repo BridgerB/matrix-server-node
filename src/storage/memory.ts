@@ -1,6 +1,6 @@
 import type { UserId, RoomId, EventId, DeviceId, AccessToken, RefreshToken, Timestamp } from "../types/index.ts";
 import type { UserAccount, RoomState } from "../types/index.ts";
-import type { PDU } from "../types/events.ts";
+import type { PDU, StrippedStateEvent } from "../types/events.ts";
 import type { Storage, StoredSession } from "./interface.ts";
 import { computeEventId } from "../events.ts";
 
@@ -15,6 +15,7 @@ export class MemoryStorage implements Storage {
   private roomTimeline = new Map<RoomId, { eventId: EventId; streamPos: number }[]>();
   private streamCounter = 0;
   private txnMap = new Map<string, EventId>();
+  private eventWaiters = new Set<() => void>();
 
   // Users
 
@@ -167,6 +168,10 @@ export class MemoryStorage implements Storage {
       this.streamCounter++;
       timeline.push({ eventId, streamPos: this.streamCounter });
     }
+    // Wake long-polling sync connections
+    for (const waiter of this.eventWaiters) {
+      waiter();
+    }
   }
 
   async getEvent(eventId: EventId): Promise<{ event: PDU; eventId: EventId } | undefined> {
@@ -260,5 +265,79 @@ export class MemoryStorage implements Storage {
 
   async setTxnEventId(userId: UserId, deviceId: DeviceId, txnId: string, eventId: EventId): Promise<void> {
     this.txnMap.set(`${userId}|${deviceId}|${txnId}`, eventId);
+  }
+
+  // Sync
+
+  async getRoomsForUserWithMembership(userId: UserId): Promise<{ roomId: RoomId; membership: string }[]> {
+    const result: { roomId: RoomId; membership: string }[] = [];
+    for (const room of this.rooms.values()) {
+      const memberEvent = room.state_events.get("m.room.member\0" + userId);
+      if (memberEvent) {
+        const membership = (memberEvent.content as Record<string, unknown>)["membership"] as string | undefined;
+        if (membership) result.push({ roomId: room.room_id, membership });
+      }
+    }
+    return result;
+  }
+
+  async getEventsByRoomSince(
+    roomId: RoomId,
+    since: number,
+    limit: number,
+  ): Promise<{ events: { event: PDU; eventId: EventId; streamPos: number }[]; limited: boolean }> {
+    const timeline = this.roomTimeline.get(roomId) ?? [];
+    const filtered = timeline.filter((e) => e.streamPos > since);
+    const limited = filtered.length > limit;
+    // When limited, take the most recent events (tail)
+    const sliced = limited ? filtered.slice(filtered.length - limit) : filtered;
+    const events = sliced.map((e) => ({
+      event: this.events.get(e.eventId)!,
+      eventId: e.eventId,
+      streamPos: e.streamPos,
+    }));
+    return { events, limited };
+  }
+
+  async getStrippedState(roomId: RoomId): Promise<StrippedStateEvent[]> {
+    const room = this.rooms.get(roomId);
+    if (!room) return [];
+    const INVITE_STATE_TYPES = new Set([
+      "m.room.create", "m.room.join_rules", "m.room.canonical_alias",
+      "m.room.avatar", "m.room.name", "m.room.encryption",
+    ]);
+    const result: StrippedStateEvent[] = [];
+    for (const [key, event] of room.state_events) {
+      const type = key.split("\0")[0]!;
+      if (INVITE_STATE_TYPES.has(type) || type === "m.room.member") {
+        result.push({
+          content: event.content,
+          sender: event.sender,
+          state_key: event.state_key ?? "",
+          type: event.type,
+        });
+      }
+    }
+    return result;
+  }
+
+  async waitForEvents(since: number, timeoutMs: number): Promise<void> {
+    if (this.streamCounter > since) return;
+    if (timeoutMs <= 0) return;
+
+    return new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        this.eventWaiters.delete(wake);
+        resolve();
+      }, timeoutMs);
+
+      const wake = () => {
+        clearTimeout(timer);
+        this.eventWaiters.delete(wake);
+        resolve();
+      };
+
+      this.eventWaiters.add(wake);
+    });
   }
 }

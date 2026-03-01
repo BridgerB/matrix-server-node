@@ -9,6 +9,7 @@ import { getWhoAmI } from "./handlers/account.ts";
 import { postRefresh } from "./handlers/refresh.ts";
 import { postCreateRoom, getJoinedRooms, postJoin, postLeave, postInvite, postKick, postBan, postUnban } from "./handlers/rooms.ts";
 import { putSendEvent, putStateEvent, getAllState, getStateEvent, getMessages, getMembers, getEvent, postRedact } from "./handlers/room-events.ts";
+import { getSync } from "./handlers/sync.ts";
 
 export function registerRoutes(router: Router, storage: Storage, serverName: string): void {
   const auth = requireAuth(storage);
@@ -57,4 +58,7 @@ export function registerRoutes(router: Router, storage: Storage, serverName: str
 
   // Redaction
   router.post("/_matrix/client/v3/rooms/:roomId/redact/:eventId/:txnId", postRedact(storage, serverName), auth);
+
+  // Sync
+  router.get("/_matrix/client/v3/sync", getSync(storage, serverName), auth);
 }
