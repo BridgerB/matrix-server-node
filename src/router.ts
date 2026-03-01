@@ -10,6 +10,7 @@ export interface RouterRequest {
   query: URLSearchParams;
   headers: IncomingMessage["headers"];
   body: unknown;
+  rawBody?: Buffer;
   userId?: UserId;
   deviceId?: DeviceId;
   accessToken?: AccessToken;
@@ -121,11 +122,17 @@ export class Router {
       }
     }
 
-    // Parse JSON body for methods that typically have one
+    // Parse body
     let body: unknown = undefined;
+    let rawBody: Buffer | undefined;
+    const isMedia = url.pathname.startsWith("/_matrix/media/");
+
     if (method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE") {
       const raw = await readBody(req);
-      if (raw.length > 0) {
+      if (isMedia) {
+        body = {};
+        rawBody = raw;
+      } else if (raw.length > 0) {
         const contentType = req.headers["content-type"] ?? "";
         if (!contentType.includes("application/json") && raw.length > 0) {
           respondJson(res, 400, { errcode: "M_NOT_JSON", error: "Content-Type must be application/json" });
@@ -150,6 +157,7 @@ export class Router {
       query: url.searchParams,
       headers: req.headers,
       body,
+      rawBody,
     };
 
     // If no route matched, run global middleware then 404
@@ -161,7 +169,7 @@ export class Router {
 
       try {
         const response = await this.compose(this.globalMiddleware, notFoundHandler)(routerReq);
-        respondJson(res, response.status, response.body, response.headers);
+        this.respond(res, response);
       } catch (err) {
         this.handleError(res, err);
       }
@@ -172,7 +180,7 @@ export class Router {
     const allMiddleware = [...this.globalMiddleware, ...matchedRoute.middleware];
     try {
       const response = await this.compose(allMiddleware, matchedRoute.handler)(routerReq);
-      respondJson(res, response.status, response.body, response.headers);
+      this.respond(res, response);
     } catch (err) {
       this.handleError(res, err);
     }
@@ -186,6 +194,15 @@ export class Router {
       current = (req) => mw(req, next);
     }
     return current;
+  }
+
+  private respond(res: ServerResponse, response: RouterResponse): void {
+    if (Buffer.isBuffer(response.body)) {
+      res.writeHead(response.status, response.headers);
+      res.end(response.body);
+    } else {
+      respondJson(res, response.status, response.body, response.headers);
+    }
   }
 
   private handleError(res: ServerResponse, err: unknown): void {

@@ -1,5 +1,5 @@
 import type { UserId, RoomId, RoomAlias, EventId, DeviceId, AccessToken, RefreshToken, Timestamp, ServerName } from "../types/index.ts";
-import type { UserAccount, RoomState } from "../types/index.ts";
+import type { UserAccount, RoomState, StoredMedia } from "../types/index.ts";
 import type { PDU, StrippedStateEvent } from "../types/events.ts";
 import type { UserProfile, Device } from "../types/user.ts";
 import type { JsonObject } from "../types/json.ts";
@@ -26,6 +26,7 @@ export class MemoryStorage implements Storage {
   private typingTimers = new Map<RoomId, Map<UserId, ReturnType<typeof setTimeout>>>();
   private receiptsMap = new Map<RoomId, Map<string, { eventId: EventId; ts: Timestamp }>>();
   private presenceMap = new Map<UserId, { presence: PresenceState; status_msg?: string; last_active_ts?: Timestamp }>();
+  private mediaStore = new Map<string, { metadata: StoredMedia; data: Buffer }>();
 
   // Users
 
@@ -625,5 +626,16 @@ export class MemoryStorage implements Storage {
 
   async getPresence(userId: UserId): Promise<{ presence: PresenceState; status_msg?: string; last_active_ts?: Timestamp } | undefined> {
     return this.presenceMap.get(userId);
+  }
+
+  // Media
+
+  async storeMedia(media: StoredMedia, data: Buffer): Promise<void> {
+    const key = `${media.origin}/${media.media_id}`;
+    this.mediaStore.set(key, { metadata: media, data });
+  }
+
+  async getMedia(serverName: ServerName, mediaId: string): Promise<{ metadata: StoredMedia; data: Buffer } | undefined> {
+    return this.mediaStore.get(`${serverName}/${mediaId}`);
   }
 }

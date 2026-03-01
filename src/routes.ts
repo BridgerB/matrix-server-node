@@ -17,6 +17,7 @@ import { getGlobalAccountData, putGlobalAccountData, getRoomAccountData, putRoom
 import { putTyping } from "./handlers/typing.ts";
 import { postReceipt } from "./handlers/receipts.ts";
 import { getPresence, putPresence } from "./handlers/presence.ts";
+import { postUpload, getDownload, getThumbnail, getConfig } from "./handlers/media.ts";
 
 export function registerRoutes(router: Router, storage: Storage, serverName: string): void {
   const auth = requireAuth(storage);
@@ -113,6 +114,13 @@ export function registerRoutes(router: Router, storage: Storage, serverName: str
   // Presence (authenticated)
   router.get("/_matrix/client/v3/presence/:userId/status", getPresence(storage), auth);
   router.put("/_matrix/client/v3/presence/:userId/status", putPresence(storage), auth);
+
+  // Media (upload authenticated, download/thumbnail public)
+  router.post("/_matrix/media/v3/upload", postUpload(storage, serverName), auth);
+  router.get("/_matrix/media/v3/download/:serverName/:mediaId", getDownload(storage));
+  router.get("/_matrix/media/v3/download/:serverName/:mediaId/:fileName", getDownload(storage));
+  router.get("/_matrix/media/v3/thumbnail/:serverName/:mediaId", getThumbnail(storage));
+  router.get("/_matrix/media/v3/config", getConfig(), auth);
 
   // Sync
   router.get("/_matrix/client/v3/sync", getSync(storage, serverName), auth);

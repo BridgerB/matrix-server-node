@@ -1,5 +1,5 @@
 import type { UserId, RoomId, RoomAlias, EventId, DeviceId, AccessToken, RefreshToken, Timestamp, ServerName } from "../types/index.ts";
-import type { UserAccount, DeviceSession, RoomState } from "../types/index.ts";
+import type { UserAccount, DeviceSession, RoomState, StoredMedia } from "../types/index.ts";
 import type { PDU, StrippedStateEvent } from "../types/events.ts";
 import type { UserProfile, Device } from "../types/user.ts";
 import type { JsonObject } from "../types/json.ts";
@@ -108,4 +108,8 @@ export interface Storage {
   // Presence
   setPresence(userId: UserId, presence: PresenceState, statusMsg?: string): Promise<void>;
   getPresence(userId: UserId): Promise<{ presence: PresenceState; status_msg?: string; last_active_ts?: Timestamp } | undefined>;
+
+  // Media
+  storeMedia(media: StoredMedia, data: Buffer): Promise<void>;
+  getMedia(serverName: ServerName, mediaId: string): Promise<{ metadata: StoredMedia; data: Buffer } | undefined>;
 }
