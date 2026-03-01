@@ -5,6 +5,7 @@ import type { UserProfile, Device } from "../types/user.ts";
 import type { JsonObject } from "../types/json.ts";
 import type { PresenceState } from "../types/ephemeral.ts";
 import type { DeviceKeys, OneTimeKey } from "../types/e2ee.ts";
+import type { Pusher } from "../types/push.ts";
 
 export interface StoredSession extends DeviceSession {
   access_token: AccessToken;
@@ -136,4 +137,10 @@ export interface Storage {
   sendToDevice(userId: UserId, deviceId: DeviceId, event: ToDeviceEvent): Promise<void>;
   getToDeviceMessages(userId: UserId, deviceId: DeviceId): Promise<ToDeviceEvent[]>;
   clearToDeviceMessages(userId: UserId, deviceId: DeviceId): Promise<void>;
+
+  // Pushers
+  getPushers(userId: UserId): Promise<Pusher[]>;
+  setPusher(userId: UserId, pusher: Pusher): Promise<void>;
+  deletePusher(userId: UserId, appId: string, pushkey: string): Promise<void>;
+  deletePusherByKey(appId: string, pushkey: string): Promise<void>;
 }

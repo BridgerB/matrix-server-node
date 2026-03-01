@@ -5,6 +5,7 @@ import type { UserProfile, Device } from "../types/user.ts";
 import type { JsonObject } from "../types/json.ts";
 import type { PresenceState } from "../types/ephemeral.ts";
 import type { DeviceKeys, OneTimeKey } from "../types/e2ee.ts";
+import type { Pusher } from "../types/push.ts";
 import type { Storage, StoredSession } from "./interface.ts";
 import { computeEventId } from "../events.ts";
 
@@ -34,6 +35,7 @@ export class MemoryStorage implements Storage {
   private oneTimeKeysMap = new Map<string, Map<KeyId, string | OneTimeKey>>();
   private fallbackKeysMap = new Map<string, Map<KeyId, string | OneTimeKey>>();
   private toDeviceInbox = new Map<string, ToDeviceEvent[]>();
+  private pushersMap = new Map<UserId, Pusher[]>();
 
   // Users
 
@@ -775,5 +777,45 @@ export class MemoryStorage implements Storage {
 
   async clearToDeviceMessages(userId: UserId, deviceId: DeviceId): Promise<void> {
     this.toDeviceInbox.delete(`${userId}\0${deviceId}`);
+  }
+
+  // Pushers
+
+  async getPushers(userId: UserId): Promise<Pusher[]> {
+    return this.pushersMap.get(userId) ?? [];
+  }
+
+  async setPusher(userId: UserId, pusher: Pusher): Promise<void> {
+    let userPushers = this.pushersMap.get(userId);
+    if (!userPushers) {
+      userPushers = [];
+      this.pushersMap.set(userId, userPushers);
+    }
+    const idx = userPushers.findIndex(
+      (p) => p.app_id === pusher.app_id && p.pushkey === pusher.pushkey,
+    );
+    if (idx >= 0) {
+      userPushers[idx] = pusher;
+    } else {
+      userPushers.push(pusher);
+    }
+  }
+
+  async deletePusher(userId: UserId, appId: string, pushkey: string): Promise<void> {
+    const userPushers = this.pushersMap.get(userId);
+    if (!userPushers) return;
+    const idx = userPushers.findIndex(
+      (p) => p.app_id === appId && p.pushkey === pushkey,
+    );
+    if (idx >= 0) userPushers.splice(idx, 1);
+  }
+
+  async deletePusherByKey(appId: string, pushkey: string): Promise<void> {
+    for (const [, userPushers] of this.pushersMap) {
+      const idx = userPushers.findIndex(
+        (p) => p.app_id === appId && p.pushkey === pushkey,
+      );
+      if (idx >= 0) userPushers.splice(idx, 1);
+    }
   }
 }

@@ -1,9 +1,12 @@
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { UserId, RoomId, DeviceId } from "../types/index.ts";
-import type { SyncResponse, JoinedRoom, InvitedRoom, LeftRoom } from "../types/sync.ts";
-import type { ClientEvent } from "../types/events.ts";
+import type { SyncResponse, JoinedRoom, InvitedRoom, LeftRoom, UnreadNotificationCounts } from "../types/sync.ts";
+import type { ClientEvent, PDU } from "../types/events.ts";
+import type { RoomPowerLevelsContent } from "../types/state-events.ts";
+import type { PushRulesContent } from "../types/push.ts";
 import { pduToClientEvent } from "../events.ts";
+import { getOrInitRules, evaluatePushRules } from "../push-rules.ts";
 
 const TIMELINE_LIMIT = 20;
 const MAX_TIMEOUT = 30000;
@@ -45,6 +48,7 @@ async function buildInitialSync(
 
   const join: Record<RoomId, JoinedRoom> = {};
   const invite: Record<RoomId, InvitedRoom> = {};
+  const userRules = await getOrInitRules(storage, userId);
 
   for (const { roomId, membership } of userRooms) {
     if (membership === "join") {
@@ -76,6 +80,9 @@ async function buildInitialSync(
           limited: limited || undefined,
           prev_batch: prevBatch,
         },
+        unread_notifications: await computeNotificationCounts(
+          storage, roomId, userId, userRules, timelineEvents,
+        ),
       };
     } else if (membership === "invite") {
       const stripped = await storage.getStrippedState(roomId);
@@ -169,6 +176,7 @@ async function buildIncrementalSync(
   const invite: Record<RoomId, InvitedRoom> = {};
   const leave: Record<RoomId, LeftRoom> = {};
   const seenUsers = new Set<UserId>();
+  const userRules = await getOrInitRules(storage, userId);
 
   for (const { roomId, membership } of userRooms) {
     if (membership === "join") {
@@ -201,6 +209,10 @@ async function buildIncrementalSync(
 
       // Always include joined rooms in incremental sync (for ephemeral data)
       if (timelineClientEvents.length > 0 || stateClientEvents.length > 0 || ephemeralEvents.length > 0) {
+        // Use full recent timeline for notification counts
+        const recentResult = await storage.getEventsByRoom(roomId, TIMELINE_LIMIT, undefined, "b");
+        const recentEvents = recentResult.events.reverse();
+
         join[roomId] = {
           state: stateClientEvents.length > 0 ? { events: stateClientEvents } : undefined,
           timeline: {
@@ -209,6 +221,9 @@ async function buildIncrementalSync(
             prev_batch: prevBatch,
           },
           ephemeral: { events: ephemeralEvents },
+          unread_notifications: await computeNotificationCounts(
+            storage, roomId, userId, userRules, recentEvents,
+          ),
         };
       }
 
@@ -292,4 +307,60 @@ function buildReceiptContent(
     content[r.eventId]![r.receiptType]![r.userId] = { ts: r.ts };
   }
   return content;
+}
+
+async function computeNotificationCounts(
+  storage: Storage,
+  roomId: RoomId,
+  userId: UserId,
+  userRules: PushRulesContent,
+  timelineEvents: { event: PDU; eventId: string }[],
+): Promise<UnreadNotificationCounts> {
+  // Get user's display name for contains_display_name condition
+  const profile = await storage.getProfile(userId);
+  const displayName = profile?.displayname ?? undefined;
+
+  // Get room member count
+  const memberEvents = await storage.getMemberEvents(roomId);
+  const memberCount = memberEvents.filter(
+    (m) => (m.event.content as Record<string, unknown>)["membership"] === "join",
+  ).length;
+
+  // Get power levels
+  const plEvent = await storage.getStateEvent(roomId, "m.room.power_levels", "");
+  const powerLevels = plEvent
+    ? (plEvent.event.content as unknown as RoomPowerLevelsContent)
+    : undefined;
+
+  // Get sender power level helper
+  const getSenderPl = (sender: UserId): number => {
+    if (!powerLevels) return 0;
+    return powerLevels.users?.[sender] ?? powerLevels.users_default ?? 0;
+  };
+
+  let notificationCount = 0;
+  let highlightCount = 0;
+
+  for (const { event } of timelineEvents) {
+    if (event.sender === userId) continue;
+
+    const result = evaluatePushRules(userRules, {
+      event,
+      userId,
+      displayName,
+      memberCount,
+      powerLevels,
+      senderPowerLevel: getSenderPl(event.sender),
+    });
+
+    if (result.notify) {
+      notificationCount++;
+      if (result.highlight) highlightCount++;
+    }
+  }
+
+  return {
+    notification_count: notificationCount,
+    highlight_count: highlightCount,
+  };
 }

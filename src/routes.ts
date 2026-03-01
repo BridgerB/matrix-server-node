@@ -20,6 +20,13 @@ import { postReceipt } from "./handlers/receipts.ts";
 import { getPresence, putPresence } from "./handlers/presence.ts";
 import { postUpload, getDownload, getThumbnail, getConfig } from "./handlers/media.ts";
 import { postKeysUpload, postKeysQuery, postKeysClaim, putSendToDevice, getKeysChanges } from "./handlers/e2ee.ts";
+import {
+  getAllPushRules, getGlobalPushRules, getPushRulesByKind, getPushRule,
+  putPushRule, deletePushRule,
+  getPushRuleEnabled, putPushRuleEnabled,
+  getPushRuleActions, putPushRuleActions,
+} from "./handlers/push-rules.ts";
+import { getPushers, postPushersSet } from "./handlers/pushers.ts";
 
 export function registerRoutes(router: Router, storage: Storage, serverName: string): void {
   const auth = requireAuth(storage);
@@ -129,6 +136,22 @@ export function registerRoutes(router: Router, storage: Storage, serverName: str
   router.get("/_matrix/media/v3/download/:serverName/:mediaId/:fileName", getDownload(storage));
   router.get("/_matrix/media/v3/thumbnail/:serverName/:mediaId", getThumbnail(storage));
   router.get("/_matrix/media/v3/config", getConfig(), auth);
+
+  // Push rules (authenticated) — more specific routes must come first
+  router.get("/_matrix/client/v3/pushrules/global/:kind/:ruleId/enabled", getPushRuleEnabled(storage), auth);
+  router.put("/_matrix/client/v3/pushrules/global/:kind/:ruleId/enabled", putPushRuleEnabled(storage), auth);
+  router.get("/_matrix/client/v3/pushrules/global/:kind/:ruleId/actions", getPushRuleActions(storage), auth);
+  router.put("/_matrix/client/v3/pushrules/global/:kind/:ruleId/actions", putPushRuleActions(storage), auth);
+  router.get("/_matrix/client/v3/pushrules/global/:kind/:ruleId", getPushRule(storage), auth);
+  router.put("/_matrix/client/v3/pushrules/global/:kind/:ruleId", putPushRule(storage), auth);
+  router.delete("/_matrix/client/v3/pushrules/global/:kind/:ruleId", deletePushRule(storage), auth);
+  router.get("/_matrix/client/v3/pushrules/global/:kind", getPushRulesByKind(storage), auth);
+  router.get("/_matrix/client/v3/pushrules/global", getGlobalPushRules(storage), auth);
+  router.get("/_matrix/client/v3/pushrules", getAllPushRules(storage), auth);
+
+  // Pushers (authenticated)
+  router.get("/_matrix/client/v3/pushers", getPushers(storage), auth);
+  router.post("/_matrix/client/v3/pushers/set", postPushersSet(storage), auth);
 
   // E2EE - Key management (authenticated)
   router.post("/_matrix/client/v3/keys/upload", postKeysUpload(storage), auth);
