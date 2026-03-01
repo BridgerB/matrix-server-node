@@ -6,6 +6,7 @@ import {
   getMembership, getUserPowerLevel, getPowerLevels, redactEvent,
 } from "../events.ts";
 import { forbidden, notFound, roomNotFound, notJoined, badJson } from "../errors.ts";
+import { indexRelation, bundleAggregations } from "../relations.ts";
 
 // =============================================================================
 // HELPERS
@@ -49,6 +50,7 @@ export function putSendEvent(storage: Storage, serverName: string): Handler {
 
     checkEventAuth(event, eventId, room);
     await storage.storeEvent(event, eventId);
+    await indexRelation(storage, event, eventId);
 
     room.depth++;
     room.forward_extremities = [eventId];
@@ -155,6 +157,7 @@ export function getMessages(storage: Storage): Handler {
 
     const result = await storage.getEventsByRoom(roomId, limit, from, dir);
     const chunk = result.events.map((e) => pduToClientEvent(e.event, e.eventId));
+    await bundleAggregations(storage, chunk, req.userId!);
 
     return {
       status: 200,
@@ -217,7 +220,9 @@ export function getEvent(storage: Storage): Handler {
     const entry = await storage.getEvent(eventId);
     if (!entry || entry.event.room_id !== roomId) throw notFound("Event not found");
 
-    return { status: 200, body: pduToClientEvent(entry.event, entry.eventId) };
+    const clientEvent = pduToClientEvent(entry.event, entry.eventId);
+    await bundleAggregations(storage, [clientEvent], req.userId!);
+    return { status: 200, body: clientEvent };
   };
 }
 
@@ -327,12 +332,17 @@ export function getContext(storage: Storage): Handler {
     const stateEntries = await storage.getAllState(roomId);
     const state = stateEntries.map((e) => pduToClientEvent(e.event, e.eventId));
 
+    const contextEvent = pduToClientEvent(entry.event, entry.eventId);
+    const beforeEvents = eventsBefore.map((e) => pduToClientEvent(e.event, e.eventId));
+    const afterEvents = eventsAfter.map((e) => pduToClientEvent(e.event, e.eventId));
+    await bundleAggregations(storage, [contextEvent, ...beforeEvents, ...afterEvents], userId);
+
     return {
       status: 200,
       body: {
-        event: pduToClientEvent(entry.event, entry.eventId),
-        events_before: eventsBefore.map((e) => pduToClientEvent(e.event, e.eventId)),
-        events_after: eventsAfter.map((e) => pduToClientEvent(e.event, e.eventId)),
+        event: contextEvent,
+        events_before: beforeEvents,
+        events_after: afterEvents,
         state,
         start: eventsBefore.length > 0 ? String(targetIdx - eventsBefore.length) : undefined,
         end: eventsAfter.length > 0 ? String(targetIdx + eventsAfter.length + 1) : undefined,

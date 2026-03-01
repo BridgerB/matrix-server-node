@@ -143,4 +143,14 @@ export interface Storage {
   setPusher(userId: UserId, pusher: Pusher): Promise<void>;
   deletePusher(userId: UserId, appId: string, pushkey: string): Promise<void>;
   deletePusherByKey(appId: string, pushkey: string): Promise<void>;
+
+  // Relations
+  storeRelation(eventId: EventId, roomId: RoomId, relType: string, targetEventId: EventId, key?: string): Promise<void>;
+  getRelatedEvents(
+    roomId: RoomId, eventId: EventId, relType?: string, eventType?: string,
+    limit?: number, from?: string, direction?: "b" | "f",
+  ): Promise<{ events: { event: PDU; eventId: EventId }[]; nextBatch?: string }>;
+  getAnnotationCounts(eventId: EventId): Promise<{ type: string; key: string; count: number }[]>;
+  getLatestEdit(eventId: EventId, sender: UserId): Promise<{ event: PDU; eventId: EventId } | undefined>;
+  getThreadSummary(eventId: EventId, userId: UserId): Promise<{ latestEvent: { event: PDU; eventId: EventId }; count: number; currentUserParticipated: boolean } | undefined>;
 }

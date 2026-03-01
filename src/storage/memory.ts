@@ -36,6 +36,7 @@ export class MemoryStorage implements Storage {
   private fallbackKeysMap = new Map<string, Map<KeyId, string | OneTimeKey>>();
   private toDeviceInbox = new Map<string, ToDeviceEvent[]>();
   private pushersMap = new Map<UserId, Pusher[]>();
+  private relationsMap = new Map<EventId, { eventId: EventId; relType: string; key?: string; sender: UserId; eventType: string; streamPos: number }[]>();
 
   // Users
 
@@ -817,5 +818,118 @@ export class MemoryStorage implements Storage {
       );
       if (idx >= 0) userPushers.splice(idx, 1);
     }
+  }
+
+  // Relations
+
+  async storeRelation(eventId: EventId, roomId: RoomId, relType: string, targetEventId: EventId, key?: string): Promise<void> {
+    const event = this.events.get(eventId);
+    if (!event) return;
+
+    // Find stream position for this event
+    const timeline = this.roomTimeline.get(roomId) ?? [];
+    const entry = timeline.find((e) => e.eventId === eventId);
+    const streamPos = entry?.streamPos ?? this.streamCounter;
+
+    let relations = this.relationsMap.get(targetEventId);
+    if (!relations) {
+      relations = [];
+      this.relationsMap.set(targetEventId, relations);
+    }
+    relations.push({ eventId, relType, key, sender: event.sender, eventType: event.type, streamPos });
+  }
+
+  async getRelatedEvents(
+    roomId: RoomId, eventId: EventId, relType?: string, eventType?: string,
+    limit: number = 50, from?: string, direction: "b" | "f" = "f",
+  ): Promise<{ events: { event: PDU; eventId: EventId }[]; nextBatch?: string }> {
+    let relations = this.relationsMap.get(eventId) ?? [];
+
+    if (relType) relations = relations.filter((r) => r.relType === relType);
+    if (eventType) relations = relations.filter((r) => r.eventType === eventType);
+
+    // Sort by stream position
+    relations = [...relations].sort((a, b) =>
+      direction === "f" ? a.streamPos - b.streamPos : b.streamPos - a.streamPos,
+    );
+
+    // Apply pagination
+    const fromPos = from ? parseInt(from, 10) : undefined;
+    if (fromPos !== undefined) {
+      const startIdx = relations.findIndex((r) =>
+        direction === "f" ? r.streamPos > fromPos : r.streamPos < fromPos,
+      );
+      if (startIdx >= 0) {
+        relations = relations.slice(startIdx);
+      } else {
+        relations = [];
+      }
+    }
+
+    const sliced = relations.slice(0, limit);
+    const events = sliced
+      .map((r) => {
+        const event = this.events.get(r.eventId);
+        if (!event || event.room_id !== roomId) return undefined;
+        return { event, eventId: r.eventId };
+      })
+      .filter((e): e is { event: PDU; eventId: EventId } => e !== undefined);
+
+    const nextBatch = sliced.length === limit && sliced.length > 0
+      ? String(sliced[sliced.length - 1]!.streamPos)
+      : undefined;
+
+    return { events, nextBatch };
+  }
+
+  async getAnnotationCounts(eventId: EventId): Promise<{ type: string; key: string; count: number }[]> {
+    const relations = this.relationsMap.get(eventId) ?? [];
+    const annotations = relations.filter((r) => r.relType === "m.annotation" && r.key);
+
+    const counts = new Map<string, { type: string; key: string; count: number }>();
+    for (const ann of annotations) {
+      const mapKey = `${ann.eventType}\0${ann.key}`;
+      const existing = counts.get(mapKey);
+      if (existing) {
+        existing.count++;
+      } else {
+        counts.set(mapKey, { type: ann.eventType, key: ann.key!, count: 1 });
+      }
+    }
+    return [...counts.values()];
+  }
+
+  async getLatestEdit(eventId: EventId, sender: UserId): Promise<{ event: PDU; eventId: EventId } | undefined> {
+    const relations = this.relationsMap.get(eventId) ?? [];
+    const edits = relations
+      .filter((r) => r.relType === "m.replace" && r.sender === sender)
+      .sort((a, b) => b.streamPos - a.streamPos);
+
+    if (edits.length === 0) return undefined;
+    const latest = edits[0]!;
+    const event = this.events.get(latest.eventId);
+    if (!event) return undefined;
+    return { event, eventId: latest.eventId };
+  }
+
+  async getThreadSummary(eventId: EventId, userId: UserId): Promise<{ latestEvent: { event: PDU; eventId: EventId }; count: number; currentUserParticipated: boolean } | undefined> {
+    const relations = this.relationsMap.get(eventId) ?? [];
+    const threadReplies = relations
+      .filter((r) => r.relType === "m.thread")
+      .sort((a, b) => a.streamPos - b.streamPos);
+
+    if (threadReplies.length === 0) return undefined;
+
+    const latest = threadReplies[threadReplies.length - 1]!;
+    const latestEvent = this.events.get(latest.eventId);
+    if (!latestEvent) return undefined;
+
+    const currentUserParticipated = threadReplies.some((r) => r.sender === userId);
+
+    return {
+      latestEvent: { event: latestEvent, eventId: latest.eventId },
+      count: threadReplies.length,
+      currentUserParticipated,
+    };
   }
 }

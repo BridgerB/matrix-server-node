@@ -27,6 +27,7 @@ import {
   getPushRuleActions, putPushRuleActions,
 } from "./handlers/push-rules.ts";
 import { getPushers, postPushersSet } from "./handlers/pushers.ts";
+import { getRelations } from "./handlers/relations.ts";
 
 export function registerRoutes(router: Router, storage: Storage, serverName: string): void {
   const auth = requireAuth(storage);
@@ -104,6 +105,11 @@ export function registerRoutes(router: Router, storage: Storage, serverName: str
 
   // Redaction
   router.post("/_matrix/client/v3/rooms/:roomId/redact/:eventId/:txnId", postRedact(storage, serverName), auth);
+
+  // Relations (more specific routes first)
+  router.get("/_matrix/client/v3/rooms/:roomId/relations/:eventId/:relType/:eventType", getRelations(storage), auth);
+  router.get("/_matrix/client/v3/rooms/:roomId/relations/:eventId/:relType", getRelations(storage), auth);
+  router.get("/_matrix/client/v3/rooms/:roomId/relations/:eventId", getRelations(storage), auth);
 
   // Filters (authenticated)
   router.post("/_matrix/client/v3/user/:userId/filter", postCreateFilter(storage), auth);

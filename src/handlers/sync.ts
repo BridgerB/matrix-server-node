@@ -7,6 +7,7 @@ import type { RoomPowerLevelsContent } from "../types/state-events.ts";
 import type { PushRulesContent } from "../types/push.ts";
 import { pduToClientEvent } from "../events.ts";
 import { getOrInitRules, evaluatePushRules } from "../push-rules.ts";
+import { bundleAggregations } from "../relations.ts";
 
 const TIMELINE_LIMIT = 20;
 const MAX_TIMEOUT = 30000;
@@ -64,6 +65,7 @@ async function buildInitialSync(
         .map((e) => pduToClientEvent(e.event, e.eventId));
 
       const timelineClientEvents = timelineEvents.map((e) => pduToClientEvent(e.event, e.eventId));
+      await bundleAggregations(storage, timelineClientEvents, userId);
 
       // Check if timeline is limited
       const totalEvents = await storage.getEventsByRoom(roomId, TIMELINE_LIMIT + 1, undefined, "b");
@@ -183,6 +185,7 @@ async function buildIncrementalSync(
       const { events: newEvents, limited } = await storage.getEventsByRoomSince(roomId, since, TIMELINE_LIMIT);
 
       const timelineClientEvents = newEvents.map((e) => pduToClientEvent(e.event, e.eventId));
+      await bundleAggregations(storage, timelineClientEvents, userId);
 
       let stateClientEvents: ClientEvent[] = [];
       if (fullState) {
