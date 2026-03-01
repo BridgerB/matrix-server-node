@@ -1,6 +1,7 @@
 import type { UserId, RoomId, EventId, DeviceId, AccessToken, RefreshToken, Timestamp } from "../types/index.ts";
 import type { UserAccount, DeviceSession, RoomState } from "../types/index.ts";
 import type { PDU, StrippedStateEvent } from "../types/events.ts";
+import type { UserProfile, Device } from "../types/user.ts";
 
 export interface StoredSession extends DeviceSession {
   access_token: AccessToken;
@@ -58,4 +59,19 @@ export interface Storage {
   getEventsByRoomSince(roomId: RoomId, since: number, limit: number): Promise<{ events: { event: PDU; eventId: EventId; streamPos: number }[]; limited: boolean }>;
   getStrippedState(roomId: RoomId): Promise<StrippedStateEvent[]>;
   waitForEvents(since: number, timeoutMs: number): Promise<void>;
+
+  // Profile
+  getProfile(userId: UserId): Promise<UserProfile | undefined>;
+  setDisplayName(userId: UserId, displayname: string | null): Promise<void>;
+  setAvatarUrl(userId: UserId, avatarUrl: string | null): Promise<void>;
+
+  // Devices
+  getDevice(userId: UserId, deviceId: DeviceId): Promise<Device | undefined>;
+  getAllDevices(userId: UserId): Promise<Device[]>;
+  updateDeviceDisplayName(userId: UserId, deviceId: DeviceId, displayName: string): Promise<void>;
+  deleteDeviceSession(userId: UserId, deviceId: DeviceId): Promise<void>;
+
+  // Account
+  updatePassword(userId: UserId, newPasswordHash: string): Promise<void>;
+  deactivateUser(userId: UserId): Promise<void>;
 }

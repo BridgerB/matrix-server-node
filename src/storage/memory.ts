@@ -1,6 +1,7 @@
 import type { UserId, RoomId, EventId, DeviceId, AccessToken, RefreshToken, Timestamp } from "../types/index.ts";
 import type { UserAccount, RoomState } from "../types/index.ts";
 import type { PDU, StrippedStateEvent } from "../types/events.ts";
+import type { UserProfile, Device } from "../types/user.ts";
 import type { Storage, StoredSession } from "./interface.ts";
 import { computeEventId } from "../events.ts";
 
@@ -339,5 +340,105 @@ export class MemoryStorage implements Storage {
 
       this.eventWaiters.add(wake);
     });
+  }
+
+  // Profile
+
+  async getProfile(userId: UserId): Promise<UserProfile | undefined> {
+    const user = this.usersByFullId.get(userId);
+    if (!user) return undefined;
+    const profile: UserProfile = {};
+    if (user.displayname) profile.displayname = user.displayname;
+    if (user.avatar_url) profile.avatar_url = user.avatar_url;
+    return profile;
+  }
+
+  async setDisplayName(userId: UserId, displayname: string | null): Promise<void> {
+    const user = this.usersByFullId.get(userId);
+    if (!user) return;
+    if (displayname === null) {
+      delete user.displayname;
+    } else {
+      user.displayname = displayname;
+    }
+  }
+
+  async setAvatarUrl(userId: UserId, avatarUrl: string | null): Promise<void> {
+    const user = this.usersByFullId.get(userId);
+    if (!user) return;
+    if (avatarUrl === null) {
+      delete user.avatar_url;
+    } else {
+      user.avatar_url = avatarUrl;
+    }
+  }
+
+  // Devices
+
+  async getDevice(userId: UserId, deviceId: DeviceId): Promise<Device | undefined> {
+    for (const session of this.sessions.values()) {
+      if (session.user_id === userId && session.device_id === deviceId) {
+        return {
+          device_id: session.device_id,
+          display_name: session.display_name,
+          last_seen_ip: session.last_seen_ip,
+          last_seen_ts: session.last_seen_ts,
+        };
+      }
+    }
+    return undefined;
+  }
+
+  async getAllDevices(userId: UserId): Promise<Device[]> {
+    const result: Device[] = [];
+    for (const session of this.sessions.values()) {
+      if (session.user_id === userId) {
+        result.push({
+          device_id: session.device_id,
+          display_name: session.display_name,
+          last_seen_ip: session.last_seen_ip,
+          last_seen_ts: session.last_seen_ts,
+        });
+      }
+    }
+    return result;
+  }
+
+  async updateDeviceDisplayName(userId: UserId, deviceId: DeviceId, displayName: string): Promise<void> {
+    for (const session of this.sessions.values()) {
+      if (session.user_id === userId && session.device_id === deviceId) {
+        session.display_name = displayName;
+        return;
+      }
+    }
+  }
+
+  async deleteDeviceSession(userId: UserId, deviceId: DeviceId): Promise<void> {
+    for (const [token, session] of this.sessions) {
+      if (session.user_id === userId && session.device_id === deviceId) {
+        if (session.refresh_token) {
+          this.refreshIndex.delete(session.refresh_token);
+        }
+        this.sessions.delete(token);
+        return;
+      }
+    }
+  }
+
+  // Account
+
+  async updatePassword(userId: UserId, newPasswordHash: string): Promise<void> {
+    const user = this.usersByFullId.get(userId);
+    if (user) {
+      user.password_hash = newPasswordHash;
+    }
+  }
+
+  async deactivateUser(userId: UserId): Promise<void> {
+    const user = this.usersByFullId.get(userId);
+    if (user) {
+      user.is_deactivated = true;
+    }
+    await this.deleteAllSessions(userId);
   }
 }

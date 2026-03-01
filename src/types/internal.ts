@@ -26,6 +26,8 @@ export interface UserAccount {
   account_type: "user" | "guest" | "admin" | "appservice";
   is_deactivated: boolean;
   created_at: Timestamp;
+  displayname?: string;
+  avatar_url?: string;
 }
 
 /** Internal device session */

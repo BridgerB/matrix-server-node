@@ -5,11 +5,13 @@ import { versionsHandler, wellKnownServerHandler, wellKnownClientHandler } from 
 import { getLoginFlows, postLogin } from "./handlers/login.ts";
 import { postRegister } from "./handlers/register.ts";
 import { postLogout, postLogoutAll } from "./handlers/logout.ts";
-import { getWhoAmI } from "./handlers/account.ts";
+import { getWhoAmI, postChangePassword, postDeactivate } from "./handlers/account.ts";
 import { postRefresh } from "./handlers/refresh.ts";
 import { postCreateRoom, getJoinedRooms, postJoin, postLeave, postInvite, postKick, postBan, postUnban } from "./handlers/rooms.ts";
 import { putSendEvent, putStateEvent, getAllState, getStateEvent, getMessages, getMembers, getEvent, postRedact } from "./handlers/room-events.ts";
 import { getSync } from "./handlers/sync.ts";
+import { getProfile, getDisplayName, getAvatarUrl, putDisplayName, putAvatarUrl } from "./handlers/profile.ts";
+import { getDevices, getDevice, putDevice, deleteDevice, deleteDevices } from "./handlers/devices.ts";
 
 export function registerRoutes(router: Router, storage: Storage, serverName: string): void {
   const auth = requireAuth(storage);
@@ -29,6 +31,24 @@ export function registerRoutes(router: Router, storage: Storage, serverName: str
   router.post("/_matrix/client/v3/logout", postLogout(storage), auth);
   router.post("/_matrix/client/v3/logout/all", postLogoutAll(storage), auth);
   router.get("/_matrix/client/v3/account/whoami", getWhoAmI(), auth);
+
+  // Account management (authenticated)
+  router.post("/_matrix/client/v3/account/password", postChangePassword(storage), auth);
+  router.post("/_matrix/client/v3/account/deactivate", postDeactivate(storage), auth);
+
+  // Profile (public GET, authenticated PUT)
+  router.get("/_matrix/client/v3/profile/:userId", getProfile(storage));
+  router.get("/_matrix/client/v3/profile/:userId/displayname", getDisplayName(storage));
+  router.get("/_matrix/client/v3/profile/:userId/avatar_url", getAvatarUrl(storage));
+  router.put("/_matrix/client/v3/profile/:userId/displayname", putDisplayName(storage, serverName), auth);
+  router.put("/_matrix/client/v3/profile/:userId/avatar_url", putAvatarUrl(storage, serverName), auth);
+
+  // Devices (authenticated)
+  router.get("/_matrix/client/v3/devices", getDevices(storage), auth);
+  router.get("/_matrix/client/v3/devices/:deviceId", getDevice(storage), auth);
+  router.put("/_matrix/client/v3/devices/:deviceId", putDevice(storage), auth);
+  router.delete("/_matrix/client/v3/devices/:deviceId", deleteDevice(storage), auth);
+  router.post("/_matrix/client/v3/delete_devices", deleteDevices(storage), auth);
 
   // Rooms
   router.post("/_matrix/client/v3/createRoom", postCreateRoom(storage, serverName), auth);

@@ -123,7 +123,7 @@ export class Router {
 
     // Parse JSON body for methods that typically have one
     let body: unknown = undefined;
-    if (method === "POST" || method === "PUT" || method === "PATCH") {
+    if (method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE") {
       const raw = await readBody(req);
       if (raw.length > 0) {
         const contentType = req.headers["content-type"] ?? "";

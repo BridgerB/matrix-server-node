@@ -1,15 +1,13 @@
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { WhoAmIResponse, AuthType } from "../types/index.ts";
+import type { DeviceId, AuthType } from "../types/index.ts";
 import type { UIAAResponse } from "../types/auth.ts";
-import { badJson, forbidden } from "../errors.ts";
+import { notFound, badJson, forbidden } from "../errors.ts";
 import { generateSessionId } from "../crypto.ts";
 
 const UIAA_FLOWS: { stages: AuthType[] }[] = [
   { stages: ["m.login.dummy"] },
 ];
-
-const MIN_PASSWORD_LENGTH = 8;
 
 async function requireUIAA(
   storage: Storage,
@@ -59,56 +57,46 @@ async function requireUIAA(
   return true;
 }
 
-export function getWhoAmI(): Handler {
+export function getDevices(storage: Storage): Handler {
   return async (req) => {
-    const body: WhoAmIResponse = {
-      user_id: req.userId!,
-      device_id: req.deviceId,
-    };
-    return { status: 200, body };
+    const devices = await storage.getAllDevices(req.userId!);
+    return { status: 200, body: { devices } };
   };
 }
 
-export function postChangePassword(storage: Storage): Handler {
+export function getDevice(storage: Storage): Handler {
   return async (req) => {
+    const deviceId = req.params["deviceId"]! as DeviceId;
+    const device = await storage.getDevice(req.userId!, deviceId);
+    if (!device) throw notFound("Device not found");
+    return { status: 200, body: device };
+  };
+}
+
+export function putDevice(storage: Storage): Handler {
+  return async (req) => {
+    const deviceId = req.params["deviceId"]! as DeviceId;
     const body = req.body as Record<string, unknown>;
 
-    try {
-      await requireUIAA(storage, body);
-    } catch (err: unknown) {
-      if (err && typeof err === "object" && "uiaaResponse" in err) {
-        return { status: 401, body: (err as { uiaaResponse: unknown }).uiaaResponse };
-      }
-      throw err;
-    }
+    const device = await storage.getDevice(req.userId!, deviceId);
+    if (!device) throw notFound("Device not found");
 
-    const newPassword = body["new_password"] as string | undefined;
-    if (!newPassword) throw badJson("Missing 'new_password' field");
-    if (newPassword.length < MIN_PASSWORD_LENGTH) {
-      throw badJson(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
-    }
-
-    await storage.updatePassword(req.userId!, newPassword); // TODO: hash with argon2
-
-    // logout_devices defaults to true
-    const logoutDevices = body["logout_devices"] !== false;
-    if (logoutDevices) {
-      const currentToken = req.accessToken!;
-      const sessions = await storage.getSessionsByUser(req.userId!);
-      for (const session of sessions) {
-        if (session.access_token !== currentToken) {
-          await storage.deleteSession(session.access_token);
-        }
-      }
+    const displayName = body["display_name"] as string | undefined;
+    if (displayName !== undefined) {
+      await storage.updateDeviceDisplayName(req.userId!, deviceId, displayName);
     }
 
     return { status: 200, body: {} };
   };
 }
 
-export function postDeactivate(storage: Storage): Handler {
+export function deleteDevice(storage: Storage): Handler {
   return async (req) => {
+    const deviceId = req.params["deviceId"]! as DeviceId;
     const body = req.body as Record<string, unknown>;
+
+    const device = await storage.getDevice(req.userId!, deviceId);
+    if (!device) throw notFound("Device not found");
 
     try {
       await requireUIAA(storage, body);
@@ -119,8 +107,31 @@ export function postDeactivate(storage: Storage): Handler {
       throw err;
     }
 
-    await storage.deactivateUser(req.userId!);
+    await storage.deleteDeviceSession(req.userId!, deviceId);
+    return { status: 200, body: {} };
+  };
+}
 
-    return { status: 200, body: { id_server_unbind_result: "no-support" } };
+export function deleteDevices(storage: Storage): Handler {
+  return async (req) => {
+    const body = req.body as Record<string, unknown>;
+    const deviceIds = body["devices"] as string[] | undefined;
+    if (!deviceIds || !Array.isArray(deviceIds)) {
+      throw badJson("Missing 'devices' array");
+    }
+
+    try {
+      await requireUIAA(storage, body);
+    } catch (err: unknown) {
+      if (err && typeof err === "object" && "uiaaResponse" in err) {
+        return { status: 401, body: (err as { uiaaResponse: unknown }).uiaaResponse };
+      }
+      throw err;
+    }
+
+    for (const deviceId of deviceIds) {
+      await storage.deleteDeviceSession(req.userId!, deviceId as DeviceId);
+    }
+    return { status: 200, body: {} };
   };
 }
