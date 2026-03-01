@@ -75,3 +75,11 @@ export function missingParam(msg: string) {
 export function invalidParam(msg: string) {
   return new MatrixError("M_INVALID_PARAM", msg, 400);
 }
+
+export function roomNotFound(msg = "Room not found") {
+  return new MatrixError("M_NOT_FOUND", msg, 404);
+}
+
+export function notJoined(msg = "You are not joined to this room") {
+  return new MatrixError("M_FORBIDDEN", msg, 403);
+}

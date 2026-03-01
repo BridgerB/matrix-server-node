@@ -7,6 +7,8 @@ import { postRegister } from "./handlers/register.ts";
 import { postLogout, postLogoutAll } from "./handlers/logout.ts";
 import { getWhoAmI } from "./handlers/account.ts";
 import { postRefresh } from "./handlers/refresh.ts";
+import { postCreateRoom, getJoinedRooms, postJoin, postLeave, postInvite, postKick, postBan, postUnban } from "./handlers/rooms.ts";
+import { putSendEvent, putStateEvent, getAllState, getStateEvent, getMessages, getMembers, getEvent, postRedact } from "./handlers/room-events.ts";
 
 export function registerRoutes(router: Router, storage: Storage, serverName: string): void {
   const auth = requireAuth(storage);
@@ -26,4 +28,33 @@ export function registerRoutes(router: Router, storage: Storage, serverName: str
   router.post("/_matrix/client/v3/logout", postLogout(storage), auth);
   router.post("/_matrix/client/v3/logout/all", postLogoutAll(storage), auth);
   router.get("/_matrix/client/v3/account/whoami", getWhoAmI(), auth);
+
+  // Rooms
+  router.post("/_matrix/client/v3/createRoom", postCreateRoom(storage, serverName), auth);
+  router.get("/_matrix/client/v3/joined_rooms", getJoinedRooms(storage), auth);
+
+  // Membership
+  router.post("/_matrix/client/v3/join/:roomIdOrAlias", postJoin(storage, serverName), auth);
+  router.post("/_matrix/client/v3/rooms/:roomId/join", postJoin(storage, serverName), auth);
+  router.post("/_matrix/client/v3/rooms/:roomId/leave", postLeave(storage, serverName), auth);
+  router.post("/_matrix/client/v3/rooms/:roomId/invite", postInvite(storage, serverName), auth);
+  router.post("/_matrix/client/v3/rooms/:roomId/kick", postKick(storage, serverName), auth);
+  router.post("/_matrix/client/v3/rooms/:roomId/ban", postBan(storage, serverName), auth);
+  router.post("/_matrix/client/v3/rooms/:roomId/unban", postUnban(storage, serverName), auth);
+
+  // Send events
+  router.put("/_matrix/client/v3/rooms/:roomId/send/:eventType/:txnId", putSendEvent(storage, serverName), auth);
+  router.put("/_matrix/client/v3/rooms/:roomId/state/:eventType/:stateKey", putStateEvent(storage, serverName), auth);
+  router.put("/_matrix/client/v3/rooms/:roomId/state/:eventType", putStateEvent(storage, serverName), auth);
+
+  // Read events
+  router.get("/_matrix/client/v3/rooms/:roomId/state", getAllState(storage), auth);
+  router.get("/_matrix/client/v3/rooms/:roomId/state/:eventType/:stateKey", getStateEvent(storage), auth);
+  router.get("/_matrix/client/v3/rooms/:roomId/state/:eventType", getStateEvent(storage), auth);
+  router.get("/_matrix/client/v3/rooms/:roomId/messages", getMessages(storage), auth);
+  router.get("/_matrix/client/v3/rooms/:roomId/members", getMembers(storage), auth);
+  router.get("/_matrix/client/v3/rooms/:roomId/event/:eventId", getEvent(storage), auth);
+
+  // Redaction
+  router.post("/_matrix/client/v3/rooms/:roomId/redact/:eventId/:txnId", postRedact(storage, serverName), auth);
 }

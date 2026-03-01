@@ -11,3 +11,7 @@ export function generateSessionId(): string {
 export function generateDeviceId(): string {
   return randomBytes(8).toString("base64url").toUpperCase();
 }
+
+export function generateRoomId(serverName: string): string {
+  return "!" + randomBytes(18).toString("base64url") + ":" + serverName;
+}

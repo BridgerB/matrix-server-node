@@ -1,5 +1,6 @@
-import type { UserId, AccessToken, RefreshToken, Timestamp } from "../types/index.ts";
-import type { UserAccount, DeviceSession } from "../types/index.ts";
+import type { UserId, RoomId, EventId, DeviceId, AccessToken, RefreshToken, Timestamp } from "../types/index.ts";
+import type { UserAccount, DeviceSession, RoomState } from "../types/index.ts";
+import type { PDU } from "../types/events.ts";
 
 export interface StoredSession extends DeviceSession {
   access_token: AccessToken;
@@ -28,4 +29,27 @@ export interface Storage {
   getUIAASession(sessionId: string): Promise<{ completed: string[] } | undefined>;
   addUIAACompleted(sessionId: string, stageType: string): Promise<void>;
   deleteUIAASession(sessionId: string): Promise<void>;
+
+  // Rooms
+  createRoom(state: RoomState): Promise<void>;
+  getRoom(roomId: RoomId): Promise<RoomState | undefined>;
+  getRoomsForUser(userId: UserId): Promise<RoomId[]>;
+
+  // Events
+  storeEvent(event: PDU, eventId: EventId): Promise<void>;
+  getEvent(eventId: EventId): Promise<{ event: PDU; eventId: EventId } | undefined>;
+  getEventsByRoom(roomId: RoomId, limit: number, from?: number, direction?: "b" | "f"): Promise<{ events: { event: PDU; eventId: EventId }[]; end?: number }>;
+  getStreamPosition(): Promise<number>;
+
+  // State
+  getStateEvent(roomId: RoomId, eventType: string, stateKey: string): Promise<{ event: PDU; eventId: EventId } | undefined>;
+  getAllState(roomId: RoomId): Promise<{ event: PDU; eventId: EventId }[]>;
+  setStateEvent(roomId: RoomId, event: PDU, eventId: EventId): Promise<void>;
+
+  // Members
+  getMemberEvents(roomId: RoomId): Promise<{ event: PDU; eventId: EventId }[]>;
+
+  // Transaction idempotency
+  getTxnEventId(userId: UserId, deviceId: DeviceId, txnId: string): Promise<EventId | undefined>;
+  setTxnEventId(userId: UserId, deviceId: DeviceId, txnId: string, eventId: EventId): Promise<void>;
 }
