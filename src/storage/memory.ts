@@ -3,6 +3,7 @@ import type { UserAccount, RoomState } from "../types/index.ts";
 import type { PDU, StrippedStateEvent } from "../types/events.ts";
 import type { UserProfile, Device } from "../types/user.ts";
 import type { JsonObject } from "../types/json.ts";
+import type { PresenceState } from "../types/ephemeral.ts";
 import type { Storage, StoredSession } from "./interface.ts";
 import { computeEventId } from "../events.ts";
 
@@ -22,6 +23,9 @@ export class MemoryStorage implements Storage {
   private publicRooms = new Set<RoomId>();
   private globalAccountData = new Map<UserId, Map<string, JsonObject>>();
   private roomAccountDataMap = new Map<string, Map<string, JsonObject>>();
+  private typingTimers = new Map<RoomId, Map<UserId, ReturnType<typeof setTimeout>>>();
+  private receiptsMap = new Map<RoomId, Map<string, { eventId: EventId; ts: Timestamp }>>();
+  private presenceMap = new Map<UserId, { presence: PresenceState; status_msg?: string; last_active_ts?: Timestamp }>();
 
   // Users
 
@@ -542,5 +546,84 @@ export class MemoryStorage implements Storage {
       result.push({ type, content });
     }
     return result;
+  }
+
+  // Typing
+
+  private wakeWaiters(): void {
+    for (const waiter of this.eventWaiters) {
+      waiter();
+    }
+  }
+
+  async setTyping(roomId: RoomId, userId: UserId, typing: boolean, timeout?: number): Promise<void> {
+    let roomTyping = this.typingTimers.get(roomId);
+    if (!roomTyping) {
+      roomTyping = new Map();
+      this.typingTimers.set(roomId, roomTyping);
+    }
+
+    // Clear existing timer
+    const existing = roomTyping.get(userId);
+    if (existing) {
+      clearTimeout(existing);
+      roomTyping.delete(userId);
+    }
+
+    if (typing) {
+      const ms = Math.min(timeout ?? 30000, 120000);
+      const timer = setTimeout(() => {
+        roomTyping!.delete(userId);
+        this.wakeWaiters();
+      }, ms);
+      roomTyping.set(userId, timer);
+    }
+
+    this.wakeWaiters();
+  }
+
+  async getTypingUsers(roomId: RoomId): Promise<UserId[]> {
+    const roomTyping = this.typingTimers.get(roomId);
+    if (!roomTyping) return [];
+    return [...roomTyping.keys()];
+  }
+
+  // Receipts
+
+  async setReceipt(roomId: RoomId, userId: UserId, eventId: EventId, receiptType: string, ts: Timestamp): Promise<void> {
+    let roomReceipts = this.receiptsMap.get(roomId);
+    if (!roomReceipts) {
+      roomReceipts = new Map();
+      this.receiptsMap.set(roomId, roomReceipts);
+    }
+    const key = `${userId}\0${receiptType}`;
+    roomReceipts.set(key, { eventId, ts });
+    this.wakeWaiters();
+  }
+
+  async getReceipts(roomId: RoomId): Promise<{ eventId: EventId; receiptType: string; userId: UserId; ts: Timestamp }[]> {
+    const roomReceipts = this.receiptsMap.get(roomId);
+    if (!roomReceipts) return [];
+    const result: { eventId: EventId; receiptType: string; userId: UserId; ts: Timestamp }[] = [];
+    for (const [key, value] of roomReceipts) {
+      const [userId, receiptType] = key.split("\0") as [UserId, string];
+      result.push({ eventId: value.eventId, receiptType, userId, ts: value.ts });
+    }
+    return result;
+  }
+
+  // Presence
+
+  async setPresence(userId: UserId, presence: PresenceState, statusMsg?: string): Promise<void> {
+    this.presenceMap.set(userId, {
+      presence,
+      status_msg: statusMsg,
+      last_active_ts: Date.now(),
+    });
+    this.wakeWaiters();
+  }
+
+  async getPresence(userId: UserId): Promise<{ presence: PresenceState; status_msg?: string; last_active_ts?: Timestamp } | undefined> {
+    return this.presenceMap.get(userId);
   }
 }

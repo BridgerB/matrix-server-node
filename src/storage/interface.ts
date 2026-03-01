@@ -3,6 +3,7 @@ import type { UserAccount, DeviceSession, RoomState } from "../types/index.ts";
 import type { PDU, StrippedStateEvent } from "../types/events.ts";
 import type { UserProfile, Device } from "../types/user.ts";
 import type { JsonObject } from "../types/json.ts";
+import type { PresenceState } from "../types/ephemeral.ts";
 
 export interface StoredSession extends DeviceSession {
   access_token: AccessToken;
@@ -95,4 +96,16 @@ export interface Storage {
   getRoomAccountData(userId: UserId, roomId: RoomId, type: string): Promise<JsonObject | undefined>;
   setRoomAccountData(userId: UserId, roomId: RoomId, type: string, content: JsonObject): Promise<void>;
   getAllRoomAccountData(userId: UserId, roomId: RoomId): Promise<{ type: string; content: JsonObject }[]>;
+
+  // Typing
+  setTyping(roomId: RoomId, userId: UserId, typing: boolean, timeout?: number): Promise<void>;
+  getTypingUsers(roomId: RoomId): Promise<UserId[]>;
+
+  // Receipts
+  setReceipt(roomId: RoomId, userId: UserId, eventId: EventId, receiptType: string, ts: Timestamp): Promise<void>;
+  getReceipts(roomId: RoomId): Promise<{ eventId: EventId; receiptType: string; userId: UserId; ts: Timestamp }[]>;
+
+  // Presence
+  setPresence(userId: UserId, presence: PresenceState, statusMsg?: string): Promise<void>;
+  getPresence(userId: UserId): Promise<{ presence: PresenceState; status_msg?: string; last_active_ts?: Timestamp } | undefined>;
 }

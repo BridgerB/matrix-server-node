@@ -14,6 +14,9 @@ import { getProfile, getDisplayName, getAvatarUrl, putDisplayName, putAvatarUrl 
 import { getDevices, getDevice, putDevice, deleteDevice, deleteDevices } from "./handlers/devices.ts";
 import { getDirectoryRoom, putDirectoryRoom, deleteDirectoryRoom, getDirectoryListRoom, putDirectoryListRoom, getPublicRooms, postPublicRooms } from "./handlers/directory.ts";
 import { getGlobalAccountData, putGlobalAccountData, getRoomAccountData, putRoomAccountData, getTags, putTag, deleteTag } from "./handlers/account-data.ts";
+import { putTyping } from "./handlers/typing.ts";
+import { postReceipt } from "./handlers/receipts.ts";
+import { getPresence, putPresence } from "./handlers/presence.ts";
 
 export function registerRoutes(router: Router, storage: Storage, serverName: string): void {
   const auth = requireAuth(storage);
@@ -100,6 +103,16 @@ export function registerRoutes(router: Router, storage: Storage, serverName: str
   router.get("/_matrix/client/v3/user/:userId/rooms/:roomId/tags", getTags(storage), auth);
   router.put("/_matrix/client/v3/user/:userId/rooms/:roomId/tags/:tag", putTag(storage), auth);
   router.delete("/_matrix/client/v3/user/:userId/rooms/:roomId/tags/:tag", deleteTag(storage), auth);
+
+  // Typing (authenticated)
+  router.put("/_matrix/client/v3/rooms/:roomId/typing/:userId", putTyping(storage), auth);
+
+  // Receipts (authenticated)
+  router.post("/_matrix/client/v3/rooms/:roomId/receipt/:receiptType/:eventId", postReceipt(storage), auth);
+
+  // Presence (authenticated)
+  router.get("/_matrix/client/v3/presence/:userId/status", getPresence(storage), auth);
+  router.put("/_matrix/client/v3/presence/:userId/status", putPresence(storage), auth);
 
   // Sync
   router.get("/_matrix/client/v3/sync", getSync(storage, serverName), auth);

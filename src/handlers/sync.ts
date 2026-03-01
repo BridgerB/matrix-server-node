@@ -85,18 +85,54 @@ async function buildInitialSync(
   const globalData = await storage.getAllGlobalAccountData(userId);
   const accountDataEvents = globalData.map((d) => ({ type: d.type, content: d.content }) as unknown as ClientEvent);
 
-  // Room account data for joined rooms
+  // Room account data + ephemeral for joined rooms
+  const seenUsers = new Set<UserId>();
   for (const roomId of Object.keys(join)) {
     const roomData = await storage.getAllRoomAccountData(userId, roomId);
     if (roomData.length > 0) {
       const roomDataEvents = roomData.map((d) => ({ type: d.type, content: d.content }) as unknown as ClientEvent);
       join[roomId]!.account_data = { events: roomDataEvents };
     }
+
+    // Ephemeral: typing + receipts
+    const ephemeralEvents: ClientEvent[] = [];
+
+    const typingUsers = await storage.getTypingUsers(roomId as RoomId);
+    ephemeralEvents.push({ type: "m.typing", content: { user_ids: typingUsers } } as unknown as ClientEvent);
+
+    const receipts = await storage.getReceipts(roomId as RoomId);
+    if (receipts.length > 0) {
+      ephemeralEvents.push({ type: "m.receipt", content: buildReceiptContent(receipts) } as unknown as ClientEvent);
+    }
+
+    join[roomId]!.ephemeral = { events: ephemeralEvents };
+
+    // Collect users for presence
+    const members = await storage.getMemberEvents(roomId as RoomId);
+    for (const m of members) {
+      const membership = (m.event.content as Record<string, unknown>)["membership"];
+      if (membership === "join" && m.event.state_key) {
+        seenUsers.add(m.event.state_key as UserId);
+      }
+    }
+  }
+
+  // Presence for all room members
+  const presenceEvents: ClientEvent[] = [];
+  for (const uid of seenUsers) {
+    const p = await storage.getPresence(uid);
+    if (p) {
+      const content: Record<string, unknown> = { presence: p.presence };
+      if (p.status_msg) content["status_msg"] = p.status_msg;
+      if (p.last_active_ts) content["last_active_ago"] = Date.now() - p.last_active_ts;
+      presenceEvents.push({ type: "m.presence", content, sender: uid } as unknown as ClientEvent);
+    }
   }
 
   return {
     next_batch: String(nextBatch),
     account_data: accountDataEvents.length > 0 ? { events: accountDataEvents } : undefined,
+    presence: presenceEvents.length > 0 ? { events: presenceEvents } : undefined,
     rooms: {
       join: Object.keys(join).length > 0 ? join : undefined,
       invite: Object.keys(invite).length > 0 ? invite : undefined,
@@ -111,27 +147,17 @@ async function buildIncrementalSync(
   nextBatch: number,
   fullState: boolean,
 ): Promise<SyncResponse> {
-  if (nextBatch <= since && !fullState) {
-    return { next_batch: String(nextBatch) };
-  }
-
   const userRooms = await storage.getRoomsForUserWithMembership(userId);
 
   const join: Record<RoomId, JoinedRoom> = {};
   const invite: Record<RoomId, InvitedRoom> = {};
   const leave: Record<RoomId, LeftRoom> = {};
+  const seenUsers = new Set<UserId>();
 
   for (const { roomId, membership } of userRooms) {
-    const { events: newEvents, limited } = await storage.getEventsByRoomSince(roomId, since, TIMELINE_LIMIT);
-
-    const userMemberEvents = newEvents.filter(
-      (e) => e.event.type === "m.room.member" && e.event.state_key === userId,
-    );
-    const membershipChanged = userMemberEvents.length > 0;
-
-    if (newEvents.length === 0 && !fullState) continue;
-
     if (membership === "join") {
+      const { events: newEvents, limited } = await storage.getEventsByRoomSince(roomId, since, TIMELINE_LIMIT);
+
       const timelineClientEvents = newEvents.map((e) => pduToClientEvent(e.event, e.eventId));
 
       let stateClientEvents: ClientEvent[] = [];
@@ -147,7 +173,18 @@ async function buildIncrementalSync(
         ? String(newEvents[0]!.streamPos - 1)
         : undefined;
 
-      if (timelineClientEvents.length > 0 || stateClientEvents.length > 0) {
+      // Ephemeral: typing + receipts
+      const ephemeralEvents: ClientEvent[] = [];
+      const typingUsers = await storage.getTypingUsers(roomId);
+      ephemeralEvents.push({ type: "m.typing", content: { user_ids: typingUsers } } as unknown as ClientEvent);
+
+      const receipts = await storage.getReceipts(roomId);
+      if (receipts.length > 0) {
+        ephemeralEvents.push({ type: "m.receipt", content: buildReceiptContent(receipts) } as unknown as ClientEvent);
+      }
+
+      // Always include joined rooms in incremental sync (for ephemeral data)
+      if (timelineClientEvents.length > 0 || stateClientEvents.length > 0 || ephemeralEvents.length > 0) {
         join[roomId] = {
           state: stateClientEvents.length > 0 ? { events: stateClientEvents } : undefined,
           timeline: {
@@ -155,14 +192,32 @@ async function buildIncrementalSync(
             limited: limited || undefined,
             prev_batch: prevBatch,
           },
+          ephemeral: { events: ephemeralEvents },
         };
       }
+
+      // Collect users for presence
+      const members = await storage.getMemberEvents(roomId);
+      for (const m of members) {
+        const mem = (m.event.content as Record<string, unknown>)["membership"];
+        if (mem === "join" && m.event.state_key) {
+          seenUsers.add(m.event.state_key as UserId);
+        }
+      }
     } else if (membership === "invite") {
+      const { events: newEvents } = await storage.getEventsByRoomSince(roomId, since, TIMELINE_LIMIT);
+      const membershipChanged = newEvents.some(
+        (e) => e.event.type === "m.room.member" && e.event.state_key === userId,
+      );
       if (membershipChanged) {
         const stripped = await storage.getStrippedState(roomId);
         invite[roomId] = { invite_state: { events: stripped } };
       }
     } else if (membership === "leave" || membership === "ban") {
+      const { events: newEvents, limited } = await storage.getEventsByRoomSince(roomId, since, TIMELINE_LIMIT);
+      const membershipChanged = newEvents.some(
+        (e) => e.event.type === "m.room.member" && e.event.state_key === userId,
+      );
       if (membershipChanged) {
         const timelineClientEvents = newEvents.map((e) => pduToClientEvent(e.event, e.eventId));
         leave[roomId] = {
@@ -175,12 +230,37 @@ async function buildIncrementalSync(
     }
   }
 
+  // Presence for all room members
+  const presenceEvents: ClientEvent[] = [];
+  for (const uid of seenUsers) {
+    const p = await storage.getPresence(uid);
+    if (p) {
+      const content: Record<string, unknown> = { presence: p.presence };
+      if (p.status_msg) content["status_msg"] = p.status_msg;
+      if (p.last_active_ts) content["last_active_ago"] = Date.now() - p.last_active_ts;
+      presenceEvents.push({ type: "m.presence", content, sender: uid } as unknown as ClientEvent);
+    }
+  }
+
   return {
     next_batch: String(nextBatch),
+    presence: presenceEvents.length > 0 ? { events: presenceEvents } : undefined,
     rooms: {
       join: Object.keys(join).length > 0 ? join : undefined,
       invite: Object.keys(invite).length > 0 ? invite : undefined,
       leave: Object.keys(leave).length > 0 ? leave : undefined,
     },
   };
+}
+
+function buildReceiptContent(
+  receipts: { eventId: string; receiptType: string; userId: string; ts: number }[],
+): Record<string, unknown> {
+  const content: Record<string, Record<string, Record<string, { ts: number }>>> = {};
+  for (const r of receipts) {
+    if (!content[r.eventId]) content[r.eventId] = {};
+    if (!content[r.eventId]![r.receiptType]) content[r.eventId]![r.receiptType] = {};
+    content[r.eventId]![r.receiptType]![r.userId] = { ts: r.ts };
+  }
+  return content;
 }
