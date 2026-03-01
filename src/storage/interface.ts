@@ -1,4 +1,4 @@
-import type { UserId, RoomId, EventId, DeviceId, AccessToken, RefreshToken, Timestamp } from "../types/index.ts";
+import type { UserId, RoomId, RoomAlias, EventId, DeviceId, AccessToken, RefreshToken, Timestamp, ServerName } from "../types/index.ts";
 import type { UserAccount, DeviceSession, RoomState } from "../types/index.ts";
 import type { PDU, StrippedStateEvent } from "../types/events.ts";
 import type { UserProfile, Device } from "../types/user.ts";
@@ -74,4 +74,16 @@ export interface Storage {
   // Account
   updatePassword(userId: UserId, newPasswordHash: string): Promise<void>;
   deactivateUser(userId: UserId): Promise<void>;
+
+  // Aliases
+  createRoomAlias(roomAlias: RoomAlias, roomId: RoomId, servers: ServerName[], creator: UserId): Promise<void>;
+  deleteRoomAlias(roomAlias: RoomAlias): Promise<boolean>;
+  getRoomByAlias(roomAlias: RoomAlias): Promise<{ room_id: RoomId; servers: ServerName[] } | undefined>;
+  getAliasesForRoom(roomId: RoomId): Promise<RoomAlias[]>;
+  getAliasCreator(roomAlias: RoomAlias): Promise<UserId | undefined>;
+
+  // Directory
+  setRoomVisibility(roomId: RoomId, visibility: "public" | "private"): Promise<void>;
+  getRoomVisibility(roomId: RoomId): Promise<"public" | "private">;
+  getPublicRoomIds(): Promise<RoomId[]>;
 }

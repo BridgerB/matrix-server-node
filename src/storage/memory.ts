@@ -1,4 +1,4 @@
-import type { UserId, RoomId, EventId, DeviceId, AccessToken, RefreshToken, Timestamp } from "../types/index.ts";
+import type { UserId, RoomId, RoomAlias, EventId, DeviceId, AccessToken, RefreshToken, Timestamp, ServerName } from "../types/index.ts";
 import type { UserAccount, RoomState } from "../types/index.ts";
 import type { PDU, StrippedStateEvent } from "../types/events.ts";
 import type { UserProfile, Device } from "../types/user.ts";
@@ -17,6 +17,8 @@ export class MemoryStorage implements Storage {
   private streamCounter = 0;
   private txnMap = new Map<string, EventId>();
   private eventWaiters = new Set<() => void>();
+  private aliases = new Map<RoomAlias, { room_id: RoomId; servers: ServerName[]; creator: UserId }>();
+  private publicRooms = new Set<RoomId>();
 
   // Users
 
@@ -440,5 +442,51 @@ export class MemoryStorage implements Storage {
       user.is_deactivated = true;
     }
     await this.deleteAllSessions(userId);
+  }
+
+  // Aliases
+
+  async createRoomAlias(roomAlias: RoomAlias, roomId: RoomId, servers: ServerName[], creator: UserId): Promise<void> {
+    this.aliases.set(roomAlias, { room_id: roomId, servers, creator });
+  }
+
+  async deleteRoomAlias(roomAlias: RoomAlias): Promise<boolean> {
+    return this.aliases.delete(roomAlias);
+  }
+
+  async getRoomByAlias(roomAlias: RoomAlias): Promise<{ room_id: RoomId; servers: ServerName[] } | undefined> {
+    const entry = this.aliases.get(roomAlias);
+    if (!entry) return undefined;
+    return { room_id: entry.room_id, servers: entry.servers };
+  }
+
+  async getAliasesForRoom(roomId: RoomId): Promise<RoomAlias[]> {
+    const result: RoomAlias[] = [];
+    for (const [alias, entry] of this.aliases) {
+      if (entry.room_id === roomId) result.push(alias);
+    }
+    return result;
+  }
+
+  async getAliasCreator(roomAlias: RoomAlias): Promise<UserId | undefined> {
+    return this.aliases.get(roomAlias)?.creator;
+  }
+
+  // Directory
+
+  async setRoomVisibility(roomId: RoomId, visibility: "public" | "private"): Promise<void> {
+    if (visibility === "public") {
+      this.publicRooms.add(roomId);
+    } else {
+      this.publicRooms.delete(roomId);
+    }
+  }
+
+  async getRoomVisibility(roomId: RoomId): Promise<"public" | "private"> {
+    return this.publicRooms.has(roomId) ? "public" : "private";
+  }
+
+  async getPublicRoomIds(): Promise<RoomId[]> {
+    return [...this.publicRooms];
   }
 }

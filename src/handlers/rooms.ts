@@ -6,7 +6,7 @@ import type { RoomPowerLevelsContent } from "../types/state-events.ts";
 import type { RoomState } from "../types/internal.ts";
 import { generateRoomId } from "../crypto.ts";
 import { buildEvent, selectAuthEvents, checkEventAuth, getMembership } from "../events.ts";
-import { badJson, forbidden, roomNotFound, missingParam } from "../errors.ts";
+import { badJson, forbidden, roomNotFound, missingParam, notFound } from "../errors.ts";
 
 // =============================================================================
 // HELPERS
@@ -173,6 +173,22 @@ export function postCreateRoom(storage: Storage, serverName: string): Handler {
       }
     }
 
+    // 11. Room alias
+    if (body.room_alias_name) {
+      const roomAlias = `#${body.room_alias_name}:${serverName}`;
+      const existing = await storage.getRoomByAlias(roomAlias);
+      if (existing) throw badJson(`Room alias ${roomAlias} already exists`);
+      await storage.createRoomAlias(roomAlias, roomId, [serverName], userId);
+      await sendStateEvent(storage, serverName, ctx, userId, "m.room.canonical_alias", "", {
+        alias: roomAlias,
+      });
+    }
+
+    // 12. Directory visibility
+    if (body.visibility === "public") {
+      await storage.setRoomVisibility(roomId, "public");
+    }
+
     return { status: 200, body: { room_id: roomId } };
   };
 }
@@ -218,12 +234,19 @@ async function sendMembershipEvent(
 
 export function postJoin(storage: Storage, serverName: string): Handler {
   return async (req) => {
-    const roomId = req.params["roomIdOrAlias"] ?? req.params["roomId"];
-    if (!roomId) throw badJson("Missing room ID");
-    if (!roomId.startsWith("!")) throw badJson("Room aliases are not yet supported");
+    const roomIdOrAlias = req.params["roomIdOrAlias"] ?? req.params["roomId"];
+    if (!roomIdOrAlias) throw badJson("Missing room ID or alias");
 
-    const eventId = await sendMembershipEvent(storage, serverName, roomId, req.userId!, req.userId!, "join");
-    void eventId;
+    let roomId: string;
+    if (roomIdOrAlias.startsWith("#")) {
+      const resolved = await storage.getRoomByAlias(roomIdOrAlias);
+      if (!resolved) throw notFound(`Room alias ${roomIdOrAlias} not found`);
+      roomId = resolved.room_id;
+    } else {
+      roomId = roomIdOrAlias;
+    }
+
+    await sendMembershipEvent(storage, serverName, roomId, req.userId!, req.userId!, "join");
     return { status: 200, body: { room_id: roomId } };
   };
 }

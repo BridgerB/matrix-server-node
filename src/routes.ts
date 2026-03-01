@@ -12,6 +12,7 @@ import { putSendEvent, putStateEvent, getAllState, getStateEvent, getMessages, g
 import { getSync } from "./handlers/sync.ts";
 import { getProfile, getDisplayName, getAvatarUrl, putDisplayName, putAvatarUrl } from "./handlers/profile.ts";
 import { getDevices, getDevice, putDevice, deleteDevice, deleteDevices } from "./handlers/devices.ts";
+import { getDirectoryRoom, putDirectoryRoom, deleteDirectoryRoom, getDirectoryListRoom, putDirectoryListRoom, getPublicRooms, postPublicRooms } from "./handlers/directory.ts";
 
 export function registerRoutes(router: Router, storage: Storage, serverName: string): void {
   const auth = requireAuth(storage);
@@ -49,6 +50,15 @@ export function registerRoutes(router: Router, storage: Storage, serverName: str
   router.put("/_matrix/client/v3/devices/:deviceId", putDevice(storage), auth);
   router.delete("/_matrix/client/v3/devices/:deviceId", deleteDevice(storage), auth);
   router.post("/_matrix/client/v3/delete_devices", deleteDevices(storage), auth);
+
+  // Directory (public GET, authenticated PUT/DELETE)
+  router.get("/_matrix/client/v3/directory/room/:roomAlias", getDirectoryRoom(storage));
+  router.put("/_matrix/client/v3/directory/room/:roomAlias", putDirectoryRoom(storage, serverName), auth);
+  router.delete("/_matrix/client/v3/directory/room/:roomAlias", deleteDirectoryRoom(storage, serverName), auth);
+  router.get("/_matrix/client/v3/directory/list/room/:roomId", getDirectoryListRoom(storage));
+  router.put("/_matrix/client/v3/directory/list/room/:roomId", putDirectoryListRoom(storage), auth);
+  router.get("/_matrix/client/v3/publicRooms", getPublicRooms(storage));
+  router.post("/_matrix/client/v3/publicRooms", postPublicRooms(storage), auth);
 
   // Rooms
   router.post("/_matrix/client/v3/createRoom", postCreateRoom(storage, serverName), auth);
