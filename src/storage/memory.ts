@@ -27,6 +27,8 @@ export class MemoryStorage implements Storage {
   private receiptsMap = new Map<RoomId, Map<string, { eventId: EventId; ts: Timestamp }>>();
   private presenceMap = new Map<UserId, { presence: PresenceState; status_msg?: string; last_active_ts?: Timestamp }>();
   private mediaStore = new Map<string, { metadata: StoredMedia; data: Buffer }>();
+  private filters = new Map<UserId, Map<string, JsonObject>>();
+  private filterCounter = 0;
 
   // Users
 
@@ -637,5 +639,22 @@ export class MemoryStorage implements Storage {
 
   async getMedia(serverName: ServerName, mediaId: string): Promise<{ metadata: StoredMedia; data: Buffer } | undefined> {
     return this.mediaStore.get(`${serverName}/${mediaId}`);
+  }
+
+  // Filters
+
+  async createFilter(userId: UserId, filter: JsonObject): Promise<string> {
+    let userFilters = this.filters.get(userId);
+    if (!userFilters) {
+      userFilters = new Map();
+      this.filters.set(userId, userFilters);
+    }
+    const filterId = String(++this.filterCounter);
+    userFilters.set(filterId, filter);
+    return filterId;
+  }
+
+  async getFilter(userId: UserId, filterId: string): Promise<JsonObject | undefined> {
+    return this.filters.get(userId)?.get(filterId);
   }
 }

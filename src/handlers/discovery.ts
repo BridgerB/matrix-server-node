@@ -24,3 +24,16 @@ export function wellKnownClientHandler(serverName: string): Handler {
   };
   return async () => ({ status: 200, body });
 }
+
+export function getCapabilities(): Handler {
+  const body = {
+    capabilities: {
+      "m.change_password": { enabled: true },
+      "m.room_versions": {
+        default: "10",
+        available: { "10": "stable" },
+      },
+    },
+  };
+  return () => ({ status: 200, body });
+}

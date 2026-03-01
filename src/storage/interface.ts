@@ -112,4 +112,8 @@ export interface Storage {
   // Media
   storeMedia(media: StoredMedia, data: Buffer): Promise<void>;
   getMedia(serverName: ServerName, mediaId: string): Promise<{ metadata: StoredMedia; data: Buffer } | undefined>;
+
+  // Filters
+  createFilter(userId: UserId, filter: JsonObject): Promise<string>;
+  getFilter(userId: UserId, filterId: string): Promise<JsonObject | undefined>;
 }

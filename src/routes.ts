@@ -1,14 +1,15 @@
 import type { Router } from "./router.ts";
 import type { Storage } from "./storage/interface.ts";
 import { requireAuth } from "./middleware/auth.ts";
-import { versionsHandler, wellKnownServerHandler, wellKnownClientHandler } from "./handlers/discovery.ts";
+import { versionsHandler, wellKnownServerHandler, wellKnownClientHandler, getCapabilities } from "./handlers/discovery.ts";
 import { getLoginFlows, postLogin } from "./handlers/login.ts";
 import { postRegister } from "./handlers/register.ts";
 import { postLogout, postLogoutAll } from "./handlers/logout.ts";
 import { getWhoAmI, postChangePassword, postDeactivate } from "./handlers/account.ts";
 import { postRefresh } from "./handlers/refresh.ts";
 import { postCreateRoom, getJoinedRooms, postJoin, postLeave, postInvite, postKick, postBan, postUnban } from "./handlers/rooms.ts";
-import { putSendEvent, putStateEvent, getAllState, getStateEvent, getMessages, getMembers, getEvent, postRedact } from "./handlers/room-events.ts";
+import { putSendEvent, putStateEvent, getAllState, getStateEvent, getMessages, getMembers, getEvent, postRedact, getContext } from "./handlers/room-events.ts";
+import { postCreateFilter, getFilterById } from "./handlers/filters.ts";
 import { getSync } from "./handlers/sync.ts";
 import { getProfile, getDisplayName, getAvatarUrl, putDisplayName, putAvatarUrl } from "./handlers/profile.ts";
 import { getDevices, getDevice, putDevice, deleteDevice, deleteDevices } from "./handlers/devices.ts";
@@ -22,10 +23,11 @@ import { postUpload, getDownload, getThumbnail, getConfig } from "./handlers/med
 export function registerRoutes(router: Router, storage: Storage, serverName: string): void {
   const auth = requireAuth(storage);
 
-  // Discovery (public)
+  // Discovery (public + authenticated)
   router.get("/_matrix/client/versions", versionsHandler(serverName));
   router.get("/.well-known/matrix/server", wellKnownServerHandler(serverName));
   router.get("/.well-known/matrix/client", wellKnownClientHandler(serverName));
+  router.get("/_matrix/client/v3/capabilities", getCapabilities(), auth);
 
   // Auth (public)
   router.get("/_matrix/client/v3/login", getLoginFlows());
@@ -90,9 +92,14 @@ export function registerRoutes(router: Router, storage: Storage, serverName: str
   router.get("/_matrix/client/v3/rooms/:roomId/messages", getMessages(storage), auth);
   router.get("/_matrix/client/v3/rooms/:roomId/members", getMembers(storage), auth);
   router.get("/_matrix/client/v3/rooms/:roomId/event/:eventId", getEvent(storage), auth);
+  router.get("/_matrix/client/v3/rooms/:roomId/context/:eventId", getContext(storage), auth);
 
   // Redaction
   router.post("/_matrix/client/v3/rooms/:roomId/redact/:eventId/:txnId", postRedact(storage, serverName), auth);
+
+  // Filters (authenticated)
+  router.post("/_matrix/client/v3/user/:userId/filter", postCreateFilter(storage), auth);
+  router.get("/_matrix/client/v3/user/:userId/filter/:filterId", getFilterById(storage), auth);
 
   // Account data (authenticated)
   router.get("/_matrix/client/v3/user/:userId/account_data/:type", getGlobalAccountData(storage), auth);

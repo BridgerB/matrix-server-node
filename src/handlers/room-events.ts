@@ -291,3 +291,52 @@ export function postRedact(storage: Storage, serverName: string): Handler {
     return { status: 200, body: { event_id: eventId } };
   };
 }
+
+// =============================================================================
+// GET /rooms/:roomId/context/:eventId
+// =============================================================================
+
+export function getContext(storage: Storage): Handler {
+  return async (req) => {
+    const roomId = req.params["roomId"]!;
+    const eventId = req.params["eventId"]!;
+    const userId = req.userId!;
+
+    const room = await storage.getRoom(roomId);
+    if (!room) throw roomNotFound();
+    requireJoined(getMembership(room, userId));
+
+    const entry = await storage.getEvent(eventId);
+    if (!entry || entry.event.room_id !== roomId) throw notFound("Event not found");
+
+    const limit = Math.min(Math.max(parseInt(req.query.get("limit") ?? "10", 10), 1), 100);
+    const halfLimit = Math.max(Math.floor(limit / 2), 1);
+
+    // Get full timeline to find surrounding events
+    const timeline = await storage.getEventsByRoom(roomId, 10000, undefined, "f");
+    const targetIdx = timeline.events.findIndex((e) => e.eventId === eventId);
+
+    let eventsBefore: typeof timeline.events = [];
+    let eventsAfter: typeof timeline.events = [];
+
+    if (targetIdx >= 0) {
+      eventsBefore = timeline.events.slice(Math.max(0, targetIdx - halfLimit), targetIdx).reverse();
+      eventsAfter = timeline.events.slice(targetIdx + 1, targetIdx + 1 + halfLimit);
+    }
+
+    const stateEntries = await storage.getAllState(roomId);
+    const state = stateEntries.map((e) => pduToClientEvent(e.event, e.eventId));
+
+    return {
+      status: 200,
+      body: {
+        event: pduToClientEvent(entry.event, entry.eventId),
+        events_before: eventsBefore.map((e) => pduToClientEvent(e.event, e.eventId)),
+        events_after: eventsAfter.map((e) => pduToClientEvent(e.event, e.eventId)),
+        state,
+        start: eventsBefore.length > 0 ? String(targetIdx - eventsBefore.length) : undefined,
+        end: eventsAfter.length > 0 ? String(targetIdx + eventsAfter.length + 1) : undefined,
+      },
+    };
+  };
+}
