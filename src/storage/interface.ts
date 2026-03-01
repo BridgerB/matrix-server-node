@@ -153,4 +153,25 @@ export interface Storage {
   getAnnotationCounts(eventId: EventId): Promise<{ type: string; key: string; count: number }[]>;
   getLatestEdit(eventId: EventId, sender: UserId): Promise<{ event: PDU; eventId: EventId } | undefined>;
   getThreadSummary(eventId: EventId, userId: UserId): Promise<{ latestEvent: { event: PDU; eventId: EventId }; count: number; currentUserParticipated: boolean } | undefined>;
+
+  // Reports
+  storeReport(userId: UserId, roomId: RoomId, eventId: EventId, score?: number, reason?: string): Promise<void>;
+
+  // OpenID
+  storeOpenIdToken(token: string, userId: UserId, expiresAt: Timestamp): Promise<void>;
+  getOpenIdToken(token: string): Promise<{ userId: UserId; expiresAt: Timestamp } | undefined>;
+
+  // 3PIDs
+  getThreePids(userId: UserId): Promise<{ medium: string; address: string; added_at: Timestamp }[]>;
+  addThreePid(userId: UserId, medium: string, address: string): Promise<void>;
+  deleteThreePid(userId: UserId, medium: string, address: string): Promise<void>;
+
+  // User directory
+  searchUserDirectory(searchTerm: string, limit: number): Promise<{ user_id: UserId; display_name?: string; avatar_url?: string }[]>;
+
+  // Thread roots
+  getThreadRoots(roomId: RoomId, userId: UserId, include: "all" | "participated", limit: number, from?: string): Promise<{ events: { event: PDU; eventId: EventId }[]; nextBatch?: string }>;
+
+  // Search
+  searchRoomEvents(roomIds: RoomId[], searchTerm: string, keys: string[], limit: number, from?: string): Promise<{ events: { event: PDU; eventId: EventId; streamPos: number }[]; nextBatch?: string }>;
 }

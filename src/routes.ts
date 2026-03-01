@@ -28,6 +28,16 @@ import {
 } from "./handlers/push-rules.ts";
 import { getPushers, postPushersSet } from "./handlers/pushers.ts";
 import { getRelations } from "./handlers/relations.ts";
+import { getTurnServer } from "./handlers/voip.ts";
+import { postReportEvent } from "./handlers/report.ts";
+import { postOpenIdToken } from "./handlers/openid.ts";
+import { getThreePids, postAddThreePid, postDeleteThreePid } from "./handlers/threepid.ts";
+import { postUserDirectorySearch } from "./handlers/user-directory.ts";
+import { getThreads } from "./handlers/threads.ts";
+import { getNotifications } from "./handlers/notifications.ts";
+import { postSearch } from "./handlers/search.ts";
+import { getSpaceHierarchy } from "./handlers/spaces.ts";
+import { postRoomUpgrade } from "./handlers/room-upgrade.ts";
 
 export function registerRoutes(router: Router, storage: Storage, serverName: string): void {
   const auth = requireAuth(storage);
@@ -167,6 +177,38 @@ export function registerRoutes(router: Router, storage: Storage, serverName: str
 
   // To-device messaging (authenticated)
   router.put("/_matrix/client/v3/sendToDevice/:eventType/:txnId", putSendToDevice(storage), auth);
+
+  // VoIP (authenticated)
+  router.get("/_matrix/client/v3/voip/turnServer", getTurnServer(), auth);
+
+  // Reporting (authenticated)
+  router.post("/_matrix/client/v3/rooms/:roomId/report/:eventId", postReportEvent(storage), auth);
+
+  // OpenID (authenticated)
+  router.post("/_matrix/client/v3/user/:userId/openid/request_token", postOpenIdToken(storage, serverName), auth);
+
+  // 3PIDs (authenticated)
+  router.get("/_matrix/client/v3/account/3pid", getThreePids(storage), auth);
+  router.post("/_matrix/client/v3/account/3pid/add", postAddThreePid(storage), auth);
+  router.post("/_matrix/client/v3/account/3pid/delete", postDeleteThreePid(storage), auth);
+
+  // User directory (authenticated)
+  router.post("/_matrix/client/v3/user_directory/search", postUserDirectorySearch(storage), auth);
+
+  // Threads (authenticated)
+  router.get("/_matrix/client/v3/rooms/:roomId/threads", getThreads(storage), auth);
+
+  // Notifications (authenticated)
+  router.get("/_matrix/client/v3/notifications", getNotifications(storage), auth);
+
+  // Search (authenticated)
+  router.post("/_matrix/client/v3/search", postSearch(storage), auth);
+
+  // Space hierarchy (authenticated)
+  router.get("/_matrix/client/v3/rooms/:roomId/hierarchy", getSpaceHierarchy(storage), auth);
+
+  // Room upgrade (authenticated)
+  router.post("/_matrix/client/v3/rooms/:roomId/upgrade", postRoomUpgrade(storage, serverName), auth);
 
   // Sync
   router.get("/_matrix/client/v3/sync", getSync(storage, serverName), auth);

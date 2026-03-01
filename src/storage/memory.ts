@@ -37,6 +37,9 @@ export class MemoryStorage implements Storage {
   private toDeviceInbox = new Map<string, ToDeviceEvent[]>();
   private pushersMap = new Map<UserId, Pusher[]>();
   private relationsMap = new Map<EventId, { eventId: EventId; relType: string; key?: string; sender: UserId; eventType: string; streamPos: number }[]>();
+  private reports: { userId: UserId; roomId: RoomId; eventId: EventId; score?: number; reason?: string; ts: number }[] = [];
+  private openIdTokens = new Map<string, { userId: UserId; expiresAt: number }>();
+  private threePidsMap = new Map<UserId, { medium: string; address: string; added_at: number }[]>();
 
   // Users
 
@@ -931,5 +934,178 @@ export class MemoryStorage implements Storage {
       count: threadReplies.length,
       currentUserParticipated,
     };
+  }
+
+  // Reports
+
+  async storeReport(userId: UserId, roomId: RoomId, eventId: EventId, score?: number, reason?: string): Promise<void> {
+    this.reports.push({ userId, roomId, eventId, score, reason, ts: Date.now() });
+  }
+
+  // OpenID
+
+  async storeOpenIdToken(token: string, userId: UserId, expiresAt: number): Promise<void> {
+    this.openIdTokens.set(token, { userId, expiresAt });
+  }
+
+  async getOpenIdToken(token: string): Promise<{ userId: UserId; expiresAt: number } | undefined> {
+    return this.openIdTokens.get(token);
+  }
+
+  // 3PIDs
+
+  async getThreePids(userId: UserId): Promise<{ medium: string; address: string; added_at: number }[]> {
+    return this.threePidsMap.get(userId) ?? [];
+  }
+
+  async addThreePid(userId: UserId, medium: string, address: string): Promise<void> {
+    let pids = this.threePidsMap.get(userId);
+    if (!pids) {
+      pids = [];
+      this.threePidsMap.set(userId, pids);
+    }
+    const existing = pids.findIndex((p) => p.medium === medium && p.address === address);
+    if (existing >= 0) return;
+    pids.push({ medium, address, added_at: Date.now() });
+  }
+
+  async deleteThreePid(userId: UserId, medium: string, address: string): Promise<void> {
+    const pids = this.threePidsMap.get(userId);
+    if (!pids) return;
+    const idx = pids.findIndex((p) => p.medium === medium && p.address === address);
+    if (idx >= 0) pids.splice(idx, 1);
+  }
+
+  // User directory
+
+  async searchUserDirectory(searchTerm: string, limit: number): Promise<{ user_id: UserId; display_name?: string; avatar_url?: string }[]> {
+    const term = searchTerm.toLowerCase();
+    const results: { user_id: UserId; display_name?: string; avatar_url?: string }[] = [];
+    for (const user of this.usersByFullId.values()) {
+      if (user.is_deactivated) continue;
+      const matchId = user.user_id.toLowerCase().includes(term);
+      const matchName = user.displayname?.toLowerCase().includes(term) ?? false;
+      if (matchId || matchName) {
+        results.push({
+          user_id: user.user_id,
+          display_name: user.displayname,
+          avatar_url: user.avatar_url,
+        });
+      }
+      if (results.length >= limit) break;
+    }
+    return results;
+  }
+
+  // Thread roots
+
+  async getThreadRoots(
+    roomId: RoomId, userId: UserId, include: "all" | "participated", limit: number, from?: string,
+  ): Promise<{ events: { event: PDU; eventId: EventId }[]; nextBatch?: string }> {
+    // Collect thread roots with their latest reply stream position
+    const threadRoots = new Map<EventId, number>();
+    const participatedIn = new Set<EventId>();
+
+    for (const [targetId, relations] of this.relationsMap) {
+      const threadReplies = relations.filter((r) => r.relType === "m.thread");
+      if (threadReplies.length === 0) continue;
+
+      // Check the target event is in this room
+      const targetEvent = this.events.get(targetId);
+      if (!targetEvent || targetEvent.room_id !== roomId) continue;
+
+      const latestStreamPos = Math.max(...threadReplies.map((r) => r.streamPos));
+      threadRoots.set(targetId, latestStreamPos);
+
+      if (threadReplies.some((r) => r.sender === userId)) {
+        participatedIn.add(targetId);
+      }
+    }
+
+    // Filter by participation
+    let rootIds = [...threadRoots.entries()];
+    if (include === "participated") {
+      rootIds = rootIds.filter(([id]) => participatedIn.has(id));
+    }
+
+    // Sort by latest reply (most recent first)
+    rootIds.sort((a, b) => b[1] - a[1]);
+
+    // Pagination
+    if (from) {
+      const fromPos = parseInt(from, 10);
+      const startIdx = rootIds.findIndex(([, pos]) => pos < fromPos);
+      if (startIdx >= 0) {
+        rootIds = rootIds.slice(startIdx);
+      } else {
+        rootIds = [];
+      }
+    }
+
+    const sliced = rootIds.slice(0, limit);
+    const events = sliced
+      .map(([eventId]) => {
+        const event = this.events.get(eventId);
+        if (!event) return undefined;
+        return { event, eventId };
+      })
+      .filter((e): e is { event: PDU; eventId: EventId } => e !== undefined);
+
+    const nextBatch = sliced.length === limit && sliced.length > 0
+      ? String(sliced[sliced.length - 1]![1])
+      : undefined;
+
+    return { events, nextBatch };
+  }
+
+  // Search
+
+  async searchRoomEvents(
+    roomIds: RoomId[], searchTerm: string, keys: string[], limit: number, from?: string,
+  ): Promise<{ events: { event: PDU; eventId: EventId; streamPos: number }[]; nextBatch?: string }> {
+    const term = searchTerm.toLowerCase();
+    const results: { event: PDU; eventId: EventId; streamPos: number }[] = [];
+    const fromPos = from ? parseInt(from, 10) : undefined;
+
+    // Collect all timeline entries across specified rooms, sorted by stream pos descending
+    const allEntries: { eventId: EventId; streamPos: number }[] = [];
+    for (const roomId of roomIds) {
+      const timeline = this.roomTimeline.get(roomId) ?? [];
+      for (const entry of timeline) {
+        if (fromPos !== undefined && entry.streamPos >= fromPos) continue;
+        allEntries.push(entry);
+      }
+    }
+    allEntries.sort((a, b) => b.streamPos - a.streamPos);
+
+    for (const entry of allEntries) {
+      if (results.length >= limit) break;
+
+      const event = this.events.get(entry.eventId);
+      if (!event) continue;
+
+      const content = event.content as Record<string, unknown>;
+      let matched = false;
+      for (const key of keys) {
+        const field = key === "content.body" ? content["body"]
+          : key === "content.name" ? content["name"]
+          : key === "content.topic" ? content["topic"]
+          : undefined;
+        if (typeof field === "string" && field.toLowerCase().includes(term)) {
+          matched = true;
+          break;
+        }
+      }
+
+      if (matched) {
+        results.push({ event, eventId: entry.eventId, streamPos: entry.streamPos });
+      }
+    }
+
+    const nextBatch = results.length === limit && results.length > 0
+      ? String(results[results.length - 1]!.streamPos)
+      : undefined;
+
+    return { events: results, nextBatch };
   }
 }
