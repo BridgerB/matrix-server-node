@@ -1,0 +1,59 @@
+matrix-server-node
+Copyright 2026 Bridger
+
+This project is an independent Node.js Matrix homeserver implementation.
+No code has been copied, translated, or directly derived from any of the
+projects listed below. The following projects were used as reference for
+understanding the Matrix protocol and server architecture:
+
+================================================================================
+
+Continuwuity
+Copyright 2023 June and contributors
+Licensed under the Apache License, Version 2.0
+Source: https://forgejo.ellis.link/continuwuation/continuwuity
+
+================================================================================
+
+Tuwunel
+Copyright 2023 June and contributors
+Licensed under the Apache License, Version 2.0
+Source: https://github.com/matrix-construct/tuwunel
+
+================================================================================
+
+Conduit
+Copyright Famedly GmbH and contributors
+Licensed under the Apache License, Version 2.0
+Source: https://gitlab.com/famedly/conduit
+
+================================================================================
+
+Synapse
+Copyright 2014-2017 OpenMarket Ltd
+Copyright 2017 Vector Creations Ltd
+Copyright 2017-2025 New Vector Ltd
+Copyright 2025 Element Creations Ltd
+Licensed under the GNU Affero General Public License, Version 3
+Source: https://github.com/element-hq/synapse
+
+================================================================================
+
+Dendrite
+Copyright 2017 OpenMarket Ltd
+Copyright 2017 Vector Creations Ltd
+Copyright 2017-2025 New Vector Ltd
+Licensed under the GNU Affero General Public License, Version 3
+Source: https://github.com/element-hq/dendrite
+
+================================================================================
+
+Telodendria
+Copyright 2022-2025 Jordan Bancino and contributors
+Licensed under a Modified MIT License
+Source: https://git.telodendria.org/Telodendria/Telodendria
+
+================================================================================
+
+Copies of the original licenses can be found in the respective upstream
+project directories under upstream/.

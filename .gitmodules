@@ -1,0 +1,18 @@
+[submodule "upstream/continuwuity"]
+	path = upstream/continuwuity
+	url = https://forgejo.ellis.link/continuwuation/continuwuity.git
+[submodule "upstream/tuwunel"]
+	path = upstream/tuwunel
+	url = https://github.com/matrix-construct/tuwunel.git
+[submodule "upstream/conduit"]
+	path = upstream/conduit
+	url = https://gitlab.com/famedly/conduit.git
+[submodule "upstream/dendrite"]
+	path = upstream/dendrite
+	url = https://github.com/element-hq/dendrite.git
+[submodule "upstream/telodendria"]
+	path = upstream/telodendria
+	url = https://git.telodendria.org/Telodendria/Telodendria.git
+[submodule "upstream/synapse"]
+	path = upstream/synapse
+	url = https://github.com/element-hq/synapse.git
