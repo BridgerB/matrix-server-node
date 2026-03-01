@@ -2,6 +2,7 @@ import type { UserId, RoomId, RoomAlias, EventId, DeviceId, AccessToken, Refresh
 import type { UserAccount, DeviceSession, RoomState } from "../types/index.ts";
 import type { PDU, StrippedStateEvent } from "../types/events.ts";
 import type { UserProfile, Device } from "../types/user.ts";
+import type { JsonObject } from "../types/json.ts";
 
 export interface StoredSession extends DeviceSession {
   access_token: AccessToken;
@@ -86,4 +87,12 @@ export interface Storage {
   setRoomVisibility(roomId: RoomId, visibility: "public" | "private"): Promise<void>;
   getRoomVisibility(roomId: RoomId): Promise<"public" | "private">;
   getPublicRoomIds(): Promise<RoomId[]>;
+
+  // Account data
+  getGlobalAccountData(userId: UserId, type: string): Promise<JsonObject | undefined>;
+  setGlobalAccountData(userId: UserId, type: string, content: JsonObject): Promise<void>;
+  getAllGlobalAccountData(userId: UserId): Promise<{ type: string; content: JsonObject }[]>;
+  getRoomAccountData(userId: UserId, roomId: RoomId, type: string): Promise<JsonObject | undefined>;
+  setRoomAccountData(userId: UserId, roomId: RoomId, type: string, content: JsonObject): Promise<void>;
+  getAllRoomAccountData(userId: UserId, roomId: RoomId): Promise<{ type: string; content: JsonObject }[]>;
 }

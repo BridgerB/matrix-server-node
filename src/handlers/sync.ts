@@ -81,8 +81,22 @@ async function buildInitialSync(
     }
   }
 
+  // Global account data
+  const globalData = await storage.getAllGlobalAccountData(userId);
+  const accountDataEvents = globalData.map((d) => ({ type: d.type, content: d.content }) as unknown as ClientEvent);
+
+  // Room account data for joined rooms
+  for (const roomId of Object.keys(join)) {
+    const roomData = await storage.getAllRoomAccountData(userId, roomId);
+    if (roomData.length > 0) {
+      const roomDataEvents = roomData.map((d) => ({ type: d.type, content: d.content }) as unknown as ClientEvent);
+      join[roomId]!.account_data = { events: roomDataEvents };
+    }
+  }
+
   return {
     next_batch: String(nextBatch),
+    account_data: accountDataEvents.length > 0 ? { events: accountDataEvents } : undefined,
     rooms: {
       join: Object.keys(join).length > 0 ? join : undefined,
       invite: Object.keys(invite).length > 0 ? invite : undefined,

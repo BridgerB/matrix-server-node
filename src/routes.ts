@@ -13,6 +13,7 @@ import { getSync } from "./handlers/sync.ts";
 import { getProfile, getDisplayName, getAvatarUrl, putDisplayName, putAvatarUrl } from "./handlers/profile.ts";
 import { getDevices, getDevice, putDevice, deleteDevice, deleteDevices } from "./handlers/devices.ts";
 import { getDirectoryRoom, putDirectoryRoom, deleteDirectoryRoom, getDirectoryListRoom, putDirectoryListRoom, getPublicRooms, postPublicRooms } from "./handlers/directory.ts";
+import { getGlobalAccountData, putGlobalAccountData, getRoomAccountData, putRoomAccountData, getTags, putTag, deleteTag } from "./handlers/account-data.ts";
 
 export function registerRoutes(router: Router, storage: Storage, serverName: string): void {
   const auth = requireAuth(storage);
@@ -88,6 +89,17 @@ export function registerRoutes(router: Router, storage: Storage, serverName: str
 
   // Redaction
   router.post("/_matrix/client/v3/rooms/:roomId/redact/:eventId/:txnId", postRedact(storage, serverName), auth);
+
+  // Account data (authenticated)
+  router.get("/_matrix/client/v3/user/:userId/account_data/:type", getGlobalAccountData(storage), auth);
+  router.put("/_matrix/client/v3/user/:userId/account_data/:type", putGlobalAccountData(storage), auth);
+  router.get("/_matrix/client/v3/user/:userId/rooms/:roomId/account_data/:type", getRoomAccountData(storage), auth);
+  router.put("/_matrix/client/v3/user/:userId/rooms/:roomId/account_data/:type", putRoomAccountData(storage), auth);
+
+  // Tags (authenticated)
+  router.get("/_matrix/client/v3/user/:userId/rooms/:roomId/tags", getTags(storage), auth);
+  router.put("/_matrix/client/v3/user/:userId/rooms/:roomId/tags/:tag", putTag(storage), auth);
+  router.delete("/_matrix/client/v3/user/:userId/rooms/:roomId/tags/:tag", deleteTag(storage), auth);
 
   // Sync
   router.get("/_matrix/client/v3/sync", getSync(storage, serverName), auth);

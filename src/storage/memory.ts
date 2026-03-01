@@ -2,6 +2,7 @@ import type { UserId, RoomId, RoomAlias, EventId, DeviceId, AccessToken, Refresh
 import type { UserAccount, RoomState } from "../types/index.ts";
 import type { PDU, StrippedStateEvent } from "../types/events.ts";
 import type { UserProfile, Device } from "../types/user.ts";
+import type { JsonObject } from "../types/json.ts";
 import type { Storage, StoredSession } from "./interface.ts";
 import { computeEventId } from "../events.ts";
 
@@ -19,6 +20,8 @@ export class MemoryStorage implements Storage {
   private eventWaiters = new Set<() => void>();
   private aliases = new Map<RoomAlias, { room_id: RoomId; servers: ServerName[]; creator: UserId }>();
   private publicRooms = new Set<RoomId>();
+  private globalAccountData = new Map<UserId, Map<string, JsonObject>>();
+  private roomAccountDataMap = new Map<string, Map<string, JsonObject>>();
 
   // Users
 
@@ -488,5 +491,56 @@ export class MemoryStorage implements Storage {
 
   async getPublicRoomIds(): Promise<RoomId[]> {
     return [...this.publicRooms];
+  }
+
+  // Account data
+
+  async getGlobalAccountData(userId: UserId, type: string): Promise<JsonObject | undefined> {
+    return this.globalAccountData.get(userId)?.get(type);
+  }
+
+  async setGlobalAccountData(userId: UserId, type: string, content: JsonObject): Promise<void> {
+    let userMap = this.globalAccountData.get(userId);
+    if (!userMap) {
+      userMap = new Map();
+      this.globalAccountData.set(userId, userMap);
+    }
+    userMap.set(type, content);
+  }
+
+  async getAllGlobalAccountData(userId: UserId): Promise<{ type: string; content: JsonObject }[]> {
+    const userMap = this.globalAccountData.get(userId);
+    if (!userMap) return [];
+    const result: { type: string; content: JsonObject }[] = [];
+    for (const [type, content] of userMap) {
+      result.push({ type, content });
+    }
+    return result;
+  }
+
+  async getRoomAccountData(userId: UserId, roomId: RoomId, type: string): Promise<JsonObject | undefined> {
+    const key = `${userId}\0${roomId}`;
+    return this.roomAccountDataMap.get(key)?.get(type);
+  }
+
+  async setRoomAccountData(userId: UserId, roomId: RoomId, type: string, content: JsonObject): Promise<void> {
+    const key = `${userId}\0${roomId}`;
+    let dataMap = this.roomAccountDataMap.get(key);
+    if (!dataMap) {
+      dataMap = new Map();
+      this.roomAccountDataMap.set(key, dataMap);
+    }
+    dataMap.set(type, content);
+  }
+
+  async getAllRoomAccountData(userId: UserId, roomId: RoomId): Promise<{ type: string; content: JsonObject }[]> {
+    const key = `${userId}\0${roomId}`;
+    const dataMap = this.roomAccountDataMap.get(key);
+    if (!dataMap) return [];
+    const result: { type: string; content: JsonObject }[] = [];
+    for (const [type, content] of dataMap) {
+      result.push({ type, content });
+    }
+    return result;
   }
 }
