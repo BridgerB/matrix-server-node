@@ -7,62 +7,66 @@ import type { RoomId, EventId } from "../types/index.ts";
 import type { RoomVersion } from "../types/room-versions.ts";
 import { generateRoomId } from "../crypto.ts";
 import {
-  buildEvent, selectAuthEvents, checkEventAuth,
-  getMembership, getUserPowerLevel, computeEventId,
+	buildEvent,
+	selectAuthEvents,
+	checkEventAuth,
+	getMembership,
+	getUserPowerLevel,
+	computeEventId,
 } from "../events.ts";
 import { forbidden, roomNotFound, notJoined, badJson } from "../errors.ts";
 
 // State types to copy from old room to new room
 const STATE_TO_COPY = [
-  "m.room.join_rules",
-  "m.room.history_visibility",
-  "m.room.guest_access",
-  "m.room.power_levels",
-  "m.room.name",
-  "m.room.topic",
-  "m.room.avatar",
-  "m.room.encryption",
-  "m.room.server_acl",
-  "m.room.pinned_events",
+	"m.room.join_rules",
+	"m.room.history_visibility",
+	"m.room.guest_access",
+	"m.room.power_levels",
+	"m.room.name",
+	"m.room.topic",
+	"m.room.avatar",
+	"m.room.encryption",
+	"m.room.server_acl",
+	"m.room.pinned_events",
 ];
 
 interface EventContext {
-  roomState: RoomState;
-  depth: number;
-  prevEvents: string[];
+	roomState: RoomState;
+	depth: number;
+	prevEvents: string[];
 }
 
 async function sendStateEvent(
-  storage: Storage,
-  serverName: string,
-  ctx: EventContext,
-  sender: string,
-  type: string,
-  stateKey: string,
-  content: JsonObject,
+	storage: Storage,
+	serverName: string,
+	ctx: EventContext,
+	sender: string,
+	type: string,
+	stateKey: string,
+	content: JsonObject,
 ): Promise<string> {
-  const authEvents = selectAuthEvents(type, stateKey, ctx.roomState, sender);
-  const { event, eventId } = buildEvent({
-    roomId: ctx.roomState.room_id,
-    sender,
-    type,
-    content,
-    stateKey,
-    depth: ctx.depth,
-    prevEvents: ctx.prevEvents,
-    authEvents,
-    serverName,
-  });
+	const authEvents = selectAuthEvents(type, stateKey, ctx.roomState, sender);
+	const { event, eventId } = buildEvent({
+		roomId: ctx.roomState.room_id,
+		sender,
+		type,
+		content,
+		stateKey,
+		depth: ctx.depth,
+		prevEvents: ctx.prevEvents,
+		authEvents,
+		serverName,
+	});
 
-  checkEventAuth(event, eventId, ctx.roomState);
-  await storage.setStateEvent(ctx.roomState.room_id, event, eventId);
+	checkEventAuth(event, eventId, ctx.roomState);
+	await storage.setStateEvent(ctx.roomState.room_id, event, eventId);
 
-  ctx.depth++;
-  ctx.prevEvents = [eventId];
-  ctx.roomState.depth = ctx.depth;
-  ctx.roomState.forward_extremities = [eventId];
+	ctx.depth++;
+	ctx.prevEvents = [eventId];
+	ctx.roomState.depth = ctx.depth;
+	ctx.roomState.forward_extremities = [eventId];
 
-  return eventId;
+	return eventId;
 }
 
 // =============================================================================
@@ -70,93 +74,129 @@ async function sendStateEvent(
 // =============================================================================
 
 export function postRoomUpgrade(storage: Storage, serverName: string): Handler {
-  return async (req) => {
-    const oldRoomId = req.params["roomId"]! as RoomId;
-    const userId = req.userId!;
-    const body = (req.body ?? {}) as { new_version?: string };
+	return async (req) => {
+		const oldRoomId = req.params["roomId"]! as RoomId;
+		const userId = req.userId!;
+		const body = (req.body ?? {}) as { new_version?: string };
 
-    if (!body.new_version) throw badJson("Missing new_version");
+		if (!body.new_version) throw badJson("Missing new_version");
 
-    const oldRoom = await storage.getRoom(oldRoomId);
-    if (!oldRoom) throw roomNotFound();
-    if (getMembership(oldRoom, userId) !== "join") throw notJoined();
+		const oldRoom = await storage.getRoom(oldRoomId);
+		if (!oldRoom) throw roomNotFound();
+		if (getMembership(oldRoom, userId) !== "join") throw notJoined();
 
-    // Check power level for m.room.tombstone
-    const senderPl = getUserPowerLevel(userId, oldRoom);
-    const plEvent = oldRoom.state_events.get("m.room.power_levels\0");
-    const pl = plEvent ? (plEvent.content as unknown as RoomPowerLevelsContent) : undefined;
-    const tombstonePl = pl?.events?.["m.room.tombstone"] ?? 100;
-    if (senderPl < tombstonePl) {
-      throw forbidden(`Insufficient power level: need ${tombstonePl}, have ${senderPl}`);
-    }
+		// Check power level for m.room.tombstone
+		const senderPl = getUserPowerLevel(userId, oldRoom);
+		const plEvent = oldRoom.state_events.get("m.room.power_levels\0");
+		const pl = plEvent
+			? (plEvent.content as unknown as RoomPowerLevelsContent)
+			: undefined;
+		const tombstonePl = pl?.events?.["m.room.tombstone"] ?? 100;
+		if (senderPl < tombstonePl) {
+			throw forbidden(
+				`Insufficient power level: need ${tombstonePl}, have ${senderPl}`,
+			);
+		}
 
-    // Create new room
-    const newRoomId = generateRoomId(serverName) as RoomId;
-    const newRoomState: RoomState = {
-      room_id: newRoomId,
-      room_version: body.new_version as RoomVersion,
-      state_events: new Map(),
-      depth: 0,
-      forward_extremities: [],
-    };
-    await storage.createRoom(newRoomState);
+		// Create new room
+		const newRoomId = generateRoomId(serverName) as RoomId;
+		const newRoomState: RoomState = {
+			room_id: newRoomId,
+			room_version: body.new_version as RoomVersion,
+			state_events: new Map(),
+			depth: 0,
+			forward_extremities: [],
+		};
+		await storage.createRoom(newRoomState);
 
-    const ctx: EventContext = { roomState: newRoomState, depth: 0, prevEvents: [] };
+		const ctx: EventContext = {
+			roomState: newRoomState,
+			depth: 0,
+			prevEvents: [],
+		};
 
-    // Find the last event ID in old room for predecessor
-    const lastCreateEvent = oldRoom.state_events.get("m.room.create\0");
-    const lastCreateEventId = lastCreateEvent ? computeEventId(lastCreateEvent) : ("" as EventId);
+		// Find the last event ID in old room for predecessor
+		const lastCreateEvent = oldRoom.state_events.get("m.room.create\0");
+		const lastCreateEventId = lastCreateEvent
+			? computeEventId(lastCreateEvent)
+			: ("" as EventId);
 
-    // 1. m.room.create with predecessor
-    await sendStateEvent(storage, serverName, ctx, userId, "m.room.create", "", {
-      room_version: body.new_version,
-      predecessor: {
-        room_id: oldRoomId,
-        event_id: lastCreateEventId,
-      },
-    });
+		// 1. m.room.create with predecessor
+		await sendStateEvent(
+			storage,
+			serverName,
+			ctx,
+			userId,
+			"m.room.create",
+			"",
+			{
+				room_version: body.new_version,
+				predecessor: {
+					room_id: oldRoomId,
+					event_id: lastCreateEventId,
+				},
+			},
+		);
 
-    // 2. Creator joins
-    await sendStateEvent(storage, serverName, ctx, userId, "m.room.member", userId, {
-      membership: "join",
-    });
+		// 2. Creator joins
+		await sendStateEvent(
+			storage,
+			serverName,
+			ctx,
+			userId,
+			"m.room.member",
+			userId,
+			{
+				membership: "join",
+			},
+		);
 
-    // 3. Copy state from old room
-    for (const stateType of STATE_TO_COPY) {
-      const oldEvent = oldRoom.state_events.get(stateType + "\0");
-      if (!oldEvent) continue;
+		// 3. Copy state from old room
+		for (const stateType of STATE_TO_COPY) {
+			const oldEvent = oldRoom.state_events.get(stateType + "\0");
+			if (!oldEvent) continue;
 
-      await sendStateEvent(
-        storage, serverName, ctx, userId,
-        stateType, oldEvent.state_key ?? "", { ...oldEvent.content },
-      );
-    }
+			await sendStateEvent(
+				storage,
+				serverName,
+				ctx,
+				userId,
+				stateType,
+				oldEvent.state_key ?? "",
+				{ ...oldEvent.content },
+			);
+		}
 
-    // 4. Send tombstone in old room
-    const tombstoneAuthEvents = selectAuthEvents("m.room.tombstone", "", oldRoom, userId);
-    const { event: tombstoneEvent, eventId: tombstoneEventId } = buildEvent({
-      roomId: oldRoomId,
-      sender: userId,
-      type: "m.room.tombstone",
-      content: {
-        body: "This room has been replaced",
-        replacement_room: newRoomId,
-      },
-      stateKey: "",
-      depth: oldRoom.depth,
-      prevEvents: [...oldRoom.forward_extremities],
-      authEvents: tombstoneAuthEvents,
-      serverName,
-    });
+		// 4. Send tombstone in old room
+		const tombstoneAuthEvents = selectAuthEvents(
+			"m.room.tombstone",
+			"",
+			oldRoom,
+			userId,
+		);
+		const { event: tombstoneEvent, eventId: tombstoneEventId } = buildEvent({
+			roomId: oldRoomId,
+			sender: userId,
+			type: "m.room.tombstone",
+			content: {
+				body: "This room has been replaced",
+				replacement_room: newRoomId,
+			},
+			stateKey: "",
+			depth: oldRoom.depth,
+			prevEvents: [...oldRoom.forward_extremities],
+			authEvents: tombstoneAuthEvents,
+			serverName,
+		});
 
-    checkEventAuth(tombstoneEvent, tombstoneEventId, oldRoom);
-    await storage.setStateEvent(oldRoomId, tombstoneEvent, tombstoneEventId);
-    oldRoom.depth++;
-    oldRoom.forward_extremities = [tombstoneEventId];
+		checkEventAuth(tombstoneEvent, tombstoneEventId, oldRoom);
+		await storage.setStateEvent(oldRoomId, tombstoneEvent, tombstoneEventId);
+		oldRoom.depth++;
+		oldRoom.forward_extremities = [tombstoneEventId];
 
-    return {
-      status: 200,
-      body: { replacement_room: newRoomId },
-    };
-  };
+		return {
+			status: 200,
+			body: { replacement_room: newRoomId },
+		};
+	};
 }

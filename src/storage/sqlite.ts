@@ -13,12 +13,12 @@ import type {
 	ServerName,
 	KeyId,
 } from "../types/index.ts";
+import type { UserAccount, RoomState, StoredMedia } from "../types/index.ts";
 import type {
-	UserAccount,
-	RoomState,
-	StoredMedia,
-} from "../types/index.ts";
-import type { PDU, StrippedStateEvent, ToDeviceEvent } from "../types/events.ts";
+	PDU,
+	StrippedStateEvent,
+	ToDeviceEvent,
+} from "../types/events.ts";
 import type { UserProfile, Device } from "../types/user.ts";
 import type { JsonObject } from "../types/json.ts";
 import type { PresenceState } from "../types/ephemeral.ts";
@@ -581,7 +581,10 @@ export class SqliteStorage implements Storage {
 
 		const stateMap = new Map<string, PDU>();
 		for (const sr of stateRows) {
-			stateMap.set(`${sr.event_type}\0${sr.state_key}`, JSON.parse(sr.event_json));
+			stateMap.set(
+				`${sr.event_type}\0${sr.state_key}`,
+				JSON.parse(sr.event_json),
+			);
 		}
 
 		const room: RoomState = {
@@ -627,7 +630,10 @@ export class SqliteStorage implements Storage {
 			| { event_id: string; event_json: string }
 			| undefined;
 		if (!row) return undefined;
-		return { event: JSON.parse(row.event_json), eventId: row.event_id as EventId };
+		return {
+			event: JSON.parse(row.event_json),
+			eventId: row.event_id as EventId,
+		};
 	}
 
 	async getEventsByRoom(
@@ -693,7 +699,9 @@ export class SqliteStorage implements Storage {
 		roomId: RoomId,
 	): Promise<{ event: PDU; eventId: EventId }[]> {
 		const rows = this.db
-			.prepare("SELECT event_id, event_json FROM state_events WHERE room_id = ?")
+			.prepare(
+				"SELECT event_id, event_json FROM state_events WHERE room_id = ?",
+			)
 			.all(roomId) as { event_id: string; event_json: string }[];
 		return rows.map((r) => ({
 			event: JSON.parse(r.event_json),
@@ -899,10 +907,7 @@ export class SqliteStorage implements Storage {
 			.run(displayname, userId);
 	}
 
-	async setAvatarUrl(
-		userId: UserId,
-		avatarUrl: string | null,
-	): Promise<void> {
+	async setAvatarUrl(userId: UserId, avatarUrl: string | null): Promise<void> {
 		this.db
 			.prepare("UPDATE users SET avatar_url = ? WHERE user_id = ?")
 			.run(avatarUrl, userId);
@@ -956,10 +961,7 @@ export class SqliteStorage implements Storage {
 			.run(displayName, userId, deviceId);
 	}
 
-	async deleteDeviceSession(
-		userId: UserId,
-		deviceId: DeviceId,
-	): Promise<void> {
+	async deleteDeviceSession(userId: UserId, deviceId: DeviceId): Promise<void> {
 		this.db
 			.prepare("DELETE FROM sessions WHERE user_id = ? AND device_id = ?")
 			.run(userId, deviceId);
@@ -969,10 +971,7 @@ export class SqliteStorage implements Storage {
 	// Account
 	// =========================================================================
 
-	async updatePassword(
-		userId: UserId,
-		newPasswordHash: string,
-	): Promise<void> {
+	async updatePassword(userId: UserId, newPasswordHash: string): Promise<void> {
 		this.db
 			.prepare("UPDATE users SET password_hash = ? WHERE user_id = ?")
 			.run(newPasswordHash, userId);
@@ -1014,9 +1013,7 @@ export class SqliteStorage implements Storage {
 	): Promise<{ room_id: RoomId; servers: ServerName[] } | undefined> {
 		const row = this.db
 			.prepare("SELECT room_id, servers FROM room_aliases WHERE room_alias = ?")
-			.get(roomAlias) as
-			| { room_id: string; servers: string }
-			| undefined;
+			.get(roomAlias) as { room_id: string; servers: string } | undefined;
 		if (!row) return undefined;
 		return {
 			room_id: row.room_id as RoomId,
@@ -1099,7 +1096,9 @@ export class SqliteStorage implements Storage {
 		userId: UserId,
 	): Promise<{ type: string; content: JsonObject }[]> {
 		const rows = this.db
-			.prepare("SELECT type, content FROM global_account_data WHERE user_id = ?")
+			.prepare(
+				"SELECT type, content FROM global_account_data WHERE user_id = ?",
+			)
 			.all(userId) as { type: string; content: string }[];
 		return rows.map((r) => ({ type: r.type, content: JSON.parse(r.content) }));
 	}
@@ -1239,9 +1238,7 @@ export class SqliteStorage implements Storage {
 		this.wakeWaiters();
 	}
 
-	async getPresence(
-		userId: UserId,
-	): Promise<
+	async getPresence(userId: UserId): Promise<
 		| {
 				presence: PresenceState;
 				status_msg?: string;
@@ -1576,9 +1573,7 @@ export class SqliteStorage implements Storage {
 		const event = JSON.parse(eventRow.event_json) as PDU;
 
 		const posRow = this.db
-			.prepare(
-				"SELECT stream_pos FROM events WHERE event_id = ?",
-			)
+			.prepare("SELECT stream_pos FROM events WHERE event_id = ?")
 			.get(eventId) as { stream_pos: number } | undefined;
 		const streamPos = posRow?.stream_pos ?? this.streamCounter;
 
@@ -1633,9 +1628,10 @@ export class SqliteStorage implements Storage {
 			params.push(fromPos);
 		}
 
-		sql += direction === "f"
-			? " ORDER BY r.stream_pos ASC LIMIT ?"
-			: " ORDER BY r.stream_pos DESC LIMIT ?";
+		sql +=
+			direction === "f"
+				? " ORDER BY r.stream_pos ASC LIMIT ?"
+				: " ORDER BY r.stream_pos DESC LIMIT ?";
 		params.push(limit);
 
 		const rows = this.db.prepare(sql).all(...params) as {
@@ -1708,9 +1704,7 @@ export class SqliteStorage implements Storage {
 			.prepare(
 				"SELECT r.event_id, e.event_json FROM relations r JOIN events e ON r.event_id = e.event_id WHERE r.target_event_id = ? AND r.rel_type = 'm.thread' ORDER BY r.stream_pos DESC LIMIT 1",
 			)
-			.get(eventId) as
-			| { event_id: string; event_json: string }
-			| undefined;
+			.get(eventId) as { event_id: string; event_json: string } | undefined;
 		if (!latestRow) return undefined;
 
 		const participatedRow = this.db
@@ -1768,9 +1762,7 @@ export class SqliteStorage implements Storage {
 	): Promise<{ userId: UserId; expiresAt: Timestamp } | undefined> {
 		const row = this.db
 			.prepare("SELECT user_id, expires_at FROM openid_tokens WHERE token = ?")
-			.get(token) as
-			| { user_id: string; expires_at: number }
-			| undefined;
+			.get(token) as { user_id: string; expires_at: number } | undefined;
 		if (!row) return undefined;
 		return { userId: row.user_id as UserId, expiresAt: row.expires_at };
 	}
@@ -2038,7 +2030,10 @@ export class SqliteStorage implements Storage {
 
 		const servers = new Set<ServerName>();
 		for (const r of rows) {
-			const serverName = r.state_key.split(":").slice(1).join(":") as ServerName;
+			const serverName = r.state_key
+				.split(":")
+				.slice(1)
+				.join(":") as ServerName;
 			servers.add(serverName);
 		}
 		return [...servers];
@@ -2058,22 +2053,14 @@ export class SqliteStorage implements Storage {
 	// Federation - Transaction dedup
 	// =========================================================================
 
-	async getFederationTxn(
-		origin: ServerName,
-		txnId: string,
-	): Promise<boolean> {
+	async getFederationTxn(origin: ServerName, txnId: string): Promise<boolean> {
 		const row = this.db
-			.prepare(
-				"SELECT 1 FROM federation_txns WHERE origin = ? AND txn_id = ?",
-			)
+			.prepare("SELECT 1 FROM federation_txns WHERE origin = ? AND txn_id = ?")
 			.get(origin, txnId);
 		return !!row;
 	}
 
-	async setFederationTxn(
-		origin: ServerName,
-		txnId: string,
-	): Promise<void> {
+	async setFederationTxn(origin: ServerName, txnId: string): Promise<void> {
 		this.db
 			.prepare(
 				"INSERT OR IGNORE INTO federation_txns (origin, txn_id) VALUES (?, ?)",

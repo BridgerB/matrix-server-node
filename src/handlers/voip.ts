@@ -5,15 +5,15 @@ import type { Handler } from "../router.ts";
 // =============================================================================
 
 export function getTurnServer(): Handler {
-  return async (_req) => {
-    return {
-      status: 200,
-      body: {
-        username: "",
-        password: "",
-        uris: [],
-        ttl: 86400,
-      },
-    };
-  };
+	return async (_req) => {
+		return {
+			status: 200,
+			body: {
+				username: "",
+				password: "",
+				uris: [],
+				ttl: 86400,
+			},
+		};
+	};
 }

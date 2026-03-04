@@ -6,16 +6,19 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
+    "format": "biome format --write src",
+    "lint": "biome check src",
+    "typecheck": "tsc --noEmit",
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "node --watch src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "dev": "node --watch src/index.ts"
   },
   "license": "Unlicense",
   "engines": {
     "node": ">=22"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.4.5",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.3.3",
     "@types/pg": "^8.18.0",

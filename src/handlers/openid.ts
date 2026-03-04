@@ -8,24 +8,25 @@ import { forbidden } from "../errors.ts";
 // =============================================================================
 
 export function postOpenIdToken(storage: Storage, serverName: string): Handler {
-  return async (req) => {
-    const targetUserId = req.params["userId"]!;
-    if (req.userId !== targetUserId) throw forbidden("Can only request tokens for yourself");
+	return async (req) => {
+		const targetUserId = req.params["userId"]!;
+		if (req.userId !== targetUserId)
+			throw forbidden("Can only request tokens for yourself");
 
-    const token = generateToken();
-    const expiresIn = 3600;
-    const expiresAt = Date.now() + expiresIn * 1000;
+		const token = generateToken();
+		const expiresIn = 3600;
+		const expiresAt = Date.now() + expiresIn * 1000;
 
-    await storage.storeOpenIdToken(token, req.userId!, expiresAt);
+		await storage.storeOpenIdToken(token, req.userId!, expiresAt);
 
-    return {
-      status: 200,
-      body: {
-        access_token: token,
-        token_type: "Bearer",
-        matrix_server_name: serverName,
-        expires_in: expiresIn,
-      },
-    };
-  };
+		return {
+			status: 200,
+			body: {
+				access_token: token,
+				token_type: "Bearer",
+				matrix_server_name: serverName,
+				expires_in: expiresIn,
+			},
+		};
+	};
 }

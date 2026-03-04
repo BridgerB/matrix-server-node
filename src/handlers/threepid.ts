@@ -7,10 +7,10 @@ import { badJson } from "../errors.ts";
 // =============================================================================
 
 export function getThreePids(storage: Storage): Handler {
-  return async (req) => {
-    const threepids = await storage.getThreePids(req.userId!);
-    return { status: 200, body: { threepids } };
-  };
+	return async (req) => {
+		const threepids = await storage.getThreePids(req.userId!);
+		return { status: 200, body: { threepids } };
+	};
 }
 
 // =============================================================================
@@ -18,13 +18,14 @@ export function getThreePids(storage: Storage): Handler {
 // =============================================================================
 
 export function postAddThreePid(storage: Storage): Handler {
-  return async (req) => {
-    const body = (req.body ?? {}) as { medium?: string; address?: string };
-    if (!body.medium || !body.address) throw badJson("Missing medium or address");
+	return async (req) => {
+		const body = (req.body ?? {}) as { medium?: string; address?: string };
+		if (!body.medium || !body.address)
+			throw badJson("Missing medium or address");
 
-    await storage.addThreePid(req.userId!, body.medium, body.address);
-    return { status: 200, body: {} };
-  };
+		await storage.addThreePid(req.userId!, body.medium, body.address);
+		return { status: 200, body: {} };
+	};
 }
 
 // =============================================================================
@@ -32,11 +33,12 @@ export function postAddThreePid(storage: Storage): Handler {
 // =============================================================================
 
 export function postDeleteThreePid(storage: Storage): Handler {
-  return async (req) => {
-    const body = (req.body ?? {}) as { medium?: string; address?: string };
-    if (!body.medium || !body.address) throw badJson("Missing medium or address");
+	return async (req) => {
+		const body = (req.body ?? {}) as { medium?: string; address?: string };
+		if (!body.medium || !body.address)
+			throw badJson("Missing medium or address");
 
-    await storage.deleteThreePid(req.userId!, body.medium, body.address);
-    return { status: 200, body: { id_server_unbind_result: "no-support" } };
-  };
+		await storage.deleteThreePid(req.userId!, body.medium, body.address);
+		return { status: 200, body: { id_server_unbind_result: "no-support" } };
+	};
 }
