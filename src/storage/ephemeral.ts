@@ -1,5 +1,7 @@
 import type { PresenceState } from "../types/ephemeral.ts";
+import type { StrippedStateEvent } from "../types/events.ts";
 import type { RoomId, RoomState, Timestamp, UserId } from "../types/index.ts";
+import type { JsonObject } from "../types/json.ts";
 
 export const INVITE_STATE_TYPES = [
 	"m.room.create",
@@ -10,6 +12,18 @@ export const INVITE_STATE_TYPES = [
 	"m.room.encryption",
 	"m.room.member",
 ] as const;
+
+export const eventToStrippedState = (event: {
+	content: JsonObject;
+	sender: string;
+	state_key?: string;
+	type: string;
+}): StrippedStateEvent => ({
+	content: event.content,
+	sender: event.sender,
+	state_key: event.state_key ?? "",
+	type: event.type,
+});
 
 export abstract class EphemeralMixin {
 	protected streamCounter = 0;

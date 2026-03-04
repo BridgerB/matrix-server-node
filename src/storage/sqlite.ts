@@ -28,8 +28,13 @@ import type { JsonObject } from "../types/json.ts";
 import type { Pusher } from "../types/push.ts";
 import type { RoomVersion } from "../types/room-versions.ts";
 import type { Device, UserProfile } from "../types/user.ts";
-import { EphemeralMixin, INVITE_STATE_TYPES } from "./ephemeral.ts";
+import {
+	EphemeralMixin,
+	eventToStrippedState,
+	INVITE_STATE_TYPES,
+} from "./ephemeral.ts";
 import type { Storage, StoredSession } from "./interface.ts";
+import { rowToSession, rowToUser } from "./sql-helpers.ts";
 
 export class SqliteStorage extends EphemeralMixin implements Storage {
 	private db: Database.Database;
@@ -334,52 +339,20 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			);
 	}
 
-	private rowToUser(row: Record<string, unknown>): UserAccount {
-		const user: UserAccount = {
-			user_id: row.user_id as UserId,
-			localpart: row.localpart as string,
-			server_name: row.server_name as ServerName,
-			password_hash: row.password_hash as string,
-			account_type: row.account_type as UserAccount["account_type"],
-			is_deactivated: row.is_deactivated === 1,
-			created_at: row.created_at as number,
-		};
-		if (row.displayname) user.displayname = row.displayname as string;
-		if (row.avatar_url) user.avatar_url = row.avatar_url as string;
-		return user;
-	}
-
 	async getUserByLocalpart(
 		localpart: string,
 	): Promise<UserAccount | undefined> {
 		const row = this.db
 			.prepare("SELECT * FROM users WHERE localpart = ?")
 			.get(localpart) as Record<string, unknown> | undefined;
-		return row ? this.rowToUser(row) : undefined;
+		return row ? rowToUser(row, true) : undefined;
 	}
 
 	async getUserById(userId: UserId): Promise<UserAccount | undefined> {
 		const row = this.db
 			.prepare("SELECT * FROM users WHERE user_id = ?")
 			.get(userId) as Record<string, unknown> | undefined;
-		return row ? this.rowToUser(row) : undefined;
-	}
-
-	private rowToSession(row: Record<string, unknown>): StoredSession {
-		const session: StoredSession = {
-			access_token: row.access_token as AccessToken,
-			device_id: row.device_id as DeviceId,
-			user_id: row.user_id as UserId,
-			access_token_hash: row.access_token_hash as string,
-		};
-		if (row.refresh_token)
-			session.refresh_token = row.refresh_token as RefreshToken;
-		if (row.expires_at) session.expires_at = row.expires_at as number;
-		if (row.display_name) session.display_name = row.display_name as string;
-		if (row.last_seen_ip) session.last_seen_ip = row.last_seen_ip as string;
-		if (row.last_seen_ts) session.last_seen_ts = row.last_seen_ts as number;
-		if (row.user_agent) session.user_agent = row.user_agent as string;
-		return session;
+		return row ? rowToUser(row, true) : undefined;
 	}
 
 	async createSession(session: StoredSession): Promise<void> {
@@ -403,7 +376,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		const row = this.stmts.getSession.get(token) as
 			| Record<string, unknown>
 			| undefined;
-		return row ? this.rowToSession(row) : undefined;
+		return row ? rowToSession(row) : undefined;
 	}
 
 	async getSessionByRefreshToken(
@@ -412,14 +385,14 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		const row = this.db
 			.prepare("SELECT * FROM sessions WHERE refresh_token = ?")
 			.get(token) as Record<string, unknown> | undefined;
-		return row ? this.rowToSession(row) : undefined;
+		return row ? rowToSession(row) : undefined;
 	}
 
 	async getSessionsByUser(userId: UserId): Promise<StoredSession[]> {
 		const rows = this.db
 			.prepare("SELECT * FROM sessions WHERE user_id = ?")
 			.all(userId) as Record<string, unknown>[];
-		return rows.map((r) => this.rowToSession(r));
+		return rows.map((r) => rowToSession(r));
 	}
 
 	async deleteSession(token: AccessToken): Promise<void> {
@@ -787,12 +760,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 
 		return rows.map((r) => {
 			const event = JSON.parse(r.event_json) as PDU;
-			return {
-				content: event.content,
-				sender: event.sender,
-				state_key: event.state_key ?? "",
-				type: event.type,
-			};
+			return eventToStrippedState(event);
 		});
 	}
 

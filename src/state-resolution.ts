@@ -1,4 +1,9 @@
-import { checkEventAuth, computeEventId, getUserPowerLevel } from "./events.ts";
+import {
+	checkEventAuth,
+	computeEventId,
+	getUserPowerLevel,
+	makeStateKey,
+} from "./events.ts";
 import type { PDU } from "./types/events.ts";
 import type { EventId } from "./types/index.ts";
 import type { RoomState } from "./types/internal.ts";
@@ -34,6 +39,25 @@ const reverseTopologicalPowerOrder = (
 		const idB = computeEventId(b);
 		return idA < idB ? -1 : idA > idB ? 1 : 0;
 	});
+
+const applyEvents = (
+	events: PDU[],
+	roomState: RoomState,
+	resolvedState: Map<string, PDU>,
+): void => {
+	for (const event of events) {
+		const key = makeStateKey(event.type, event.state_key ?? "");
+		const testState: RoomState = {
+			...roomState,
+			state_events: new Map(resolvedState),
+		};
+		try {
+			const eventId = computeEventId(event);
+			checkEventAuth(event, eventId, testState);
+			resolvedState.set(key, event);
+		} catch {}
+	}
+};
 
 /**
  * Resolve conflicting state from multiple forks.
@@ -95,36 +119,14 @@ export const resolveState = (
 	);
 
 	const resolvedState = new Map(unconflicted);
-	for (const event of sortedPower) {
-		const key = `${event.type}\0${event.state_key ?? ""}`;
-		const testState: RoomState = {
-			...roomState,
-			state_events: new Map(resolvedState),
-		};
-		try {
-			const eventId = computeEventId(event);
-			checkEventAuth(event, eventId, testState);
-			resolvedState.set(key, event);
-		} catch {}
-	}
+	applyEvents(sortedPower, roomState, resolvedState);
 
 	const sortedOther = reverseTopologicalPowerOrder(
 		conflictedOther,
 		authEvents,
 		roomState,
 	);
-	for (const event of sortedOther) {
-		const key = `${event.type}\0${event.state_key ?? ""}`;
-		const testState: RoomState = {
-			...roomState,
-			state_events: new Map(resolvedState),
-		};
-		try {
-			const eventId = computeEventId(event);
-			checkEventAuth(event, eventId, testState);
-			resolvedState.set(key, event);
-		} catch {}
-	}
+	applyEvents(sortedOther, roomState, resolvedState);
 
 	return resolvedState;
 };

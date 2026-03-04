@@ -1,13 +1,6 @@
+import { globMatch } from "../glob.ts";
 import type { ServerName } from "../types/index.ts";
 import type { RoomState } from "../types/internal.ts";
-
-const globMatch = (pattern: string, value: string) =>
-	new RegExp(
-		`^${pattern
-			.replace(/[.+^${}()|[\]\\]/g, "\\$&")
-			.replace(/\*/g, ".*")
-			.replace(/\?/g, ".")}$`,
-	).test(value);
 
 export const isServerAllowedByAcl = (
 	serverName: ServerName,

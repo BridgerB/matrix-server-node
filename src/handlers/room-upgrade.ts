@@ -1,12 +1,12 @@
 import { generateRoomId } from "../crypto.ts";
-import { badJson, forbidden, notJoined, roomNotFound } from "../errors.ts";
+import { badJson, forbidden } from "../errors.ts";
 import {
 	buildEvent,
 	checkEventAuth,
 	computeEventId,
 	type EventContext,
-	getMembership,
 	getUserPowerLevel,
+	requireJoinedRoom,
 	selectAuthEvents,
 	sendStateEvent,
 } from "../events.ts";
@@ -39,9 +39,7 @@ export const postRoomUpgrade =
 
 		if (!body.new_version) throw badJson("Missing new_version");
 
-		const oldRoom = await storage.getRoom(oldRoomId);
-		if (!oldRoom) throw roomNotFound();
-		if (getMembership(oldRoom, userId) !== "join") throw notJoined();
+		const oldRoom = await requireJoinedRoom(storage, oldRoomId, userId);
 
 		const senderPl = getUserPowerLevel(userId, oldRoom);
 		const plEvent = oldRoom.state_events.get("m.room.power_levels\0");

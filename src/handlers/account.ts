@@ -2,7 +2,7 @@ import { badJson } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { WhoAmIResponse } from "../types/index.ts";
-import { requireUIAA } from "../uiaa.ts";
+import { withUIAA } from "../uiaa.ts";
 
 const MIN_PASSWORD_LENGTH = 8;
 
@@ -19,17 +19,8 @@ export const postChangePassword =
 	async (req) => {
 		const body = req.body as Record<string, unknown>;
 
-		try {
-			await requireUIAA(storage, body);
-		} catch (err: unknown) {
-			if (err && typeof err === "object" && "uiaaResponse" in err) {
-				return {
-					status: 401,
-					body: (err as { uiaaResponse: unknown }).uiaaResponse,
-				};
-			}
-			throw err;
-		}
+		const uiaaResponse = await withUIAA(storage, body);
+		if (uiaaResponse) return uiaaResponse;
 
 		const newPassword = body.new_password as string | undefined;
 		if (!newPassword) throw badJson("Missing 'new_password' field");
@@ -59,17 +50,8 @@ export const postDeactivate =
 	async (req) => {
 		const body = req.body as Record<string, unknown>;
 
-		try {
-			await requireUIAA(storage, body);
-		} catch (err: unknown) {
-			if (err && typeof err === "object" && "uiaaResponse" in err) {
-				return {
-					status: 401,
-					body: (err as { uiaaResponse: unknown }).uiaaResponse,
-				};
-			}
-			throw err;
-		}
+		const uiaaResponse = await withUIAA(storage, body);
+		if (uiaaResponse) return uiaaResponse;
 
 		await storage.deactivateUser(req.userId as string);
 

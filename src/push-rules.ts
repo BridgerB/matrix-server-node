@@ -1,3 +1,4 @@
+import { globMatch, globMatchWordBoundary } from "./glob.ts";
 import type { Storage } from "./storage/interface.ts";
 import type { PDU } from "./types/events.ts";
 import type { UserId } from "./types/identifiers.ts";
@@ -232,18 +233,6 @@ export async function saveRules(
 		rules as unknown as JsonObject,
 	);
 }
-const escapeGlob = (pattern: string) =>
-	pattern
-		.replace(/[.+^${}()|[\]\\]/g, "\\$&")
-		.replace(/\*/g, ".*")
-		.replace(/\?/g, ".");
-
-const globMatch = (pattern: string, value: string) =>
-	new RegExp(`^${escapeGlob(pattern)}$`, "i").test(value);
-
-const globMatchWordBoundary = (pattern: string, body: string) =>
-	new RegExp(`(?:^|\\W)(${escapeGlob(pattern)})(?:$|\\W)`, "i").test(body);
-
 const jsonValueEquals = (a: unknown, b: unknown): boolean => {
 	if (a === b) return true;
 	if (a === null || b === null) return a === b;
@@ -310,7 +299,7 @@ const checkCondition = (
 			if (typeof value !== "string") return false;
 			return cond.key === "content.body"
 				? globMatchWordBoundary(cond.pattern, value)
-				: globMatch(cond.pattern, value);
+				: globMatch(cond.pattern, value, true);
 		}
 		case "contains_display_name": {
 			if (!ctx.displayName) return false;

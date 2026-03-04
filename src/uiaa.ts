@@ -55,3 +55,21 @@ export const requireUIAA = async (
 	await storage.deleteUIAASession(sessionId);
 	return true;
 };
+
+export const withUIAA = async (
+	storage: Storage,
+	body: Record<string, unknown>,
+): Promise<{ status: number; body: unknown } | null> => {
+	try {
+		await requireUIAA(storage, body);
+		return null;
+	} catch (err: unknown) {
+		if (err && typeof err === "object" && "uiaaResponse" in err) {
+			return {
+				status: 401,
+				body: (err as { uiaaResponse: unknown }).uiaaResponse,
+			};
+		}
+		throw err;
+	}
+};

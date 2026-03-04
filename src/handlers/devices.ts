@@ -2,7 +2,7 @@ import { badJson, notFound } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { DeviceId } from "../types/index.ts";
-import { requireUIAA } from "../uiaa.ts";
+import { withUIAA } from "../uiaa.ts";
 
 export const getDevices =
 	(storage: Storage): Handler =>
@@ -50,17 +50,8 @@ export const deleteDevice =
 		const device = await storage.getDevice(req.userId as string, deviceId);
 		if (!device) throw notFound("Device not found");
 
-		try {
-			await requireUIAA(storage, body);
-		} catch (err: unknown) {
-			if (err && typeof err === "object" && "uiaaResponse" in err) {
-				return {
-					status: 401,
-					body: (err as { uiaaResponse: unknown }).uiaaResponse,
-				};
-			}
-			throw err;
-		}
+		const uiaaResponse = await withUIAA(storage, body);
+		if (uiaaResponse) return uiaaResponse;
 
 		await storage.deleteDeviceSession(req.userId as string, deviceId);
 		return { status: 200, body: {} };
@@ -74,17 +65,8 @@ export const deleteDevices =
 		if (!deviceIds || !Array.isArray(deviceIds))
 			throw badJson("Missing 'devices' array");
 
-		try {
-			await requireUIAA(storage, body);
-		} catch (err: unknown) {
-			if (err && typeof err === "object" && "uiaaResponse" in err) {
-				return {
-					status: 401,
-					body: (err as { uiaaResponse: unknown }).uiaaResponse,
-				};
-			}
-			throw err;
-		}
+		const uiaaResponse = await withUIAA(storage, body);
+		if (uiaaResponse) return uiaaResponse;
 
 		for (const deviceId of deviceIds) {
 			await storage.deleteDeviceSession(

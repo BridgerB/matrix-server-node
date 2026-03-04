@@ -1,5 +1,5 @@
-import { notFound, notJoined, roomNotFound } from "../errors.ts";
-import { getMembership, pduToClientEvent } from "../events.ts";
+import { notFound } from "../errors.ts";
+import { pduToClientEvent, requireJoinedRoom } from "../events.ts";
 import { bundleAggregations } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
@@ -13,9 +13,7 @@ export const getRelations =
 		const eventType = req.params.eventType;
 		const userId = req.userId as string;
 
-		const room = await storage.getRoom(roomId);
-		if (!room) throw roomNotFound();
-		if (getMembership(room, userId) !== "join") throw notJoined();
+		await requireJoinedRoom(storage, roomId, userId);
 
 		const target = await storage.getEvent(eventId);
 		if (!target || target.event.room_id !== roomId)

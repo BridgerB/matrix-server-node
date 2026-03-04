@@ -13,6 +13,12 @@ import type { KeyId, ServerName } from "./types/index.ts";
 const PKCS8_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
 const SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 
+const reconstructPublicKey = (publicKeyBase64: string): KeyObject => {
+	const rawPub = unpaddedBase64Decode(publicKeyBase64);
+	const spki = Buffer.concat([SPKI_PREFIX, rawPub]);
+	return createPublicKey({ key: spki, format: "der", type: "spki" });
+};
+
 export interface SigningKey {
 	keyId: KeyId;
 	algorithm: "ed25519";
@@ -119,9 +125,7 @@ export const verifyJsonSignature = (
 
 	const sigBuf = unpaddedBase64Decode(sigBase64);
 
-	const rawPub = unpaddedBase64Decode(publicKeyBase64);
-	const spki = Buffer.concat([SPKI_PREFIX, rawPub]);
-	const pubKey = createPublicKey({ key: spki, format: "der", type: "spki" });
+	const pubKey = reconstructPublicKey(publicKeyBase64);
 
 	return verify(null, Buffer.from(canonical), pubKey, sigBuf);
 };
@@ -172,9 +176,7 @@ export const verifyEventSignature = (
 	if (!sigBase64) return false;
 
 	const sigBuf = unpaddedBase64Decode(sigBase64);
-	const rawPub = unpaddedBase64Decode(publicKeyBase64);
-	const spki = Buffer.concat([SPKI_PREFIX, rawPub]);
-	const pubKey = createPublicKey({ key: spki, format: "der", type: "spki" });
+	const pubKey = reconstructPublicKey(publicKeyBase64);
 
 	return verify(null, Buffer.from(canonical), pubKey, sigBuf);
 };

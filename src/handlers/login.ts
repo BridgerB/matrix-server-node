@@ -1,8 +1,8 @@
-import { generateDeviceId, generateToken } from "../crypto.ts";
 import { badJson, forbidden, invalidParam } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { LoginFlow, LoginRequest, LoginResponse } from "../types/index.ts";
+import { createSessionAndRespond } from "./auth-shared.ts";
 
 const SUPPORTED_FLOWS: LoginFlow[] = [{ type: "m.login.password" }];
 
@@ -40,21 +40,8 @@ export const postLogin =
 			throw forbidden("Invalid username or password");
 		}
 
-		const deviceId = body.device_id ?? generateDeviceId();
-		const accessToken = generateToken();
-		const refreshToken = body.refresh_token ? generateToken() : undefined;
-
-		await storage.createSession({
-			device_id: deviceId,
-			user_id: account.user_id,
-			access_token: accessToken,
-			access_token_hash: "",
-			refresh_token: refreshToken,
-			display_name: body.initial_device_display_name,
-			last_seen_ip: req.raw.socket.remoteAddress ?? "unknown",
-			last_seen_ts: Date.now(),
-			user_agent: (req.headers["user-agent"] as string) ?? "",
-		});
+		const { accessToken, deviceId, refreshToken } =
+			await createSessionAndRespond(storage, req, account.user_id, body);
 
 		const response: LoginResponse = {
 			user_id: account.user_id,

@@ -1,5 +1,4 @@
-import { notJoined, roomNotFound } from "../errors.ts";
-import { getMembership, pduToClientEvent } from "../events.ts";
+import { pduToClientEvent, requireJoinedRoom } from "../events.ts";
 import { bundleAggregations } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
@@ -11,9 +10,7 @@ export const getThreads =
 		const roomId = req.params.roomId as RoomId;
 		const userId = req.userId as string;
 
-		const room = await storage.getRoom(roomId);
-		if (!room) throw roomNotFound();
-		if (getMembership(room, userId) !== "join") throw notJoined();
+		await requireJoinedRoom(storage, roomId, userId);
 
 		const include = (req.query.get("include") ?? "all") as
 			| "all"

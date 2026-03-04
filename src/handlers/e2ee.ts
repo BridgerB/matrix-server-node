@@ -40,29 +40,36 @@ export const postKeysUpload =
 		return { status: 200, body: { one_time_key_counts: counts } };
 	};
 
+export const queryDeviceKeys = async (
+	storage: Storage,
+	deviceKeysRequest: Record<string, string[]>,
+): Promise<Record<UserId, Record<DeviceId, DeviceKeys>>> => {
+	const deviceKeys: Record<UserId, Record<DeviceId, DeviceKeys>> = {};
+	for (const [targetUserId, deviceIds] of Object.entries(deviceKeysRequest)) {
+		if (deviceIds.length === 0) {
+			const allKeys = await storage.getAllDeviceKeys(targetUserId as UserId);
+			if (Object.keys(allKeys).length > 0)
+				deviceKeys[targetUserId as UserId] = allKeys;
+		} else {
+			const userDeviceKeys: Record<DeviceId, DeviceKeys> = {};
+			for (const did of deviceIds) {
+				const keys = await storage.getDeviceKeys(targetUserId as UserId, did);
+				if (keys) userDeviceKeys[did] = keys;
+			}
+			if (Object.keys(userDeviceKeys).length > 0)
+				deviceKeys[targetUserId as UserId] = userDeviceKeys;
+		}
+	}
+	return deviceKeys;
+};
+
 export const postKeysQuery =
 	(storage: Storage): Handler =>
 	async (req) => {
 		const body = (req.body ?? {}) as KeysQueryRequest;
 		if (!body.device_keys) throw badJson("Missing device_keys field");
 
-		const deviceKeys: Record<UserId, Record<DeviceId, DeviceKeys>> = {};
-
-		for (const [targetUserId, deviceIds] of Object.entries(body.device_keys)) {
-			if (deviceIds.length === 0) {
-				const allKeys = await storage.getAllDeviceKeys(targetUserId as UserId);
-				if (Object.keys(allKeys).length > 0)
-					deviceKeys[targetUserId as UserId] = allKeys;
-			} else {
-				const userDeviceKeys: Record<DeviceId, DeviceKeys> = {};
-				for (const did of deviceIds) {
-					const keys = await storage.getDeviceKeys(targetUserId as UserId, did);
-					if (keys) userDeviceKeys[did] = keys;
-				}
-				if (Object.keys(userDeviceKeys).length > 0)
-					deviceKeys[targetUserId as UserId] = userDeviceKeys;
-			}
-		}
+		const deviceKeys = await queryDeviceKeys(storage, body.device_keys);
 
 		return { status: 200, body: { device_keys: deviceKeys } };
 	};

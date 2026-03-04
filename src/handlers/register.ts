@@ -1,8 +1,4 @@
-import {
-	generateDeviceId,
-	generateSessionId,
-	generateToken,
-} from "../crypto.ts";
+import { generateSessionId } from "../crypto.ts";
 import {
 	badJson,
 	forbidden,
@@ -19,6 +15,7 @@ import type {
 	RegisterRequest,
 	UIAAResponse,
 } from "../types/index.ts";
+import { createSessionAndRespond } from "./auth-shared.ts";
 
 const REGISTRATION_FLOWS: { stages: AuthType[] }[] = [
 	{ stages: ["m.login.dummy"] },
@@ -105,21 +102,8 @@ export const postRegister =
 			return { status: 200, body: { user_id: userId } };
 		}
 
-		const deviceId = body.device_id ?? generateDeviceId();
-		const accessToken = generateToken();
-		const refreshToken = body.refresh_token ? generateToken() : undefined;
-
-		await storage.createSession({
-			device_id: deviceId,
-			user_id: userId,
-			access_token: accessToken,
-			access_token_hash: "",
-			refresh_token: refreshToken,
-			display_name: body.initial_device_display_name,
-			last_seen_ip: req.raw.socket.remoteAddress ?? "unknown",
-			last_seen_ts: now,
-			user_agent: (req.headers["user-agent"] as string) ?? "",
-		});
+		const { accessToken, deviceId, refreshToken } =
+			await createSessionAndRespond(storage, req, userId, body);
 
 		const response: LoginResponse = {
 			user_id: userId,

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { forbidden } from "./errors.ts";
+import { forbidden, notJoined, roomNotFound } from "./errors.ts";
 import type { SigningKey } from "./signing.ts";
 import { signEvent } from "./signing.ts";
 import type { Storage } from "./storage/interface.ts";
@@ -167,7 +167,7 @@ const getStateEventId = (
 	type: string,
 	stateKey: string,
 ): EventId | undefined => {
-	const event = roomState.state_events.get(`${type}\0${stateKey}`);
+	const event = roomState.state_events.get(makeStateKey(type, stateKey));
 	return event ? computeEventId(event) : undefined;
 };
 
@@ -394,6 +394,17 @@ export const pduToClientEvent = (pdu: PDU, eventId: EventId): ClientEvent => {
 	return ce;
 };
 
+export const requireJoinedRoom = async (
+	storage: Storage,
+	roomId: string,
+	userId: string,
+): Promise<RoomState> => {
+	const room = await storage.getRoom(roomId);
+	if (!room) throw roomNotFound();
+	if (getMembership(room, userId) !== "join") throw notJoined();
+	return room;
+};
+
 export const countJoinedMembers = (
 	stateEvents: Map<string, { content: unknown }>,
 ): number =>
@@ -413,6 +424,9 @@ export const getStateContent = (
 		? ((event.content as Record<string, unknown>)[field] as string | undefined)
 		: undefined;
 };
+
+export const makeStateKey = (type: string, stateKey = ""): string =>
+	`${type}\0${stateKey}`;
 
 export interface EventContext {
 	roomState: RoomState;

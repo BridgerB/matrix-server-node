@@ -26,7 +26,7 @@ import type { JsonObject } from "../types/json.ts";
 import type { Pusher } from "../types/push.ts";
 import type { RoomVersion } from "../types/room-versions.ts";
 import type { Device, UserProfile } from "../types/user.ts";
-import { INVITE_STATE_TYPES } from "./ephemeral.ts";
+import { eventToStrippedState, INVITE_STATE_TYPES } from "./ephemeral.ts";
 import type { Storage, StoredSession } from "./interface.ts";
 
 export class MemoryStorage implements Storage {
@@ -399,12 +399,7 @@ export class MemoryStorage implements Storage {
 					key.split("\0")[0] as (typeof INVITE_STATE_TYPES)[number],
 				),
 			)
-			.map(([, event]) => ({
-				content: event.content,
-				sender: event.sender,
-				state_key: event.state_key ?? "",
-				type: event.type,
-			}));
+			.map(([, event]) => eventToStrippedState(event));
 	}
 
 	async waitForEvents(since: number, timeoutMs: number): Promise<void> {

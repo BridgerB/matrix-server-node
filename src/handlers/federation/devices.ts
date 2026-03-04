@@ -2,6 +2,7 @@ import { notFound } from "../../errors.ts";
 import type { Handler } from "../../router.ts";
 import type { Storage } from "../../storage/interface.ts";
 import type { DeviceId, KeyId, UserId } from "../../types/index.ts";
+import { queryDeviceKeys } from "../e2ee.ts";
 
 export const postFederationUserDevices =
 	(storage: Storage): Handler =>
@@ -52,28 +53,9 @@ export const postFederationKeysQuery =
 		const deviceKeys: Record<UserId, Record<DeviceId, unknown>> = {};
 
 		if (body.device_keys) {
-			for (const [userId, deviceIds] of Object.entries(body.device_keys)) {
-				deviceKeys[userId as UserId] = {};
-				if (deviceIds.length === 0) {
-					const allKeys = await storage.getAllDeviceKeys(userId as UserId);
-					for (const [deviceId, keys] of Object.entries(allKeys)) {
-						(deviceKeys[userId as UserId] as Record<DeviceId, unknown>)[
-							deviceId as DeviceId
-						] = keys;
-					}
-				} else {
-					for (const deviceId of deviceIds) {
-						const keys = await storage.getDeviceKeys(
-							userId as UserId,
-							deviceId,
-						);
-						if (keys) {
-							(deviceKeys[userId as UserId] as Record<DeviceId, unknown>)[
-								deviceId
-							] = keys;
-						}
-					}
-				}
+			const result = await queryDeviceKeys(storage, body.device_keys);
+			for (const userId of Object.keys(body.device_keys)) {
+				deviceKeys[userId as UserId] = result[userId as UserId] ?? {};
 			}
 		}
 
