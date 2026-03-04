@@ -6,12 +6,9 @@ import type { JsonObject } from "../types/json.ts";
 
 const FORBIDDEN_TYPES = new Set(["m.fully_read", "m.push_rules"]);
 
-// =============================================================================
-// GLOBAL ACCOUNT DATA
-// =============================================================================
-
-export function getGlobalAccountData(storage: Storage): Handler {
-	return async (req) => {
+export const getGlobalAccountData =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const userId = req.params.userId as UserId;
 		if (req.userId !== userId)
 			throw forbidden("Cannot access another user's account data");
@@ -21,31 +18,26 @@ export function getGlobalAccountData(storage: Storage): Handler {
 		if (!data) throw notFound("Account data not found");
 		return { status: 200, body: data };
 	};
-}
 
-export function putGlobalAccountData(storage: Storage): Handler {
-	return async (req) => {
+export const putGlobalAccountData =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const userId = req.params.userId as UserId;
 		if (req.userId !== userId)
 			throw forbidden("Cannot set another user's account data");
 
 		const type = req.params.type as string;
-		if (FORBIDDEN_TYPES.has(type)) {
+		if (FORBIDDEN_TYPES.has(type))
 			throw badJson(`Cannot set ${type} via this endpoint`);
-		}
 
 		const content = req.body as JsonObject;
 		await storage.setGlobalAccountData(userId, type, content);
 		return { status: 200, body: {} };
 	};
-}
 
-// =============================================================================
-// ROOM ACCOUNT DATA
-// =============================================================================
-
-export function getRoomAccountData(storage: Storage): Handler {
-	return async (req) => {
+export const getRoomAccountData =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const userId = req.params.userId as UserId;
 		if (req.userId !== userId)
 			throw forbidden("Cannot access another user's account data");
@@ -56,32 +48,27 @@ export function getRoomAccountData(storage: Storage): Handler {
 		if (!data) throw notFound("Account data not found");
 		return { status: 200, body: data };
 	};
-}
 
-export function putRoomAccountData(storage: Storage): Handler {
-	return async (req) => {
+export const putRoomAccountData =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const userId = req.params.userId as UserId;
 		if (req.userId !== userId)
 			throw forbidden("Cannot set another user's account data");
 
 		const roomId = req.params.roomId as RoomId;
 		const type = req.params.type as string;
-		if (FORBIDDEN_TYPES.has(type)) {
+		if (FORBIDDEN_TYPES.has(type))
 			throw badJson(`Cannot set ${type} via this endpoint`);
-		}
 
 		const content = req.body as JsonObject;
 		await storage.setRoomAccountData(userId, roomId, type, content);
 		return { status: 200, body: {} };
 	};
-}
 
-// =============================================================================
-// TAGS (stored as m.tag room account data)
-// =============================================================================
-
-export function getTags(storage: Storage): Handler {
-	return async (req) => {
+export const getTags =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const userId = req.params.userId as UserId;
 		if (req.userId !== userId)
 			throw forbidden("Cannot access another user's tags");
@@ -91,10 +78,10 @@ export function getTags(storage: Storage): Handler {
 		const tags = data ? ((data as Record<string, unknown>).tags ?? {}) : {};
 		return { status: 200, body: { tags } };
 	};
-}
 
-export function putTag(storage: Storage): Handler {
-	return async (req) => {
+export const putTag =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const userId = req.params.userId as UserId;
 		if (req.userId !== userId)
 			throw forbidden("Cannot set another user's tags");
@@ -102,13 +89,11 @@ export function putTag(storage: Storage): Handler {
 		const roomId = req.params.roomId as RoomId;
 		const tag = req.params.tag as string;
 
-		if (Buffer.byteLength(tag, "utf-8") > 255) {
+		if (Buffer.byteLength(tag, "utf-8") > 255)
 			throw badJson("Tag name exceeds 255 bytes");
-		}
 
 		const body = (req.body ?? {}) as Record<string, unknown>;
 
-		// Read existing tags
 		const existing = await storage.getRoomAccountData(userId, roomId, "m.tag");
 		const tags = existing
 			? {
@@ -119,7 +104,6 @@ export function putTag(storage: Storage): Handler {
 				}
 			: {};
 
-		// Set tag
 		const tagData: Record<string, unknown> = {};
 		if (body.order !== undefined) tagData.order = body.order;
 		tags[tag] = tagData;
@@ -129,10 +113,10 @@ export function putTag(storage: Storage): Handler {
 		} as JsonObject);
 		return { status: 200, body: {} };
 	};
-}
 
-export function deleteTag(storage: Storage): Handler {
-	return async (req) => {
+export const deleteTag =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const userId = req.params.userId as UserId;
 		if (req.userId !== userId)
 			throw forbidden("Cannot delete another user's tags");
@@ -156,4 +140,3 @@ export function deleteTag(storage: Storage): Handler {
 		} as JsonObject);
 		return { status: 200, body: {} };
 	};
-}

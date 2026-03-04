@@ -1,7 +1,7 @@
 import type { Handler } from "../router.ts";
 import type { VersionsResponse, WellKnown } from "../types/index.ts";
 
-export function versionsHandler(_serverName: string): Handler {
+export const versionsHandler = (_serverName: string): Handler => {
 	const body: VersionsResponse = {
 		versions: [
 			"v1.1",
@@ -22,21 +22,21 @@ export function versionsHandler(_serverName: string): Handler {
 		unstable_features: {},
 	};
 	return async () => ({ status: 200, body });
-}
+};
 
-export function wellKnownServerHandler(serverName: string): Handler {
+export const wellKnownServerHandler = (serverName: string): Handler => {
 	const body = { "m.server": `${serverName}:8448` };
 	return async () => ({ status: 200, body });
-}
+};
 
-export function wellKnownClientHandler(serverName: string): Handler {
+export const wellKnownClientHandler = (serverName: string): Handler => {
 	const body: WellKnown = {
 		"m.homeserver": { base_url: `https://${serverName}` },
 	};
 	return async () => ({ status: 200, body });
-}
+};
 
-export function getCapabilities(): Handler {
+export const getCapabilities = (): Handler => {
 	const body = {
 		capabilities: {
 			"m.change_password": { enabled: true },
@@ -47,4 +47,4 @@ export function getCapabilities(): Handler {
 		},
 	};
 	return () => ({ status: 200, body });
-}
+};

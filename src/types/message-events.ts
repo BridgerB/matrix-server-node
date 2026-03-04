@@ -1,7 +1,3 @@
-// =============================================================================
-// EVENT CONTENT TYPES - MESSAGES
-// =============================================================================
-
 import type { DeviceId, EventId, MxcUri } from "./identifiers.ts";
 import type {
 	AudioInfo,

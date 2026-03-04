@@ -1,7 +1,3 @@
-// =============================================================================
-// EVENT CONTENT TYPES - ACCOUNT DATA
-// =============================================================================
-
 import type { EventId, RoomId, UserId } from "./identifiers.ts";
 
 export interface DirectContent {

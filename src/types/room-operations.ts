@@ -1,7 +1,3 @@
-// =============================================================================
-// ROOM OPERATIONS
-// =============================================================================
-
 import type { ClientEvent } from "./events.ts";
 import type { RoomEventFilter } from "./filters.ts";
 import type { MxcUri, RoomId, UserId } from "./identifiers.ts";
@@ -40,10 +36,6 @@ export interface StateEventInput {
 export interface CreateRoomResponse {
 	room_id: RoomId;
 }
-
-// =============================================================================
-// MESSAGES / CONTEXT / SEARCH
-// =============================================================================
 
 export interface MessagesRequest {
 	from: string;
@@ -120,10 +112,6 @@ export interface SearchResult {
 		>;
 	};
 }
-
-// =============================================================================
-// RELATIONS / AGGREGATIONS
-// =============================================================================
 
 export interface RelationsResponse {
 	chunk: ClientEvent[];

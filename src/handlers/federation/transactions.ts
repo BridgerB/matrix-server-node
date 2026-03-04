@@ -19,9 +19,128 @@ import type {
 	UserId,
 } from "../../types/index.ts";
 
-// =============================================================================
-// PUT /_matrix/federation/v1/send/:txnId
-// =============================================================================
+const verifyOriginSig = async (
+	pdu: PDU,
+	origin: ServerName,
+	remoteKeyStore: RemoteKeyStore,
+	federationClient: FederationClient,
+) => {
+	const originSigs = pdu.signatures?.[origin];
+	if (!originSigs) throw new Error(`No signature from origin ${origin}`);
+	for (const keyId of Object.keys(originSigs)) {
+		const pubKey = await remoteKeyStore.getServerKey(
+			origin,
+			keyId as KeyId,
+			federationClient,
+		);
+		if (pubKey && verifyEventSignature(pdu, origin, keyId as KeyId, pubKey))
+			return;
+	}
+	throw new Error("Invalid event signature");
+};
+
+const processPdu = async (
+	storage: Storage,
+	pdu: PDU,
+	eventId: EventId,
+	origin: ServerName,
+	remoteKeyStore: RemoteKeyStore,
+	federationClient: FederationClient,
+): Promise<void> => {
+	const expectedHash = computeContentHash(pdu);
+	if (pdu.hashes?.sha256 !== expectedHash) {
+		throw new Error("Content hash mismatch");
+	}
+
+	await verifyOriginSig(pdu, origin, remoteKeyStore, federationClient);
+
+	const computedId = computeEventId(pdu);
+	if (computedId !== eventId) {
+		throw new Error("Event ID mismatch");
+	}
+
+	const existing = await storage.getEvent(eventId);
+	if (existing) return;
+
+	const room = await storage.getRoom(pdu.room_id);
+	if (!room) throw new Error("Room not found locally");
+
+	if (!isServerAllowedByAcl(origin, room)) {
+		throw new Error("Server denied by ACL");
+	}
+
+	checkEventAuth(pdu, eventId, room);
+
+	if (pdu.state_key !== undefined) {
+		await storage.setStateEvent(pdu.room_id, pdu, eventId);
+	} else {
+		await storage.storeEvent(pdu, eventId);
+	}
+
+	room.depth = Math.max(room.depth, pdu.depth + 1);
+	room.forward_extremities = [
+		...room.forward_extremities.filter((id) => !pdu.prev_events.includes(id)),
+		eventId,
+	];
+};
+
+const processEdu = async (
+	storage: Storage,
+	edu: EDU,
+	_origin: ServerName,
+): Promise<void> => {
+	const content = edu.content as Record<string, unknown>;
+
+	switch (edu.edu_type) {
+		case "m.typing": {
+			const { room_id, user_id, typing } = content as {
+				room_id: RoomId;
+				user_id: UserId;
+				typing: boolean;
+			};
+			if (room_id && user_id)
+				await storage.setTyping(room_id, user_id, typing, 30000);
+			break;
+		}
+		case "m.presence": {
+			const { user_id, presence, status_msg } = content as {
+				user_id: UserId;
+				presence: string;
+				status_msg?: string;
+			};
+			if (user_id && presence) {
+				await storage.setPresence(
+					user_id,
+					presence as "online" | "offline" | "unavailable",
+					status_msg,
+				);
+			}
+			break;
+		}
+		case "m.receipt": {
+			const { room_id, receipts } = content as {
+				room_id: RoomId;
+				receipts?: Record<string, Record<string, Record<string, unknown>>>;
+			};
+			if (room_id && receipts) {
+				for (const [eventId, receiptTypes] of Object.entries(receipts)) {
+					for (const [receiptType, users] of Object.entries(receiptTypes)) {
+						for (const userId of Object.keys(users)) {
+							await storage.setReceipt(
+								room_id,
+								userId as UserId,
+								eventId as EventId,
+								receiptType,
+								Date.now(),
+							);
+						}
+					}
+				}
+			}
+			break;
+		}
+	}
+};
 
 export function putFederationSend(
 	storage: Storage,
@@ -34,16 +153,16 @@ export function putFederationSend(
 		const txnId = req.params.txnId as string;
 		const origin = req.origin as string;
 
-		// Transaction dedup
 		const alreadySeen = await storage.getFederationTxn(origin, txnId);
 		if (alreadySeen) {
 			return { status: 200, body: { pdus: {} } };
 		}
 		await storage.setFederationTxn(origin, txnId);
 
-		const body = (req.body ?? {}) as { pdus?: PDU[]; edus?: EDU[] };
-		const pdus = body.pdus ?? [];
-		const edus = body.edus ?? [];
+		const { pdus = [], edus = [] } = (req.body ?? {}) as {
+			pdus?: PDU[];
+			edus?: EDU[];
+		};
 		const pduResults: Record<string, Record<string, unknown>> = {};
 
 		for (const pdu of pdus) {
@@ -65,140 +184,12 @@ export function putFederationSend(
 			}
 		}
 
-		// Process EDUs
 		for (const edu of edus) {
 			try {
 				await processEdu(storage, edu, origin);
-			} catch {
-				// EDU failures are silently ignored
-			}
+			} catch {}
 		}
 
 		return { status: 200, body: { pdus: pduResults } };
 	};
-}
-
-async function processPdu(
-	storage: Storage,
-	pdu: PDU,
-	eventId: EventId,
-	origin: ServerName,
-	remoteKeyStore: RemoteKeyStore,
-	federationClient: FederationClient,
-): Promise<void> {
-	// 1. Verify content hash
-	const expectedHash = computeContentHash(pdu);
-	if (pdu.hashes?.sha256 !== expectedHash) {
-		throw new Error("Content hash mismatch");
-	}
-
-	// 2. Verify signature from origin server
-	const originSigs = pdu.signatures?.[origin];
-	if (!originSigs) throw new Error(`No signature from origin ${origin}`);
-
-	let sigValid = false;
-	for (const keyId of Object.keys(originSigs)) {
-		const pubKey = await remoteKeyStore.getServerKey(
-			origin,
-			keyId as KeyId,
-			federationClient,
-		);
-		if (pubKey && verifyEventSignature(pdu, origin, keyId as KeyId, pubKey)) {
-			sigValid = true;
-			break;
-		}
-	}
-	if (!sigValid) throw new Error("Invalid event signature");
-
-	// 3. Verify event ID matches
-	const computedId = computeEventId(pdu);
-	if (computedId !== eventId) {
-		throw new Error("Event ID mismatch");
-	}
-
-	// 4. Check if we already have this event
-	const existing = await storage.getEvent(eventId);
-	if (existing) return;
-
-	// 5. Verify room exists locally
-	const room = await storage.getRoom(pdu.room_id);
-	if (!room) throw new Error("Room not found locally");
-
-	// 6. Check ACL
-	if (!isServerAllowedByAcl(origin, room)) {
-		throw new Error("Server denied by ACL");
-	}
-
-	// 7. Auth check against local room state
-	checkEventAuth(pdu, eventId, room);
-
-	// 8. Store the event
-	if (pdu.state_key !== undefined) {
-		await storage.setStateEvent(pdu.room_id, pdu, eventId);
-	} else {
-		await storage.storeEvent(pdu, eventId);
-	}
-
-	// 9. Update room extremities
-	room.depth = Math.max(room.depth, pdu.depth + 1);
-	// Remove prev_events from extremities, add this event
-	const newExtremities = room.forward_extremities.filter(
-		(id) => !pdu.prev_events.includes(id),
-	);
-	newExtremities.push(eventId);
-	room.forward_extremities = newExtremities;
-}
-
-async function processEdu(
-	storage: Storage,
-	edu: EDU,
-	_origin: ServerName,
-): Promise<void> {
-	const content = edu.content as Record<string, unknown>;
-
-	switch (edu.edu_type) {
-		case "m.typing": {
-			const roomId = content.room_id as RoomId;
-			const userId = content.user_id as UserId;
-			const typing = content.typing as boolean;
-			if (roomId && userId) {
-				await storage.setTyping(roomId, userId, typing, 30000);
-			}
-			break;
-		}
-		case "m.presence": {
-			const userId = content.user_id as UserId;
-			const presence = content.presence as string;
-			if (userId && presence) {
-				await storage.setPresence(
-					userId,
-					presence as "online" | "offline" | "unavailable",
-					content.status_msg as string | undefined,
-				);
-			}
-			break;
-		}
-		case "m.receipt": {
-			const roomId = content.room_id as RoomId;
-			const receipts = content.receipts as
-				| Record<string, Record<string, Record<string, unknown>>>
-				| undefined;
-			if (roomId && receipts) {
-				for (const [eventId, receiptTypes] of Object.entries(receipts)) {
-					for (const [receiptType, users] of Object.entries(receiptTypes)) {
-						for (const userId of Object.keys(users)) {
-							await storage.setReceipt(
-								roomId,
-								userId as UserId,
-								eventId as EventId,
-								receiptType,
-								Date.now(),
-							);
-						}
-					}
-				}
-			}
-			break;
-		}
-	}
 }

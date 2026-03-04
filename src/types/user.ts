@@ -1,7 +1,3 @@
-// =============================================================================
-// USER PROFILE, ACCOUNT & DEVICES
-// =============================================================================
-
 import type { DeviceId, MxcUri, Timestamp, UserId } from "./identifiers.ts";
 
 export interface UserProfile {

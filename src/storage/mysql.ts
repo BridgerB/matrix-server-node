@@ -361,10 +361,6 @@ export class MysqlStorage implements Storage {
 		return val;
 	}
 
-	// =========================================================================
-	// Users
-	// =========================================================================
-
 	async createUser(account: UserAccount): Promise<void> {
 		await this.exec(
 			`INSERT INTO users (user_id, localpart, server_name, password_hash, account_type, is_deactivated, created_at, displayname, avatar_url)
@@ -417,10 +413,6 @@ export class MysqlStorage implements Storage {
 		])) as Record<string, unknown>[];
 		return rows[0] ? this.rowToUser(rows[0]) : undefined;
 	}
-
-	// =========================================================================
-	// Sessions
-	// =========================================================================
 
 	private rowToSession(row: Record<string, unknown>): StoredSession {
 		const session: StoredSession = {
@@ -527,10 +519,6 @@ export class MysqlStorage implements Storage {
 		);
 	}
 
-	// =========================================================================
-	// UIAA Sessions
-	// =========================================================================
-
 	async createUIAASession(sessionId: string): Promise<void> {
 		await this.exec(
 			"INSERT INTO uiaa_sessions (session_id, completed) VALUES (?, '[]') ON DUPLICATE KEY UPDATE completed = '[]'",
@@ -561,10 +549,6 @@ export class MysqlStorage implements Storage {
 			sessionId,
 		]);
 	}
-
-	// =========================================================================
-	// Rooms
-	// =========================================================================
 
 	async createRoom(state: RoomState): Promise<void> {
 		const conn = await this.pool.getConnection();
@@ -640,10 +624,6 @@ export class MysqlStorage implements Storage {
 		return rows.map((r) => r.room_id as RoomId);
 	}
 
-	// =========================================================================
-	// Events
-	// =========================================================================
-
 	async storeEvent(event: PDU, eventId: EventId): Promise<void> {
 		this.streamCounter++;
 		await this.exec(
@@ -702,10 +682,6 @@ export class MysqlStorage implements Storage {
 		return this.streamCounter;
 	}
 
-	// =========================================================================
-	// State
-	// =========================================================================
-
 	async getStateEvent(
 		roomId: RoomId,
 		eventType: string,
@@ -755,10 +731,6 @@ export class MysqlStorage implements Storage {
 		await this.storeEvent(event, eventId);
 	}
 
-	// =========================================================================
-	// Members
-	// =========================================================================
-
 	async getMemberEvents(
 		roomId: RoomId,
 	): Promise<{ event: PDU; eventId: EventId }[]> {
@@ -771,10 +743,6 @@ export class MysqlStorage implements Storage {
 			eventId: r.event_id as EventId,
 		}));
 	}
-
-	// =========================================================================
-	// Transaction idempotency
-	// =========================================================================
 
 	async getTxnEventId(
 		userId: UserId,
@@ -799,10 +767,6 @@ export class MysqlStorage implements Storage {
 			[userId, deviceId, txnId, eventId],
 		);
 	}
-
-	// =========================================================================
-	// Sync
-	// =========================================================================
 
 	async getRoomsForUserWithMembership(
 		userId: UserId,
@@ -899,10 +863,6 @@ export class MysqlStorage implements Storage {
 		});
 	}
 
-	// =========================================================================
-	// Profile
-	// =========================================================================
-
 	async getProfile(userId: UserId): Promise<UserProfile | undefined> {
 		const rows = (await this.query(
 			"SELECT displayname, avatar_url FROM users WHERE user_id = ?",
@@ -932,10 +892,6 @@ export class MysqlStorage implements Storage {
 			userId,
 		]);
 	}
-
-	// =========================================================================
-	// Devices
-	// =========================================================================
 
 	async getDevice(
 		userId: UserId,
@@ -987,10 +943,6 @@ export class MysqlStorage implements Storage {
 		);
 	}
 
-	// =========================================================================
-	// Account
-	// =========================================================================
-
 	async updatePassword(userId: UserId, newPasswordHash: string): Promise<void> {
 		await this.exec("UPDATE users SET password_hash = ? WHERE user_id = ?", [
 			newPasswordHash,
@@ -1005,10 +957,6 @@ export class MysqlStorage implements Storage {
 		);
 		await this.deleteAllSessions(userId);
 	}
-
-	// =========================================================================
-	// Aliases
-	// =========================================================================
 
 	async createRoomAlias(
 		roomAlias: RoomAlias,
@@ -1060,10 +1008,6 @@ export class MysqlStorage implements Storage {
 		return rows[0] ? (rows[0].creator as UserId) : undefined;
 	}
 
-	// =========================================================================
-	// Directory
-	// =========================================================================
-
 	async setRoomVisibility(
 		roomId: RoomId,
 		visibility: "public" | "private",
@@ -1088,10 +1032,6 @@ export class MysqlStorage implements Storage {
 		)) as Record<string, unknown>[];
 		return rows.map((r) => r.room_id as RoomId);
 	}
-
-	// =========================================================================
-	// Account data
-	// =========================================================================
 
 	async getGlobalAccountData(
 		userId: UserId,
@@ -1170,10 +1110,6 @@ export class MysqlStorage implements Storage {
 		}));
 	}
 
-	// =========================================================================
-	// Typing (ephemeral — in-memory)
-	// =========================================================================
-
 	async setTyping(
 		roomId: RoomId,
 		userId: UserId,
@@ -1207,10 +1143,6 @@ export class MysqlStorage implements Storage {
 		return [...roomTyping.keys()];
 	}
 
-	// =========================================================================
-	// Receipts
-	// =========================================================================
-
 	async setReceipt(
 		roomId: RoomId,
 		userId: UserId,
@@ -1242,10 +1174,6 @@ export class MysqlStorage implements Storage {
 		}));
 	}
 
-	// =========================================================================
-	// Presence (ephemeral — in-memory)
-	// =========================================================================
-
 	async setPresence(
 		userId: UserId,
 		presence: PresenceState,
@@ -1269,10 +1197,6 @@ export class MysqlStorage implements Storage {
 	> {
 		return this.presenceMap.get(userId);
 	}
-
-	// =========================================================================
-	// Media
-	// =========================================================================
 
 	async storeMedia(media: StoredMedia, data: Buffer): Promise<void> {
 		await this.exec(
@@ -1321,10 +1245,6 @@ export class MysqlStorage implements Storage {
 		};
 	}
 
-	// =========================================================================
-	// Filters
-	// =========================================================================
-
 	async createFilter(userId: UserId, filter: JsonObject): Promise<string> {
 		const filterId = String(++this.filterCounter);
 		await this.exec(
@@ -1346,10 +1266,6 @@ export class MysqlStorage implements Storage {
 			? (this.parseJson(rows[0].filter_json) as JsonObject)
 			: undefined;
 	}
-
-	// =========================================================================
-	// E2EE - Device keys
-	// =========================================================================
 
 	async setDeviceKeys(
 		userId: UserId,
@@ -1389,10 +1305,6 @@ export class MysqlStorage implements Storage {
 			) as DeviceKeys;
 		return result;
 	}
-
-	// =========================================================================
-	// E2EE - One-time keys
-	// =========================================================================
 
 	async addOneTimeKeys(
 		userId: UserId,
@@ -1474,10 +1386,6 @@ export class MysqlStorage implements Storage {
 		return counts;
 	}
 
-	// =========================================================================
-	// E2EE - Fallback keys
-	// =========================================================================
-
 	async setFallbackKeys(
 		userId: UserId,
 		deviceId: DeviceId,
@@ -1519,10 +1427,6 @@ export class MysqlStorage implements Storage {
 		return [...types];
 	}
 
-	// =========================================================================
-	// To-device messages
-	// =========================================================================
-
 	async sendToDevice(
 		userId: UserId,
 		deviceId: DeviceId,
@@ -1556,10 +1460,6 @@ export class MysqlStorage implements Storage {
 		);
 	}
 
-	// =========================================================================
-	// Pushers
-	// =========================================================================
-
 	async getPushers(userId: UserId): Promise<Pusher[]> {
 		const rows = (await this.query(
 			"SELECT pusher_json FROM pushers WHERE user_id = ?",
@@ -1592,10 +1492,6 @@ export class MysqlStorage implements Storage {
 			pushkey,
 		]);
 	}
-
-	// =========================================================================
-	// Relations
-	// =========================================================================
 
 	async storeRelation(
 		eventId: EventId,
@@ -1743,10 +1639,6 @@ export class MysqlStorage implements Storage {
 		};
 	}
 
-	// =========================================================================
-	// Reports
-	// =========================================================================
-
 	async storeReport(
 		userId: UserId,
 		roomId: RoomId,
@@ -1759,10 +1651,6 @@ export class MysqlStorage implements Storage {
 			[userId, roomId, eventId, score ?? null, reason ?? null, Date.now()],
 		);
 	}
-
-	// =========================================================================
-	// OpenID
-	// =========================================================================
 
 	async storeOpenIdToken(
 		token: string,
@@ -1788,10 +1676,6 @@ export class MysqlStorage implements Storage {
 			expiresAt: Number(rows[0].expires_at),
 		};
 	}
-
-	// =========================================================================
-	// 3PIDs
-	// =========================================================================
 
 	async getThreePids(
 		userId: UserId,
@@ -1829,10 +1713,6 @@ export class MysqlStorage implements Storage {
 		);
 	}
 
-	// =========================================================================
-	// User directory
-	// =========================================================================
-
 	async searchUserDirectory(
 		searchTerm: string,
 		limit: number,
@@ -1850,10 +1730,6 @@ export class MysqlStorage implements Storage {
 			avatar_url: (r.avatar_url as string) ?? undefined,
 		}));
 	}
-
-	// =========================================================================
-	// Thread roots
-	// =========================================================================
 
 	async getThreadRoots(
 		roomId: RoomId,
@@ -1897,10 +1773,6 @@ export class MysqlStorage implements Storage {
 				: undefined;
 		return { events, nextBatch };
 	}
-
-	// =========================================================================
-	// Search
-	// =========================================================================
 
 	async searchRoomEvents(
 		roomIds: RoomId[],
@@ -1962,10 +1834,6 @@ export class MysqlStorage implements Storage {
 		return { events: results, nextBatch };
 	}
 
-	// =========================================================================
-	// Federation - Remote server key cache
-	// =========================================================================
-
 	async storeServerKeys(
 		serverName: ServerName,
 		keys: ServerKeys,
@@ -2002,10 +1870,6 @@ export class MysqlStorage implements Storage {
 			validUntil: Number(rows[0].valid_until),
 		};
 	}
-
-	// =========================================================================
-	// Federation - Auth chain
-	// =========================================================================
 
 	async getAuthChain(eventIds: EventId[]): Promise<PDU[]> {
 		const visited = new Set<EventId>();
@@ -2055,10 +1919,6 @@ export class MysqlStorage implements Storage {
 		return new Map(room.state_events);
 	}
 
-	// =========================================================================
-	// Federation - Transaction dedup
-	// =========================================================================
-
 	async getFederationTxn(origin: ServerName, txnId: string): Promise<boolean> {
 		const rows = (await this.query(
 			"SELECT 1 FROM federation_txns WHERE origin = ? AND txn_id = ?",
@@ -2073,10 +1933,6 @@ export class MysqlStorage implements Storage {
 			[origin, txnId],
 		);
 	}
-
-	// =========================================================================
-	// Federation - Room import
-	// =========================================================================
 
 	async importRoomState(
 		roomId: RoomId,

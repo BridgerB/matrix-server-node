@@ -2,12 +2,9 @@ import { badJson } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 
-// =============================================================================
-// POST /_matrix/client/v3/user_directory/search
-// =============================================================================
-
-export function postUserDirectorySearch(storage: Storage): Handler {
-	return async (req) => {
+export const postUserDirectorySearch =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const body = (req.body ?? {}) as { search_term?: string; limit?: number };
 		if (!body.search_term) throw badJson("Missing search_term");
 
@@ -25,4 +22,3 @@ export function postUserDirectorySearch(storage: Storage): Handler {
 			body: { results: sliced, limited },
 		};
 	};
-}

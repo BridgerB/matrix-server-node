@@ -7,12 +7,12 @@ import type { ClientEvent } from "../types/events.ts";
 import type { RoomId, UserId } from "../types/index.ts";
 import type { SearchRequest, SearchResult } from "../types/room-operations.ts";
 
-// =============================================================================
-// POST /_matrix/client/v3/search
-// =============================================================================
+const extractHighlights = (searchTerm: string) =>
+	searchTerm.split(/\s+/).filter((w) => w.length > 0);
 
-export function postSearch(storage: Storage): Handler {
-	return async (req) => {
+export const postSearch =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const userId = req.userId as string;
 		const body = (req.body ?? {}) as SearchRequest;
 
@@ -26,7 +26,6 @@ export function postSearch(storage: Storage): Handler {
 		const limit = 10;
 		const from = req.query.get("next_batch") ?? undefined;
 
-		// Determine rooms to search
 		const joinedRooms = await storage.getRoomsForUser(userId);
 		let roomIds: RoomId[] = joinedRooms;
 		if (roomEvents.filter?.rooms) {
@@ -44,7 +43,6 @@ export function postSearch(storage: Storage): Handler {
 			from,
 		);
 
-		// Build search results with optional context
 		const beforeLimit = roomEvents.event_context?.before_limit ?? 5;
 		const afterLimit = roomEvents.event_context?.after_limit ?? 5;
 		const includeProfile = roomEvents.event_context?.include_profile ?? false;
@@ -62,7 +60,6 @@ export function postSearch(storage: Storage): Handler {
 				result: clientEvent,
 			};
 
-			// Add context if requested
 			if (roomEvents.event_context) {
 				const beforeResult = await storage.getEventsByRoom(
 					event.room_id,
@@ -116,7 +113,6 @@ export function postSearch(storage: Storage): Handler {
 
 			results.push(searchResultEntry);
 
-			// Collect state if requested
 			if (includeState && !stateMap[event.room_id]) {
 				const allState = await storage.getAllState(event.room_id);
 				stateMap[event.room_id] = allState.map((e) =>
@@ -125,11 +121,9 @@ export function postSearch(storage: Storage): Handler {
 			}
 		}
 
-		// Bundle aggregations on result events
 		const allResultEvents = results.map((r) => r.result);
 		await bundleAggregations(storage, allResultEvents, userId);
 
-		// Build groupings if requested
 		let groups:
 			| Record<string, Record<string, { results: string[]; order: number }>>
 			| undefined;
@@ -176,8 +170,3 @@ export function postSearch(storage: Storage): Handler {
 			},
 		};
 	};
-}
-
-function extractHighlights(searchTerm: string): string[] {
-	return searchTerm.split(/\s+/).filter((w) => w.length > 0);
-}

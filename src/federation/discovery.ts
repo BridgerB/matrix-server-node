@@ -8,85 +8,10 @@ export interface ResolvedServer {
 }
 
 const cache = new Map<string, { result: ResolvedServer; expiresAt: number }>();
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const CACHE_TTL = 5 * 60 * 1000;
 
-export async function resolveServer(
-	serverName: string,
-): Promise<ResolvedServer> {
-	const cached = cache.get(serverName);
-	if (cached && cached.expiresAt > Date.now()) return cached.result;
-
-	const result = await doResolve(serverName);
-	cache.set(serverName, { result, expiresAt: Date.now() + CACHE_TTL });
-	return result;
-}
-
-async function doResolve(serverName: string): Promise<ResolvedServer> {
-	// If server name has explicit port, use it directly
-	const colonIdx = serverName.lastIndexOf(":");
-	if (colonIdx > 0 && !serverName.endsWith("]")) {
-		const host = serverName.slice(0, colonIdx);
-		const port = parseInt(serverName.slice(colonIdx + 1), 10);
-		if (!Number.isNaN(port)) {
-			return { host, port, serverName };
-		}
-	}
-
-	// Try .well-known
-	try {
-		const wk = await fetchJson(
-			`https://${serverName}/.well-known/matrix/server`,
-		);
-		if (wk && typeof wk === "object" && "m.server" in wk) {
-			const delegated = (wk as Record<string, unknown>)["m.server"] as string;
-			if (delegated) {
-				const dColon = delegated.lastIndexOf(":");
-				if (dColon > 0) {
-					return {
-						host: delegated.slice(0, dColon),
-						port: parseInt(delegated.slice(dColon + 1), 10),
-						serverName,
-					};
-				}
-				return { host: delegated, port: 8448, serverName };
-			}
-		}
-	} catch {
-		// .well-known not available, continue
-	}
-
-	// Try DNS SRV _matrix-fed._tcp
-	try {
-		const records = await resolveSrv(`_matrix-fed._tcp.${serverName}`);
-		if (records.length > 0) {
-			const best = records.sort(
-				(a, b) => a.priority - b.priority,
-			)[0] as (typeof records)[number];
-			return { host: best.name, port: best.port, serverName };
-		}
-	} catch {
-		// No SRV record
-	}
-
-	// Try legacy DNS SRV _matrix._tcp
-	try {
-		const records = await resolveSrv(`_matrix._tcp.${serverName}`);
-		if (records.length > 0) {
-			const best = records.sort(
-				(a, b) => a.priority - b.priority,
-			)[0] as (typeof records)[number];
-			return { host: best.name, port: best.port, serverName };
-		}
-	} catch {
-		// No SRV record
-	}
-
-	// Fallback to serverName:8448
-	return { host: serverName, port: 8448, serverName };
-}
-
-function fetchJson(url: string): Promise<unknown> {
-	return new Promise((resolve, reject) => {
+const fetchJson = (url: string): Promise<unknown> =>
+	new Promise((resolve, reject) => {
 		const parsed = new URL(url);
 		const opts: RequestOptions = {
 			hostname: parsed.hostname,
@@ -116,4 +41,65 @@ function fetchJson(url: string): Promise<unknown> {
 		});
 		req.end();
 	});
-}
+
+const doResolve = async (serverName: string): Promise<ResolvedServer> => {
+	const colonIdx = serverName.lastIndexOf(":");
+	if (colonIdx > 0 && !serverName.endsWith("]")) {
+		const host = serverName.slice(0, colonIdx);
+		const port = parseInt(serverName.slice(colonIdx + 1), 10);
+		if (!Number.isNaN(port)) return { host, port, serverName };
+	}
+
+	try {
+		const wk = await fetchJson(
+			`https://${serverName}/.well-known/matrix/server`,
+		);
+		if (wk && typeof wk === "object" && "m.server" in wk) {
+			const delegated = (wk as Record<string, unknown>)["m.server"] as string;
+			if (delegated) {
+				const dColon = delegated.lastIndexOf(":");
+				if (dColon > 0) {
+					return {
+						host: delegated.slice(0, dColon),
+						port: parseInt(delegated.slice(dColon + 1), 10),
+						serverName,
+					};
+				}
+				return { host: delegated, port: 8448, serverName };
+			}
+		}
+	} catch {}
+
+	try {
+		const records = await resolveSrv(`_matrix-fed._tcp.${serverName}`);
+		if (records.length > 0) {
+			const best = records.sort(
+				(a, b) => a.priority - b.priority,
+			)[0] as (typeof records)[number];
+			return { host: best.name, port: best.port, serverName };
+		}
+	} catch {}
+
+	try {
+		const records = await resolveSrv(`_matrix._tcp.${serverName}`);
+		if (records.length > 0) {
+			const best = records.sort(
+				(a, b) => a.priority - b.priority,
+			)[0] as (typeof records)[number];
+			return { host: best.name, port: best.port, serverName };
+		}
+	} catch {}
+
+	return { host: serverName, port: 8448, serverName };
+};
+
+export const resolveServer = async (
+	serverName: string,
+): Promise<ResolvedServer> => {
+	const cached = cache.get(serverName);
+	if (cached && cached.expiresAt > Date.now()) return cached.result;
+
+	const result = await doResolve(serverName);
+	cache.set(serverName, { result, expiresAt: Date.now() + CACHE_TTL });
+	return result;
+};

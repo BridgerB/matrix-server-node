@@ -2,23 +2,16 @@ import { badJson } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 
-// =============================================================================
-// GET /_matrix/client/v3/account/3pid
-// =============================================================================
-
-export function getThreePids(storage: Storage): Handler {
-	return async (req) => {
+export const getThreePids =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const threepids = await storage.getThreePids(req.userId as string);
 		return { status: 200, body: { threepids } };
 	};
-}
 
-// =============================================================================
-// POST /_matrix/client/v3/account/3pid/add
-// =============================================================================
-
-export function postAddThreePid(storage: Storage): Handler {
-	return async (req) => {
+export const postAddThreePid =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const body = (req.body ?? {}) as { medium?: string; address?: string };
 		if (!body.medium || !body.address)
 			throw badJson("Missing medium or address");
@@ -26,14 +19,10 @@ export function postAddThreePid(storage: Storage): Handler {
 		await storage.addThreePid(req.userId as string, body.medium, body.address);
 		return { status: 200, body: {} };
 	};
-}
 
-// =============================================================================
-// POST /_matrix/client/v3/account/3pid/delete
-// =============================================================================
-
-export function postDeleteThreePid(storage: Storage): Handler {
-	return async (req) => {
+export const postDeleteThreePid =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const body = (req.body ?? {}) as { medium?: string; address?: string };
 		if (!body.medium || !body.address)
 			throw badJson("Missing medium or address");
@@ -45,4 +34,3 @@ export function postDeleteThreePid(storage: Storage): Handler {
 		);
 		return { status: 200, body: { id_server_unbind_result: "no-support" } };
 	};
-}

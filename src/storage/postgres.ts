@@ -290,10 +290,6 @@ export class PostgresStorage implements Storage {
 		for (const waiter of this.eventWaiters) waiter();
 	}
 
-	// =========================================================================
-	// Users
-	// =========================================================================
-
 	async createUser(account: UserAccount): Promise<void> {
 		await this.pool.query(
 			`INSERT INTO users (user_id, localpart, server_name, password_hash, account_type, is_deactivated, created_at, displayname, avatar_url)
@@ -348,10 +344,6 @@ export class PostgresStorage implements Storage {
 		);
 		return rows[0] ? this.rowToUser(rows[0]) : undefined;
 	}
-
-	// =========================================================================
-	// Sessions
-	// =========================================================================
 
 	private rowToSession(row: Record<string, unknown>): StoredSession {
 		const session: StoredSession = {
@@ -461,10 +453,6 @@ export class PostgresStorage implements Storage {
 		);
 	}
 
-	// =========================================================================
-	// UIAA Sessions
-	// =========================================================================
-
 	async createUIAASession(sessionId: string): Promise<void> {
 		await this.pool.query(
 			"INSERT INTO uiaa_sessions (session_id, completed) VALUES ($1, '[]'::jsonb) ON CONFLICT (session_id) DO UPDATE SET completed = '[]'::jsonb",
@@ -495,10 +483,6 @@ export class PostgresStorage implements Storage {
 			sessionId,
 		]);
 	}
-
-	// =========================================================================
-	// Rooms
-	// =========================================================================
 
 	async createRoom(state: RoomState): Promise<void> {
 		const client = await this.pool.connect();
@@ -572,10 +556,6 @@ export class PostgresStorage implements Storage {
 		return rows.map((r) => r.room_id as RoomId);
 	}
 
-	// =========================================================================
-	// Events
-	// =========================================================================
-
 	async storeEvent(event: PDU, eventId: EventId): Promise<void> {
 		this.streamCounter++;
 		await this.pool.query(
@@ -633,10 +613,6 @@ export class PostgresStorage implements Storage {
 		return this.streamCounter;
 	}
 
-	// =========================================================================
-	// State
-	// =========================================================================
-
 	async getStateEvent(
 		roomId: RoomId,
 		eventType: string,
@@ -689,10 +665,6 @@ export class PostgresStorage implements Storage {
 		await this.storeEvent(event, eventId);
 	}
 
-	// =========================================================================
-	// Members
-	// =========================================================================
-
 	async getMemberEvents(
 		roomId: RoomId,
 	): Promise<{ event: PDU; eventId: EventId }[]> {
@@ -705,10 +677,6 @@ export class PostgresStorage implements Storage {
 			eventId: r.event_id as EventId,
 		}));
 	}
-
-	// =========================================================================
-	// Transaction idempotency
-	// =========================================================================
 
 	async getTxnEventId(
 		userId: UserId,
@@ -733,10 +701,6 @@ export class PostgresStorage implements Storage {
 			[userId, deviceId, txnId, eventId],
 		);
 	}
-
-	// =========================================================================
-	// Sync
-	// =========================================================================
 
 	async getRoomsForUserWithMembership(
 		userId: UserId,
@@ -831,10 +795,6 @@ export class PostgresStorage implements Storage {
 		});
 	}
 
-	// =========================================================================
-	// Profile
-	// =========================================================================
-
 	async getProfile(userId: UserId): Promise<UserProfile | undefined> {
 		const { rows } = await this.pool.query(
 			"SELECT displayname, avatar_url FROM users WHERE user_id = $1",
@@ -863,10 +823,6 @@ export class PostgresStorage implements Storage {
 			[avatarUrl, userId],
 		);
 	}
-
-	// =========================================================================
-	// Devices
-	// =========================================================================
 
 	async getDevice(
 		userId: UserId,
@@ -918,10 +874,6 @@ export class PostgresStorage implements Storage {
 		);
 	}
 
-	// =========================================================================
-	// Account
-	// =========================================================================
-
 	async updatePassword(userId: UserId, newPasswordHash: string): Promise<void> {
 		await this.pool.query(
 			"UPDATE users SET password_hash = $1 WHERE user_id = $2",
@@ -936,10 +888,6 @@ export class PostgresStorage implements Storage {
 		);
 		await this.deleteAllSessions(userId);
 	}
-
-	// =========================================================================
-	// Aliases
-	// =========================================================================
 
 	async createRoomAlias(
 		roomAlias: RoomAlias,
@@ -988,10 +936,6 @@ export class PostgresStorage implements Storage {
 		return rows[0] ? (rows[0].creator as UserId) : undefined;
 	}
 
-	// =========================================================================
-	// Directory
-	// =========================================================================
-
 	async setRoomVisibility(
 		roomId: RoomId,
 		visibility: "public" | "private",
@@ -1016,10 +960,6 @@ export class PostgresStorage implements Storage {
 		);
 		return rows.map((r) => r.room_id as RoomId);
 	}
-
-	// =========================================================================
-	// Account data
-	// =========================================================================
 
 	async getGlobalAccountData(
 		userId: UserId,
@@ -1088,10 +1028,6 @@ export class PostgresStorage implements Storage {
 		return rows.map((r) => ({ type: r.type, content: r.content }));
 	}
 
-	// =========================================================================
-	// Typing (ephemeral — in-memory)
-	// =========================================================================
-
 	async setTyping(
 		roomId: RoomId,
 		userId: UserId,
@@ -1125,10 +1061,6 @@ export class PostgresStorage implements Storage {
 		return [...roomTyping.keys()];
 	}
 
-	// =========================================================================
-	// Receipts
-	// =========================================================================
-
 	async setReceipt(
 		roomId: RoomId,
 		userId: UserId,
@@ -1160,10 +1092,6 @@ export class PostgresStorage implements Storage {
 		}));
 	}
 
-	// =========================================================================
-	// Presence (ephemeral — in-memory)
-	// =========================================================================
-
 	async setPresence(
 		userId: UserId,
 		presence: PresenceState,
@@ -1187,10 +1115,6 @@ export class PostgresStorage implements Storage {
 	> {
 		return this.presenceMap.get(userId);
 	}
-
-	// =========================================================================
-	// Media
-	// =========================================================================
 
 	async storeMedia(media: StoredMedia, data: Buffer): Promise<void> {
 		await this.pool.query(
@@ -1239,10 +1163,6 @@ export class PostgresStorage implements Storage {
 		};
 	}
 
-	// =========================================================================
-	// Filters
-	// =========================================================================
-
 	async createFilter(userId: UserId, filter: JsonObject): Promise<string> {
 		const filterId = String(++this.filterCounter);
 		await this.pool.query(
@@ -1262,10 +1182,6 @@ export class PostgresStorage implements Storage {
 		);
 		return rows[0]?.filter_json ?? undefined;
 	}
-
-	// =========================================================================
-	// E2EE - Device keys
-	// =========================================================================
 
 	async setDeviceKeys(
 		userId: UserId,
@@ -1300,10 +1216,6 @@ export class PostgresStorage implements Storage {
 		for (const r of rows) result[r.device_id as DeviceId] = r.keys_json;
 		return result;
 	}
-
-	// =========================================================================
-	// E2EE - One-time keys
-	// =========================================================================
 
 	async addOneTimeKeys(
 		userId: UserId,
@@ -1366,10 +1278,6 @@ export class PostgresStorage implements Storage {
 		return counts;
 	}
 
-	// =========================================================================
-	// E2EE - Fallback keys
-	// =========================================================================
-
 	async setFallbackKeys(
 		userId: UserId,
 		deviceId: DeviceId,
@@ -1410,10 +1318,6 @@ export class PostgresStorage implements Storage {
 		return [...types];
 	}
 
-	// =========================================================================
-	// To-device messages
-	// =========================================================================
-
 	async sendToDevice(
 		userId: UserId,
 		deviceId: DeviceId,
@@ -1447,10 +1351,6 @@ export class PostgresStorage implements Storage {
 		);
 	}
 
-	// =========================================================================
-	// Pushers
-	// =========================================================================
-
 	async getPushers(userId: UserId): Promise<Pusher[]> {
 		const { rows } = await this.pool.query(
 			"SELECT pusher_json FROM pushers WHERE user_id = $1",
@@ -1483,10 +1383,6 @@ export class PostgresStorage implements Storage {
 			[appId, pushkey],
 		);
 	}
-
-	// =========================================================================
-	// Relations
-	// =========================================================================
 
 	async storeRelation(
 		eventId: EventId,
@@ -1636,10 +1532,6 @@ export class PostgresStorage implements Storage {
 		};
 	}
 
-	// =========================================================================
-	// Reports
-	// =========================================================================
-
 	async storeReport(
 		userId: UserId,
 		roomId: RoomId,
@@ -1652,10 +1544,6 @@ export class PostgresStorage implements Storage {
 			[userId, roomId, eventId, score ?? null, reason ?? null, Date.now()],
 		);
 	}
-
-	// =========================================================================
-	// OpenID
-	// =========================================================================
 
 	async storeOpenIdToken(
 		token: string,
@@ -1681,10 +1569,6 @@ export class PostgresStorage implements Storage {
 			expiresAt: Number(rows[0].expires_at),
 		};
 	}
-
-	// =========================================================================
-	// 3PIDs
-	// =========================================================================
 
 	async getThreePids(
 		userId: UserId,
@@ -1722,10 +1606,6 @@ export class PostgresStorage implements Storage {
 		);
 	}
 
-	// =========================================================================
-	// User directory
-	// =========================================================================
-
 	async searchUserDirectory(
 		searchTerm: string,
 		limit: number,
@@ -1743,10 +1623,6 @@ export class PostgresStorage implements Storage {
 			avatar_url: r.avatar_url ?? undefined,
 		}));
 	}
-
-	// =========================================================================
-	// Thread roots
-	// =========================================================================
 
 	async getThreadRoots(
 		roomId: RoomId,
@@ -1789,10 +1665,6 @@ export class PostgresStorage implements Storage {
 				: undefined;
 		return { events, nextBatch };
 	}
-
-	// =========================================================================
-	// Search
-	// =========================================================================
 
 	async searchRoomEvents(
 		roomIds: RoomId[],
@@ -1855,10 +1727,6 @@ export class PostgresStorage implements Storage {
 		return { events: results, nextBatch };
 	}
 
-	// =========================================================================
-	// Federation - Remote server key cache
-	// =========================================================================
-
 	async storeServerKeys(
 		serverName: ServerName,
 		keys: ServerKeys,
@@ -1892,10 +1760,6 @@ export class PostgresStorage implements Storage {
 		if (!rows[0]) return undefined;
 		return { key: rows[0].key, validUntil: Number(rows[0].valid_until) };
 	}
-
-	// =========================================================================
-	// Federation - Auth chain
-	// =========================================================================
 
 	async getAuthChain(eventIds: EventId[]): Promise<PDU[]> {
 		const visited = new Set<EventId>();
@@ -1945,10 +1809,6 @@ export class PostgresStorage implements Storage {
 		return new Map(room.state_events);
 	}
 
-	// =========================================================================
-	// Federation - Transaction dedup
-	// =========================================================================
-
 	async getFederationTxn(origin: ServerName, txnId: string): Promise<boolean> {
 		const { rows } = await this.pool.query(
 			"SELECT 1 FROM federation_txns WHERE origin = $1 AND txn_id = $2",
@@ -1963,10 +1823,6 @@ export class PostgresStorage implements Storage {
 			[origin, txnId],
 		);
 	}
-
-	// =========================================================================
-	// Federation - Room import
-	// =========================================================================
 
 	async importRoomState(
 		roomId: RoomId,

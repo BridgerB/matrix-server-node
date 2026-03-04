@@ -19,17 +19,13 @@ import type { JsonObject } from "../types/json.ts";
 import type { CreateRoomRequest } from "../types/room-operations.ts";
 import type { RoomPowerLevelsContent } from "../types/state-events.ts";
 
-// =============================================================================
-// HELPERS
-// =============================================================================
-
 interface EventContext {
 	roomState: RoomState;
 	depth: number;
 	prevEvents: string[];
 }
 
-async function sendStateEvent(
+const sendStateEvent = async (
 	storage: Storage,
 	serverName: string,
 	ctx: EventContext,
@@ -37,7 +33,7 @@ async function sendStateEvent(
 	type: string,
 	stateKey: string,
 	content: JsonObject,
-): Promise<string> {
+): Promise<string> => {
 	const authEvents = selectAuthEvents(type, stateKey, ctx.roomState, sender);
 	const { event, eventId } = buildEvent({
 		roomId: ctx.roomState.room_id,
@@ -54,19 +50,13 @@ async function sendStateEvent(
 	checkEventAuth(event, eventId, ctx.roomState);
 	await storage.setStateEvent(ctx.roomState.room_id, event, eventId);
 
-	// Advance context
 	ctx.depth++;
 	ctx.prevEvents = [eventId];
 	ctx.roomState.depth = ctx.depth;
 	ctx.roomState.forward_extremities = [eventId];
 
 	return eventId;
-}
-
-// =============================================================================
-// POST /createRoom
-// =============================================================================
-
+};
 export function postCreateRoom(storage: Storage, serverName: string): Handler {
 	return async (req) => {
 		const body = (req.body ?? {}) as CreateRoomRequest;
@@ -74,13 +64,10 @@ export function postCreateRoom(storage: Storage, serverName: string): Handler {
 		const roomVersion = body.room_version ?? "11";
 		const roomId = generateRoomId(serverName);
 
-		// Determine preset
-		let preset = body.preset;
-		if (!preset) {
-			preset = body.visibility === "public" ? "public_chat" : "private_chat";
-		}
+		const preset =
+			body.preset ??
+			(body.visibility === "public" ? "public_chat" : "private_chat");
 
-		// Initialize room
 		const roomState: RoomState = {
 			room_id: roomId,
 			room_version: roomVersion,
@@ -92,11 +79,10 @@ export function postCreateRoom(storage: Storage, serverName: string): Handler {
 
 		const ctx: EventContext = { roomState, depth: 0, prevEvents: [] };
 
-		// 1. m.room.create
-		const createContent: JsonObject = { room_version: roomVersion };
-		if (body.creation_content) {
-			Object.assign(createContent, body.creation_content);
-		}
+		const createContent: JsonObject = {
+			room_version: roomVersion,
+			...body.creation_content,
+		};
 		await sendStateEvent(
 			storage,
 			serverName,
@@ -107,7 +93,6 @@ export function postCreateRoom(storage: Storage, serverName: string): Handler {
 			createContent,
 		);
 
-		// 2. m.room.member for creator
 		await sendStateEvent(
 			storage,
 			serverName,
@@ -115,12 +100,9 @@ export function postCreateRoom(storage: Storage, serverName: string): Handler {
 			userId,
 			"m.room.member",
 			userId,
-			{
-				membership: "join",
-			},
+			{ membership: "join" },
 		);
 
-		// 3. m.room.power_levels
 		const plContent: RoomPowerLevelsContent = {
 			users: { [userId]: 100 },
 			users_default: 0,
@@ -146,9 +128,8 @@ export function postCreateRoom(storage: Storage, serverName: string): Handler {
 				(plContent.users as Record<string, number>)[invitee] = 100;
 			}
 		}
-		if (body.power_level_content_override) {
+		if (body.power_level_content_override)
 			Object.assign(plContent, body.power_level_content_override);
-		}
 		await sendStateEvent(
 			storage,
 			serverName,
@@ -159,7 +140,6 @@ export function postCreateRoom(storage: Storage, serverName: string): Handler {
 			plContent as unknown as JsonObject,
 		);
 
-		// 4. m.room.join_rules
 		const joinRule = preset === "public_chat" ? "public" : "invite";
 		await sendStateEvent(
 			storage,
@@ -173,7 +153,6 @@ export function postCreateRoom(storage: Storage, serverName: string): Handler {
 			},
 		);
 
-		// 5. m.room.history_visibility
 		await sendStateEvent(
 			storage,
 			serverName,
@@ -186,7 +165,6 @@ export function postCreateRoom(storage: Storage, serverName: string): Handler {
 			},
 		);
 
-		// 6. m.room.guest_access
 		await sendStateEvent(
 			storage,
 			serverName,
@@ -199,7 +177,6 @@ export function postCreateRoom(storage: Storage, serverName: string): Handler {
 			},
 		);
 
-		// 7. initial_state
 		if (body.initial_state) {
 			for (const stateInput of body.initial_state) {
 				await sendStateEvent(
@@ -214,7 +191,6 @@ export function postCreateRoom(storage: Storage, serverName: string): Handler {
 			}
 		}
 
-		// 8. m.room.name
 		if (body.name) {
 			await sendStateEvent(
 				storage,
@@ -229,7 +205,6 @@ export function postCreateRoom(storage: Storage, serverName: string): Handler {
 			);
 		}
 
-		// 9. m.room.topic
 		if (body.topic) {
 			await sendStateEvent(
 				storage,
@@ -244,7 +219,6 @@ export function postCreateRoom(storage: Storage, serverName: string): Handler {
 			);
 		}
 
-		// 10. Invites
 		if (body.invite) {
 			for (const invitee of body.invite) {
 				await sendStateEvent(
@@ -261,7 +235,6 @@ export function postCreateRoom(storage: Storage, serverName: string): Handler {
 			}
 		}
 
-		// 11. Room alias
 		if (body.room_alias_name) {
 			const roomAlias = `#${body.room_alias_name}:${serverName}`;
 			const existing = await storage.getRoomByAlias(roomAlias);
@@ -280,7 +253,6 @@ export function postCreateRoom(storage: Storage, serverName: string): Handler {
 			);
 		}
 
-		// 12. Directory visibility
 		if (body.visibility === "public") {
 			await storage.setRoomVisibility(roomId, "public");
 		}
@@ -288,23 +260,13 @@ export function postCreateRoom(storage: Storage, serverName: string): Handler {
 		return { status: 200, body: { room_id: roomId } };
 	};
 }
-
-// =============================================================================
-// GET /joined_rooms
-// =============================================================================
-
 export function getJoinedRooms(storage: Storage): Handler {
 	return async (req) => {
 		const rooms = await storage.getRoomsForUser(req.userId as string);
 		return { status: 200, body: { joined_rooms: rooms } };
 	};
 }
-
-// =============================================================================
-// MEMBERSHIP OPERATIONS
-// =============================================================================
-
-async function sendMembershipEvent(
+const sendMembershipEvent = async (
 	storage: Storage,
 	serverName: string,
 	roomId: string,
@@ -312,7 +274,7 @@ async function sendMembershipEvent(
 	targetUserId: string,
 	membership: string,
 	reason?: string,
-): Promise<string> {
+): Promise<string> => {
 	const room = await storage.getRoom(roomId);
 	if (!room) throw roomNotFound();
 
@@ -334,7 +296,7 @@ async function sendMembershipEvent(
 		targetUserId,
 		content,
 	);
-}
+};
 
 export function postJoin(storage: Storage, serverName: string): Handler {
 	return async (req) => {

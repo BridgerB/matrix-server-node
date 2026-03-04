@@ -27,11 +27,11 @@ const REGISTRATION_FLOWS: { stages: AuthType[] }[] = [
 const MIN_PASSWORD_LENGTH = 8;
 const USERNAME_RE = /^[a-z0-9._=\-/]+$/;
 
-export function postRegister(storage: Storage, serverName: string): Handler {
-	return async (req) => {
+export const postRegister =
+	(storage: Storage, serverName: string): Handler =>
+	async (req) => {
 		const body = req.body as RegisterRequest;
 
-		// No auth data -> return UIAA challenge
 		if (!body.auth) {
 			const sessionId = generateSessionId();
 			await storage.createUIAASession(sessionId);
@@ -49,14 +49,12 @@ export function postRegister(storage: Storage, serverName: string): Handler {
 		const uiaaSession = await storage.getUIAASession(sessionId);
 		if (!uiaaSession) throw forbidden("Unknown session");
 
-		// Process auth stage
 		if (body.auth.type === "m.login.dummy") {
 			await storage.addUIAACompleted(sessionId, "m.login.dummy");
 		} else {
 			throw invalidParam(`Unsupported auth type: ${body.auth.type}`);
 		}
 
-		// Check if all stages complete
 		const updated = await storage.getUIAASession(sessionId);
 		const allCompleted = REGISTRATION_FLOWS.some((flow) =>
 			flow.stages.every((stage) => updated?.completed.includes(stage)),
@@ -72,24 +70,21 @@ export function postRegister(storage: Storage, serverName: string): Handler {
 			return { status: 401, body: uiaa };
 		}
 
-		// UIAA complete - register the user
 		if (!body.username) throw badJson("Missing 'username' field");
 		const localpart = body.username.toLowerCase();
-		if (!USERNAME_RE.test(localpart)) {
+		if (!USERNAME_RE.test(localpart))
 			throw invalidUsername(
 				"Username can only contain lowercase letters, digits, and ._=-/",
 			);
-		}
 
 		const existing = await storage.getUserByLocalpart(localpart);
 		if (existing) throw userInUse();
 
 		if (!body.password) throw badJson("Missing 'password' field");
-		if (body.password.length < MIN_PASSWORD_LENGTH) {
+		if (body.password.length < MIN_PASSWORD_LENGTH)
 			throw weakPassword(
 				`Password must be at least ${MIN_PASSWORD_LENGTH} characters`,
 			);
-		}
 
 		const userId = `@${localpart}:${serverName}`;
 		const now = Date.now();
@@ -139,4 +134,3 @@ export function postRegister(storage: Storage, serverName: string): Handler {
 
 		return { status: 200, body: response };
 	};
-}

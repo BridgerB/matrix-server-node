@@ -7,18 +7,18 @@ import type { StoredMedia } from "../types/internal.ts";
 
 const MAX_UPLOAD_SIZE = 52428800; // 50 MB
 
-export function postUpload(storage: Storage, serverName: string): Handler {
-	return async (req) => {
+export const postUpload =
+	(storage: Storage, serverName: string): Handler =>
+	async (req) => {
 		const userId = req.userId as string;
 		const data = req.rawBody ?? Buffer.alloc(0);
 
-		if (data.length > MAX_UPLOAD_SIZE) {
+		if (data.length > MAX_UPLOAD_SIZE)
 			throw new MatrixError(
 				"M_TOO_LARGE",
 				`Upload exceeds maximum size of ${MAX_UPLOAD_SIZE} bytes`,
 				413,
 			);
-		}
 
 		const contentType =
 			req.headers["content-type"] ?? "application/octet-stream";
@@ -46,10 +46,10 @@ export function postUpload(storage: Storage, serverName: string): Handler {
 			body: { content_uri: `mxc://${serverName}/${mediaId}` },
 		};
 	};
-}
 
-export function getDownload(storage: Storage): Handler {
-	return async (req) => {
+export const getDownload =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const serverName = req.params.serverName as ServerName;
 		const mediaId = req.params.mediaId as string;
 
@@ -62,7 +62,6 @@ export function getDownload(storage: Storage): Handler {
 			"Content-Length": String(data.length),
 		};
 
-		// Use filename from path param or original upload name
 		const fileName = req.params.fileName ?? metadata.upload_name;
 		if (fileName) {
 			headers["Content-Disposition"] = `inline; filename="${fileName}"`;
@@ -70,17 +69,16 @@ export function getDownload(storage: Storage): Handler {
 
 		return { status: 200, body: data, headers };
 	};
-}
 
-export function getThumbnail(storage: Storage): Handler {
-	return async (req) => {
+export const getThumbnail =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const serverName = req.params.serverName as ServerName;
 		const mediaId = req.params.mediaId as string;
 
 		const result = await storage.getMedia(serverName, mediaId);
 		if (!result) throw notFound("Media not found");
 
-		// Simplified: return original file (no resizing)
 		const { metadata, data } = result;
 		return {
 			status: 200,
@@ -91,11 +89,8 @@ export function getThumbnail(storage: Storage): Handler {
 			},
 		};
 	};
-}
 
-export function getConfig(): Handler {
-	return () => ({
-		status: 200,
-		body: { "m.upload.size": MAX_UPLOAD_SIZE },
-	});
-}
+export const getConfig = (): Handler => () => ({
+	status: 200,
+	body: { "m.upload.size": MAX_UPLOAD_SIZE },
+});

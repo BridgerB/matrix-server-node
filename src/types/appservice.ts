@@ -1,7 +1,3 @@
-// =============================================================================
-// APPSERVICE TYPES
-// =============================================================================
-
 import type { ClientEvent, ToDeviceEvent } from "./events.ts";
 import type { UserId } from "./identifiers.ts";
 import type { DeviceLists } from "./sync.ts";

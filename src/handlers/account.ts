@@ -9,10 +9,10 @@ const UIAA_FLOWS: { stages: AuthType[] }[] = [{ stages: ["m.login.dummy"] }];
 
 const MIN_PASSWORD_LENGTH = 8;
 
-async function requireUIAA(
+const requireUIAA = async (
 	storage: Storage,
 	body: Record<string, unknown>,
-): Promise<boolean> {
+): Promise<boolean> => {
 	const auth = body.auth as Record<string, unknown> | undefined;
 
 	if (!auth) {
@@ -55,20 +55,19 @@ async function requireUIAA(
 
 	await storage.deleteUIAASession(sessionId);
 	return true;
-}
+};
 
-export function getWhoAmI(): Handler {
-	return async (req) => {
-		const body: WhoAmIResponse = {
-			user_id: req.userId as string,
-			device_id: req.deviceId,
-		};
-		return { status: 200, body };
-	};
-}
+export const getWhoAmI = (): Handler => async (req) => ({
+	status: 200,
+	body: {
+		user_id: req.userId as string,
+		device_id: req.deviceId,
+	} as WhoAmIResponse,
+});
 
-export function postChangePassword(storage: Storage): Handler {
-	return async (req) => {
+export const postChangePassword =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const body = req.body as Record<string, unknown>;
 
 		try {
@@ -85,15 +84,13 @@ export function postChangePassword(storage: Storage): Handler {
 
 		const newPassword = body.new_password as string | undefined;
 		if (!newPassword) throw badJson("Missing 'new_password' field");
-		if (newPassword.length < MIN_PASSWORD_LENGTH) {
+		if (newPassword.length < MIN_PASSWORD_LENGTH)
 			throw badJson(
 				`Password must be at least ${MIN_PASSWORD_LENGTH} characters`,
 			);
-		}
 
 		await storage.updatePassword(req.userId as string, newPassword); // TODO: hash with argon2
 
-		// logout_devices defaults to true
 		const logoutDevices = body.logout_devices !== false;
 		if (logoutDevices) {
 			const currentToken = req.accessToken as string;
@@ -107,10 +104,10 @@ export function postChangePassword(storage: Storage): Handler {
 
 		return { status: 200, body: {} };
 	};
-}
 
-export function postDeactivate(storage: Storage): Handler {
-	return async (req) => {
+export const postDeactivate =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const body = req.body as Record<string, unknown>;
 
 		try {
@@ -129,4 +126,3 @@ export function postDeactivate(storage: Storage): Handler {
 
 		return { status: 200, body: { id_server_unbind_result: "no-support" } };
 	};
-}

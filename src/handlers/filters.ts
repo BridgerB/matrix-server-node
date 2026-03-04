@@ -4,8 +4,9 @@ import type { Storage } from "../storage/interface.ts";
 import type { UserId } from "../types/index.ts";
 import type { JsonObject } from "../types/json.ts";
 
-export function postCreateFilter(storage: Storage): Handler {
-	return async (req) => {
+export const postCreateFilter =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const userId = req.params.userId as UserId;
 		if (req.userId !== userId)
 			throw forbidden("Cannot create filters for another user");
@@ -14,10 +15,10 @@ export function postCreateFilter(storage: Storage): Handler {
 		const filterId = await storage.createFilter(userId, filter);
 		return { status: 200, body: { filter_id: filterId } };
 	};
-}
 
-export function getFilterById(storage: Storage): Handler {
-	return async (req) => {
+export const getFilterById =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const userId = req.params.userId as UserId;
 		if (req.userId !== userId)
 			throw forbidden("Cannot access another user's filters");
@@ -27,4 +28,3 @@ export function getFilterById(storage: Storage): Handler {
 		if (!filter) throw notFound("Filter not found");
 		return { status: 200, body: filter };
 	};
-}

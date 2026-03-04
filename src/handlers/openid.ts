@@ -3,12 +3,9 @@ import { forbidden } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 
-// =============================================================================
-// POST /_matrix/client/v3/user/:userId/openid/request_token
-// =============================================================================
-
-export function postOpenIdToken(storage: Storage, serverName: string): Handler {
-	return async (req) => {
+export const postOpenIdToken =
+	(storage: Storage, serverName: string): Handler =>
+	async (req) => {
 		const targetUserId = req.params.userId as string;
 		if (req.userId !== targetUserId)
 			throw forbidden("Can only request tokens for yourself");
@@ -29,4 +26,3 @@ export function postOpenIdToken(storage: Storage, serverName: string): Handler {
 			},
 		};
 	};
-}

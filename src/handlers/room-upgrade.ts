@@ -16,7 +16,6 @@ import type { JsonObject } from "../types/json.ts";
 import type { RoomVersion } from "../types/room-versions.ts";
 import type { RoomPowerLevelsContent } from "../types/state-events.ts";
 
-// State types to copy from old room to new room
 const STATE_TO_COPY = [
 	"m.room.join_rules",
 	"m.room.history_visibility",
@@ -36,7 +35,7 @@ interface EventContext {
 	prevEvents: string[];
 }
 
-async function sendStateEvent(
+const sendStateEvent = async (
 	storage: Storage,
 	serverName: string,
 	ctx: EventContext,
@@ -44,7 +43,7 @@ async function sendStateEvent(
 	type: string,
 	stateKey: string,
 	content: JsonObject,
-): Promise<string> {
+): Promise<string> => {
 	const authEvents = selectAuthEvents(type, stateKey, ctx.roomState, sender);
 	const { event, eventId } = buildEvent({
 		roomId: ctx.roomState.room_id,
@@ -67,14 +66,11 @@ async function sendStateEvent(
 	ctx.roomState.forward_extremities = [eventId];
 
 	return eventId;
-}
+};
 
-// =============================================================================
-// POST /_matrix/client/v3/rooms/:roomId/upgrade
-// =============================================================================
-
-export function postRoomUpgrade(storage: Storage, serverName: string): Handler {
-	return async (req) => {
+export const postRoomUpgrade =
+	(storage: Storage, serverName: string): Handler =>
+	async (req) => {
 		const oldRoomId = req.params.roomId as RoomId;
 		const userId = req.userId as string;
 		const body = (req.body ?? {}) as { new_version?: string };
@@ -85,7 +81,6 @@ export function postRoomUpgrade(storage: Storage, serverName: string): Handler {
 		if (!oldRoom) throw roomNotFound();
 		if (getMembership(oldRoom, userId) !== "join") throw notJoined();
 
-		// Check power level for m.room.tombstone
 		const senderPl = getUserPowerLevel(userId, oldRoom);
 		const plEvent = oldRoom.state_events.get("m.room.power_levels\0");
 		const pl = plEvent
@@ -98,7 +93,6 @@ export function postRoomUpgrade(storage: Storage, serverName: string): Handler {
 			);
 		}
 
-		// Create new room
 		const newRoomId = generateRoomId(serverName) as RoomId;
 		const newRoomState: RoomState = {
 			room_id: newRoomId,
@@ -115,13 +109,11 @@ export function postRoomUpgrade(storage: Storage, serverName: string): Handler {
 			prevEvents: [],
 		};
 
-		// Find the last event ID in old room for predecessor
 		const lastCreateEvent = oldRoom.state_events.get("m.room.create\0");
 		const lastCreateEventId = lastCreateEvent
 			? computeEventId(lastCreateEvent)
 			: ("" as EventId);
 
-		// 1. m.room.create with predecessor
 		await sendStateEvent(
 			storage,
 			serverName,
@@ -138,7 +130,6 @@ export function postRoomUpgrade(storage: Storage, serverName: string): Handler {
 			},
 		);
 
-		// 2. Creator joins
 		await sendStateEvent(
 			storage,
 			serverName,
@@ -151,7 +142,6 @@ export function postRoomUpgrade(storage: Storage, serverName: string): Handler {
 			},
 		);
 
-		// 3. Copy state from old room
 		for (const stateType of STATE_TO_COPY) {
 			const oldEvent = oldRoom.state_events.get(`${stateType}\0`);
 			if (!oldEvent) continue;
@@ -167,7 +157,6 @@ export function postRoomUpgrade(storage: Storage, serverName: string): Handler {
 			);
 		}
 
-		// 4. Send tombstone in old room
 		const tombstoneAuthEvents = selectAuthEvents(
 			"m.room.tombstone",
 			"",
@@ -199,4 +188,3 @@ export function postRoomUpgrade(storage: Storage, serverName: string): Handler {
 			body: { replacement_room: newRoomId },
 		};
 	};
-}

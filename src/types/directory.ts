@@ -1,7 +1,3 @@
-// =============================================================================
-// ROOM DIRECTORY, USER DIRECTORY & SPACE HIERARCHY
-// =============================================================================
-
 import type { StrippedStateEvent } from "./events.ts";
 import type { MxcUri, RoomAlias, RoomId, UserId } from "./identifiers.ts";
 
@@ -34,10 +30,6 @@ export interface PublicRoomEntry {
 	room_type?: string;
 }
 
-// =============================================================================
-// USER DIRECTORY
-// =============================================================================
-
 export interface UserDirectoryRequest {
 	search_term: string;
 	limit?: number;
@@ -51,10 +43,6 @@ export interface UserDirectoryResponse {
 	}[];
 	limited: boolean;
 }
-
-// =============================================================================
-// SPACE HIERARCHY
-// =============================================================================
 
 export interface SpaceHierarchyResponse {
 	rooms: SpaceHierarchyRoom[];

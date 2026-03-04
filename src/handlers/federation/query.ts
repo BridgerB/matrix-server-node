@@ -3,12 +3,9 @@ import type { Handler } from "../../router.ts";
 import type { Storage } from "../../storage/interface.ts";
 import type { RoomAlias, UserId } from "../../types/index.ts";
 
-// =============================================================================
-// GET /_matrix/federation/v1/query/profile
-// =============================================================================
-
-export function getQueryProfile(storage: Storage): Handler {
-	return async (req) => {
+export const getQueryProfile =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const userId = req.query.get("user_id") as UserId | null;
 		if (!userId) throw notFound("Missing user_id");
 
@@ -16,12 +13,10 @@ export function getQueryProfile(storage: Storage): Handler {
 		if (!profile) throw notFound("User not found");
 
 		const field = req.query.get("field");
-		if (field === "displayname") {
+		if (field === "displayname")
 			return { status: 200, body: { displayname: profile.displayname } };
-		}
-		if (field === "avatar_url") {
+		if (field === "avatar_url")
 			return { status: 200, body: { avatar_url: profile.avatar_url } };
-		}
 
 		return {
 			status: 200,
@@ -31,14 +26,10 @@ export function getQueryProfile(storage: Storage): Handler {
 			},
 		};
 	};
-}
 
-// =============================================================================
-// GET /_matrix/federation/v1/query/directory
-// =============================================================================
-
-export function getQueryDirectory(storage: Storage): Handler {
-	return async (req) => {
+export const getQueryDirectory =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const roomAlias = req.query.get("room_alias") as RoomAlias | null;
 		if (!roomAlias) throw notFound("Missing room_alias");
 
@@ -53,14 +44,10 @@ export function getQueryDirectory(storage: Storage): Handler {
 			},
 		};
 	};
-}
 
-// =============================================================================
-// GET /_matrix/federation/v1/publicRooms
-// =============================================================================
-
-export function getFederationPublicRooms(storage: Storage): Handler {
-	return async (_req) => {
+export const getFederationPublicRooms =
+	(storage: Storage): Handler =>
+	async (_req) => {
 		const publicRoomIds = await storage.getPublicRoomIds();
 		const rooms: unknown[] = [];
 
@@ -73,13 +60,11 @@ export function getFederationPublicRooms(storage: Storage): Handler {
 			const aliasEvent = room.state_events.get("m.room.canonical_alias\0");
 			const avatarEvent = room.state_events.get("m.room.avatar\0");
 
-			let memberCount = 0;
-			for (const [key, event] of room.state_events) {
-				if (key.startsWith("m.room.member\0")) {
-					if ((event.content as Record<string, unknown>).membership === "join")
-						memberCount++;
-				}
-			}
+			const memberCount = [...room.state_events.entries()].filter(
+				([key, event]) =>
+					key.startsWith("m.room.member\0") &&
+					(event.content as Record<string, unknown>).membership === "join",
+			).length;
 
 			rooms.push({
 				room_id: roomId,
@@ -106,4 +91,3 @@ export function getFederationPublicRooms(storage: Storage): Handler {
 			body: { chunk: rooms, total_room_count_estimate: rooms.length },
 		};
 	};
-}

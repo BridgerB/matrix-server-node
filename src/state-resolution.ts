@@ -3,16 +3,37 @@ import type { PDU } from "./types/events.ts";
 import type { EventId } from "./types/index.ts";
 import type { RoomState } from "./types/internal.ts";
 
-// =============================================================================
-// STATE RESOLUTION v2 (Room Versions 2+)
-// =============================================================================
-
 const POWER_EVENT_TYPES = new Set([
 	"m.room.power_levels",
 	"m.room.join_rules",
 	"m.room.member",
 	"m.room.third_party_invite",
 ]);
+
+/**
+ * Sort events by reverse topological power ordering:
+ * 1. Sender power level (descending)
+ * 2. origin_server_ts (ascending)
+ * 3. Event ID lexicographic (ascending)
+ */
+const reverseTopologicalPowerOrder = (
+	events: PDU[],
+	_authEvents: Map<EventId, PDU>,
+	roomState: RoomState,
+): PDU[] =>
+	[...events].sort((a, b) => {
+		const plA = getUserPowerLevel(a.sender, roomState);
+		const plB = getUserPowerLevel(b.sender, roomState);
+		if (plA !== plB) return plB - plA;
+
+		if (a.origin_server_ts !== b.origin_server_ts) {
+			return a.origin_server_ts - b.origin_server_ts;
+		}
+
+		const idA = computeEventId(a);
+		const idB = computeEventId(b);
+		return idA < idB ? -1 : idA > idB ? 1 : 0;
+	});
 
 /**
  * Resolve conflicting state from multiple forks.
@@ -22,16 +43,15 @@ const POWER_EVENT_TYPES = new Set([
  * @param roomState - The base room state for auth checking
  * @returns Resolved state map
  */
-export function resolveState(
+export const resolveState = (
 	stateAtForks: Map<string, PDU>[],
 	authEvents: Map<EventId, PDU>,
 	roomState: RoomState,
-): Map<string, PDU> {
+): Map<string, PDU> => {
 	if (stateAtForks.length === 0) return new Map();
 	if (stateAtForks.length === 1)
 		return new Map(stateAtForks[0] as Map<string, PDU>);
 
-	// 1. Find unconflicted and conflicted state
 	const allKeys = new Set<string>();
 	for (const stateMap of stateAtForks) {
 		for (const key of stateMap.keys()) allKeys.add(key);
@@ -59,7 +79,6 @@ export function resolveState(
 		if (events.length === 1) {
 			unconflicted.set(key, events[0] as PDU);
 		} else if (events.length > 1) {
-			// Partition into power events and other events
 			const eventType = key.split("\0")[0] as string;
 			if (POWER_EVENT_TYPES.has(eventType)) {
 				conflictedPower.push(...events);
@@ -69,14 +88,12 @@ export function resolveState(
 		}
 	}
 
-	// 2. Sort conflicted power events by reverse topological power ordering
 	const sortedPower = reverseTopologicalPowerOrder(
 		conflictedPower,
 		authEvents,
 		roomState,
 	);
 
-	// 3. Iteratively apply power events
 	const resolvedState = new Map(unconflicted);
 	for (const event of sortedPower) {
 		const key = `${event.type}\0${event.state_key ?? ""}`;
@@ -88,12 +105,9 @@ export function resolveState(
 			const eventId = computeEventId(event);
 			checkEventAuth(event, eventId, testState);
 			resolvedState.set(key, event);
-		} catch {
-			// Event fails auth, skip it
-		}
+		} catch {}
 	}
 
-	// 4. Sort and iteratively apply other events
 	const sortedOther = reverseTopologicalPowerOrder(
 		conflictedOther,
 		authEvents,
@@ -109,39 +123,8 @@ export function resolveState(
 			const eventId = computeEventId(event);
 			checkEventAuth(event, eventId, testState);
 			resolvedState.set(key, event);
-		} catch {
-			// Event fails auth, skip it
-		}
+		} catch {}
 	}
 
 	return resolvedState;
-}
-
-/**
- * Sort events by reverse topological power ordering:
- * 1. Sender power level (descending)
- * 2. origin_server_ts (ascending)
- * 3. Event ID lexicographic (ascending)
- */
-function reverseTopologicalPowerOrder(
-	events: PDU[],
-	_authEvents: Map<EventId, PDU>,
-	roomState: RoomState,
-): PDU[] {
-	return [...events].sort((a, b) => {
-		// Primary: sender power level (descending)
-		const plA = getUserPowerLevel(a.sender, roomState);
-		const plB = getUserPowerLevel(b.sender, roomState);
-		if (plA !== plB) return plB - plA;
-
-		// Secondary: origin_server_ts (ascending)
-		if (a.origin_server_ts !== b.origin_server_ts) {
-			return a.origin_server_ts - b.origin_server_ts;
-		}
-
-		// Tertiary: event ID lexicographic (ascending)
-		const idA = computeEventId(a);
-		const idB = computeEventId(b);
-		return idA < idB ? -1 : idA > idB ? 1 : 0;
-	});
-}
+};

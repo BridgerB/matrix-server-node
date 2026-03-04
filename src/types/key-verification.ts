@@ -1,7 +1,3 @@
-// =============================================================================
-// EVENT CONTENT TYPES - KEY VERIFICATION
-// =============================================================================
-
 import type { Base64, DeviceId, Timestamp } from "./identifiers.ts";
 
 export interface KeyVerificationRequestContent {

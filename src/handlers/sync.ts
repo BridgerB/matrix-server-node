@@ -17,48 +17,145 @@ import type {
 
 const TIMELINE_LIMIT = 20;
 const MAX_TIMEOUT = 30000;
+const collectJoinedUsers = async (
+	storage: Storage,
+	roomId: RoomId,
+): Promise<UserId[]> => {
+	const members = await storage.getMemberEvents(roomId);
+	return members
+		.filter(
+			(m) =>
+				(m.event.content as Record<string, unknown>).membership === "join" &&
+				m.event.state_key,
+		)
+		.map((m) => m.event.state_key as UserId);
+};
 
-export function getSync(storage: Storage, _serverName: string): Handler {
-	return async (req) => {
-		const userId = req.userId as UserId;
-		const deviceId = req.deviceId as DeviceId;
-		const sinceStr = req.query.get("since");
-		const since = sinceStr !== null ? parseInt(sinceStr, 10) : undefined;
-		const timeout = Math.min(
-			Math.max(parseInt(req.query.get("timeout") ?? "0", 10), 0),
-			MAX_TIMEOUT,
-		);
-		const fullState = req.query.get("full_state") === "true";
+const buildPresenceEvents = async (
+	storage: Storage,
+	seenUsers: Set<UserId>,
+): Promise<ClientEvent[]> => {
+	const events: ClientEvent[] = [];
+	for (const uid of seenUsers) {
+		const p = await storage.getPresence(uid);
+		if (!p) continue;
+		const content: Record<string, unknown> = { presence: p.presence };
+		if (p.status_msg) content.status_msg = p.status_msg;
+		if (p.last_active_ts)
+			content.last_active_ago = Date.now() - p.last_active_ts;
+		events.push({
+			type: "m.presence",
+			content,
+			sender: uid,
+		} as unknown as ClientEvent);
+	}
+	return events;
+};
 
-		// Long-poll: wait for new events if incremental sync
-		if (since !== undefined && timeout > 0) {
-			await storage.waitForEvents(since, timeout);
-		}
+const buildReceiptContent = (
+	receipts: {
+		eventId: string;
+		receiptType: string;
+		userId: string;
+		ts: number;
+	}[],
+): Record<string, unknown> => {
+	const content: Record<
+		string,
+		Record<string, Record<string, { ts: number }>>
+	> = {};
+	for (const { eventId, receiptType, userId, ts } of receipts) {
+		if (!content[eventId]) content[eventId] = {};
+		const eventContent = content[eventId] as Record<
+			string,
+			Record<string, { ts: number }>
+		>;
+		if (!eventContent[receiptType]) eventContent[receiptType] = {};
+		(eventContent[receiptType] as Record<string, { ts: number }>)[userId] = {
+			ts,
+		};
+	}
+	return content;
+};
 
-		const nextBatch = await storage.getStreamPosition();
+const buildEphemeralEvents = async (
+	storage: Storage,
+	roomId: RoomId,
+): Promise<ClientEvent[]> => {
+	const events: ClientEvent[] = [
+		{
+			type: "m.typing",
+			content: { user_ids: await storage.getTypingUsers(roomId) },
+		} as unknown as ClientEvent,
+	];
+	const receipts = await storage.getReceipts(roomId);
+	if (receipts.length > 0) {
+		events.push({
+			type: "m.receipt",
+			content: buildReceiptContent(receipts),
+		} as unknown as ClientEvent);
+	}
+	return events;
+};
 
-		const response: SyncResponse =
-			since === undefined
-				? await buildInitialSync(storage, userId, deviceId, nextBatch)
-				: await buildIncrementalSync(
-						storage,
-						userId,
-						deviceId,
-						since,
-						nextBatch,
-						fullState,
-					);
+const computeNotificationCounts = async (
+	storage: Storage,
+	roomId: RoomId,
+	userId: UserId,
+	userRules: PushRulesContent,
+	timelineEvents: { event: PDU; eventId: string }[],
+): Promise<UnreadNotificationCounts> => {
+	const profile = await storage.getProfile(userId);
+	const displayName = profile?.displayname ?? undefined;
 
-		return { status: 200, body: response };
+	const memberEvents = await storage.getMemberEvents(roomId);
+	const memberCount = memberEvents.filter(
+		(m) => (m.event.content as Record<string, unknown>).membership === "join",
+	).length;
+
+	const plEvent = await storage.getStateEvent(
+		roomId,
+		"m.room.power_levels",
+		"",
+	);
+	const powerLevels = plEvent
+		? (plEvent.event.content as unknown as RoomPowerLevelsContent)
+		: undefined;
+
+	const getSenderPl = (sender: UserId): number => {
+		if (!powerLevels) return 0;
+		return powerLevels.users?.[sender] ?? powerLevels.users_default ?? 0;
 	};
-}
 
-async function buildInitialSync(
+	const { notification_count, highlight_count } = timelineEvents
+		.filter(({ event }) => event.sender !== userId)
+		.reduce(
+			(counts, { event }) => {
+				const result = evaluatePushRules(userRules, {
+					event,
+					userId,
+					displayName,
+					memberCount,
+					powerLevels,
+					senderPowerLevel: getSenderPl(event.sender),
+				});
+				if (result.notify) {
+					counts.notification_count++;
+					if (result.highlight) counts.highlight_count++;
+				}
+				return counts;
+			},
+			{ notification_count: 0, highlight_count: 0 },
+		);
+
+	return { notification_count, highlight_count };
+};
+const buildInitialSync = async (
 	storage: Storage,
 	userId: UserId,
 	deviceId: DeviceId,
 	nextBatch: number,
-): Promise<SyncResponse> {
+): Promise<SyncResponse> => {
 	const userRooms = await storage.getRoomsForUserWithMembership(userId);
 
 	const join: Record<RoomId, JoinedRoom> = {};
@@ -67,7 +164,6 @@ async function buildInitialSync(
 
 	for (const { roomId, membership } of userRooms) {
 		if (membership === "join") {
-			// Get timeline (most recent events, backwards)
 			const result = await storage.getEventsByRoom(
 				roomId,
 				TIMELINE_LIMIT,
@@ -77,7 +173,6 @@ async function buildInitialSync(
 			const timelineEvents = result.events.reverse();
 			const timelineEventIds = new Set(timelineEvents.map((e) => e.eventId));
 
-			// Get state events not already in timeline
 			const allState = await storage.getAllState(roomId);
 			const stateEvents = allState
 				.filter((e) => !timelineEventIds.has(e.eventId))
@@ -88,7 +183,6 @@ async function buildInitialSync(
 			);
 			await bundleAggregations(storage, timelineClientEvents, userId);
 
-			// Check if timeline is limited
 			const totalEvents = await storage.getEventsByRoom(
 				roomId,
 				TIMELINE_LIMIT + 1,
@@ -121,13 +215,11 @@ async function buildInitialSync(
 		}
 	}
 
-	// Global account data
 	const globalData = await storage.getAllGlobalAccountData(userId);
 	const accountDataEvents = globalData.map(
 		(d) => ({ type: d.type, content: d.content }) as unknown as ClientEvent,
 	);
 
-	// Room account data + ephemeral for joined rooms
 	const seenUsers = new Set<UserId>();
 	for (const roomId of Object.keys(join)) {
 		const roomData = await storage.getAllRoomAccountData(userId, roomId);
@@ -138,60 +230,21 @@ async function buildInitialSync(
 			(join[roomId] as JoinedRoom).account_data = { events: roomDataEvents };
 		}
 
-		// Ephemeral: typing + receipts
-		const ephemeralEvents: ClientEvent[] = [];
+		(join[roomId] as JoinedRoom).ephemeral = {
+			events: await buildEphemeralEvents(storage, roomId as RoomId),
+		};
 
-		const typingUsers = await storage.getTypingUsers(roomId as RoomId);
-		ephemeralEvents.push({
-			type: "m.typing",
-			content: { user_ids: typingUsers },
-		} as unknown as ClientEvent);
-
-		const receipts = await storage.getReceipts(roomId as RoomId);
-		if (receipts.length > 0) {
-			ephemeralEvents.push({
-				type: "m.receipt",
-				content: buildReceiptContent(receipts),
-			} as unknown as ClientEvent);
-		}
-
-		(join[roomId] as JoinedRoom).ephemeral = { events: ephemeralEvents };
-
-		// Collect users for presence
-		const members = await storage.getMemberEvents(roomId as RoomId);
-		for (const m of members) {
-			const membership = (m.event.content as Record<string, unknown>)
-				.membership;
-			if (membership === "join" && m.event.state_key) {
-				seenUsers.add(m.event.state_key as UserId);
-			}
-		}
+		const users = await collectJoinedUsers(storage, roomId as RoomId);
+		for (const u of users) seenUsers.add(u);
 	}
 
-	// Presence for all room members
-	const presenceEvents: ClientEvent[] = [];
-	for (const uid of seenUsers) {
-		const p = await storage.getPresence(uid);
-		if (p) {
-			const content: Record<string, unknown> = { presence: p.presence };
-			if (p.status_msg) content.status_msg = p.status_msg;
-			if (p.last_active_ts)
-				content.last_active_ago = Date.now() - p.last_active_ts;
-			presenceEvents.push({
-				type: "m.presence",
-				content,
-				sender: uid,
-			} as unknown as ClientEvent);
-		}
-	}
+	const presenceEvents = await buildPresenceEvents(storage, seenUsers);
 
-	// To-device messages
 	const toDeviceEvents = await storage.getToDeviceMessages(userId, deviceId);
 	if (toDeviceEvents.length > 0) {
 		await storage.clearToDeviceMessages(userId, deviceId);
 	}
 
-	// E2EE key counts
 	const otkCounts = await storage.getOneTimeKeyCounts(userId, deviceId);
 	const fallbackKeyTypes = await storage.getFallbackKeyTypes(userId, deviceId);
 
@@ -210,16 +263,15 @@ async function buildInitialSync(
 		device_one_time_keys_count: otkCounts,
 		device_unused_fallback_key_types: fallbackKeyTypes,
 	};
-}
-
-async function buildIncrementalSync(
+};
+const buildIncrementalSync = async (
 	storage: Storage,
 	userId: UserId,
 	deviceId: DeviceId,
 	since: number,
 	nextBatch: number,
 	fullState: boolean,
-): Promise<SyncResponse> {
+): Promise<SyncResponse> => {
 	const userRooms = await storage.getRoomsForUserWithMembership(userId);
 
 	const join: Record<RoomId, JoinedRoom> = {};
@@ -255,29 +307,13 @@ async function buildIncrementalSync(
 					? String((newEvents[0] as (typeof newEvents)[number]).streamPos - 1)
 					: undefined;
 
-			// Ephemeral: typing + receipts
-			const ephemeralEvents: ClientEvent[] = [];
-			const typingUsers = await storage.getTypingUsers(roomId);
-			ephemeralEvents.push({
-				type: "m.typing",
-				content: { user_ids: typingUsers },
-			} as unknown as ClientEvent);
+			const ephemeralEvents = await buildEphemeralEvents(storage, roomId);
 
-			const receipts = await storage.getReceipts(roomId);
-			if (receipts.length > 0) {
-				ephemeralEvents.push({
-					type: "m.receipt",
-					content: buildReceiptContent(receipts),
-				} as unknown as ClientEvent);
-			}
-
-			// Always include joined rooms in incremental sync (for ephemeral data)
 			if (
 				timelineClientEvents.length > 0 ||
 				stateClientEvents.length > 0 ||
 				ephemeralEvents.length > 0
 			) {
-				// Use full recent timeline for notification counts
 				const recentResult = await storage.getEventsByRoom(
 					roomId,
 					TIMELINE_LIMIT,
@@ -307,14 +343,8 @@ async function buildIncrementalSync(
 				};
 			}
 
-			// Collect users for presence
-			const members = await storage.getMemberEvents(roomId);
-			for (const m of members) {
-				const mem = (m.event.content as Record<string, unknown>).membership;
-				if (mem === "join" && m.event.state_key) {
-					seenUsers.add(m.event.state_key as UserId);
-				}
-			}
+			const users = await collectJoinedUsers(storage, roomId);
+			for (const u of users) seenUsers.add(u);
 		} else if (membership === "invite") {
 			const { events: newEvents } = await storage.getEventsByRoomSince(
 				roomId,
@@ -351,30 +381,13 @@ async function buildIncrementalSync(
 		}
 	}
 
-	// Presence for all room members
-	const presenceEvents: ClientEvent[] = [];
-	for (const uid of seenUsers) {
-		const p = await storage.getPresence(uid);
-		if (p) {
-			const content: Record<string, unknown> = { presence: p.presence };
-			if (p.status_msg) content.status_msg = p.status_msg;
-			if (p.last_active_ts)
-				content.last_active_ago = Date.now() - p.last_active_ts;
-			presenceEvents.push({
-				type: "m.presence",
-				content,
-				sender: uid,
-			} as unknown as ClientEvent);
-		}
-	}
+	const presenceEvents = await buildPresenceEvents(storage, seenUsers);
 
-	// To-device messages
 	const toDeviceEvents = await storage.getToDeviceMessages(userId, deviceId);
 	if (toDeviceEvents.length > 0) {
 		await storage.clearToDeviceMessages(userId, deviceId);
 	}
 
-	// E2EE key counts
 	const otkCounts = await storage.getOneTimeKeyCounts(userId, deviceId);
 	const fallbackKeyTypes = await storage.getFallbackKeyTypes(userId, deviceId);
 
@@ -392,89 +405,37 @@ async function buildIncrementalSync(
 		device_one_time_keys_count: otkCounts,
 		device_unused_fallback_key_types: fallbackKeyTypes,
 	};
-}
+};
+export const getSync =
+	(storage: Storage, _serverName: string): Handler =>
+	async (req) => {
+		const userId = req.userId as UserId;
+		const deviceId = req.deviceId as DeviceId;
+		const sinceStr = req.query.get("since");
+		const since = sinceStr !== null ? parseInt(sinceStr, 10) : undefined;
+		const timeout = Math.min(
+			Math.max(parseInt(req.query.get("timeout") ?? "0", 10), 0),
+			MAX_TIMEOUT,
+		);
+		const fullState = req.query.get("full_state") === "true";
 
-function buildReceiptContent(
-	receipts: {
-		eventId: string;
-		receiptType: string;
-		userId: string;
-		ts: number;
-	}[],
-): Record<string, unknown> {
-	const content: Record<
-		string,
-		Record<string, Record<string, { ts: number }>>
-	> = {};
-	for (const r of receipts) {
-		if (!content[r.eventId]) content[r.eventId] = {};
-		const eventContent = content[r.eventId] as Record<
-			string,
-			Record<string, { ts: number }>
-		>;
-		if (!eventContent[r.receiptType]) eventContent[r.receiptType] = {};
-		(eventContent[r.receiptType] as Record<string, { ts: number }>)[r.userId] =
-			{ ts: r.ts };
-	}
-	return content;
-}
-
-async function computeNotificationCounts(
-	storage: Storage,
-	roomId: RoomId,
-	userId: UserId,
-	userRules: PushRulesContent,
-	timelineEvents: { event: PDU; eventId: string }[],
-): Promise<UnreadNotificationCounts> {
-	// Get user's display name for contains_display_name condition
-	const profile = await storage.getProfile(userId);
-	const displayName = profile?.displayname ?? undefined;
-
-	// Get room member count
-	const memberEvents = await storage.getMemberEvents(roomId);
-	const memberCount = memberEvents.filter(
-		(m) => (m.event.content as Record<string, unknown>).membership === "join",
-	).length;
-
-	// Get power levels
-	const plEvent = await storage.getStateEvent(
-		roomId,
-		"m.room.power_levels",
-		"",
-	);
-	const powerLevels = plEvent
-		? (plEvent.event.content as unknown as RoomPowerLevelsContent)
-		: undefined;
-
-	// Get sender power level helper
-	const getSenderPl = (sender: UserId): number => {
-		if (!powerLevels) return 0;
-		return powerLevels.users?.[sender] ?? powerLevels.users_default ?? 0;
-	};
-
-	let notificationCount = 0;
-	let highlightCount = 0;
-
-	for (const { event } of timelineEvents) {
-		if (event.sender === userId) continue;
-
-		const result = evaluatePushRules(userRules, {
-			event,
-			userId,
-			displayName,
-			memberCount,
-			powerLevels,
-			senderPowerLevel: getSenderPl(event.sender),
-		});
-
-		if (result.notify) {
-			notificationCount++;
-			if (result.highlight) highlightCount++;
+		if (since !== undefined && timeout > 0) {
+			await storage.waitForEvents(since, timeout);
 		}
-	}
 
-	return {
-		notification_count: notificationCount,
-		highlight_count: highlightCount,
+		const nextBatch = await storage.getStreamPosition();
+
+		const response: SyncResponse =
+			since === undefined
+				? await buildInitialSync(storage, userId, deviceId, nextBatch)
+				: await buildIncrementalSync(
+						storage,
+						userId,
+						deviceId,
+						since,
+						nextBatch,
+						fullState,
+					);
+
+		return { status: 200, body: response };
 	};
-}

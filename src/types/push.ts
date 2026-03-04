@@ -1,7 +1,3 @@
-// =============================================================================
-// PUSH RULES
-// =============================================================================
-
 import type { EventId, RoomAlias, RoomId, UserId } from "./identifiers.ts";
 import type { JsonObject, JsonValue } from "./json.ts";
 

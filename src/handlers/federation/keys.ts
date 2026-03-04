@@ -4,16 +4,9 @@ import { signJson } from "../../signing.ts";
 import type { ServerKeys } from "../../types/federation.ts";
 import type { KeyId, ServerName } from "../../types/index.ts";
 
-// =============================================================================
-// GET /_matrix/key/v2/server
-// GET /_matrix/key/v2/server/:keyId
-// =============================================================================
-
-export function getServerKeys(
-	serverName: string,
-	signingKey: SigningKey,
-): Handler {
-	return (_req) => {
+export const getServerKeys =
+	(serverName: string, signingKey: SigningKey): Handler =>
+	(_req) => {
 		const response: ServerKeys = {
 			server_name: serverName as ServerName,
 			verify_keys: {
@@ -24,7 +17,6 @@ export function getServerKeys(
 			signatures: {} as Record<ServerName, Record<KeyId, string>>,
 		};
 
-		// Self-sign the response
 		signJson(
 			response as unknown as Record<string, unknown>,
 			serverName as ServerName,
@@ -33,4 +25,3 @@ export function getServerKeys(
 
 		return { status: 200, body: response };
 	};
-}

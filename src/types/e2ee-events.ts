@@ -1,7 +1,3 @@
-// =============================================================================
-// EVENT CONTENT TYPES - E2EE / KEYS
-// =============================================================================
-
 import type { DeviceId, RoomId } from "./identifiers.ts";
 
 export interface RoomKeyContent {

@@ -5,12 +5,9 @@ import type { Storage } from "../storage/interface.ts";
 import type { UserId } from "../types/index.ts";
 import type { RoomPowerLevelsContent } from "../types/state-events.ts";
 
-// =============================================================================
-// GET /_matrix/client/v3/notifications
-// =============================================================================
-
-export function getNotifications(storage: Storage): Handler {
-	return async (req) => {
+export const getNotifications =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const userId = req.userId as string;
 		const fromStr = req.query.get("from");
 		const limitStr = req.query.get("limit");
@@ -23,7 +20,6 @@ export function getNotifications(storage: Storage): Handler {
 
 		const joinedRooms = await storage.getRoomsForUser(userId);
 
-		// Collect recent events across all joined rooms
 		const allEvents: {
 			event: ReturnType<typeof pduToClientEvent>;
 			roomId: string;
@@ -53,7 +49,6 @@ export function getNotifications(storage: Storage): Handler {
 				return powerLevels.users?.[sender] ?? powerLevels.users_default ?? 0;
 			};
 
-			// Get recent events (up to 100 per room for notification scanning)
 			const result = await storage.getEventsByRoom(roomId, 100, undefined, "b");
 			for (const { event, eventId } of result.events) {
 				if (event.sender === userId) continue;
@@ -70,7 +65,6 @@ export function getNotifications(storage: Storage): Handler {
 				if (!evalResult.notify) continue;
 				if (onlyHighlights && !evalResult.highlight) continue;
 
-				// Build actions array matching the push rule actions
 				const actions: unknown[] = ["notify"];
 				if (evalResult.highlight) actions.push({ set_tweak: "highlight" });
 				if (evalResult.sound)
@@ -95,10 +89,8 @@ export function getNotifications(storage: Storage): Handler {
 			}
 		}
 
-		// Sort by stream position descending (most recent first)
 		allEvents.sort((a, b) => b.streamPos - a.streamPos);
 
-		// Apply pagination
 		let filtered = allEvents;
 		if (fromStr) {
 			const fromPos = parseInt(fromStr, 10);
@@ -128,4 +120,3 @@ export function getNotifications(storage: Storage): Handler {
 			},
 		};
 	};
-}

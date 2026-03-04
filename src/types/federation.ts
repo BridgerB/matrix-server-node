@@ -1,7 +1,3 @@
-// =============================================================================
-// FEDERATION - SERVER-TO-SERVER API
-// =============================================================================
-
 import type { PublicRoomsResponse } from "./directory.ts";
 import type { CrossSigningKey, DeviceKeys, OneTimeKey } from "./e2ee.ts";
 import type { EDU, PDU, StrippedStateEvent } from "./events.ts";

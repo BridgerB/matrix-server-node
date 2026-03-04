@@ -1,7 +1,3 @@
-// =============================================================================
-// WELL-KNOWN, VERSIONS, CAPABILITIES & VOIP
-// =============================================================================
-
 import type { JsonValue } from "./json.ts";
 import type { RoomVersionCapability } from "./room-versions.ts";
 

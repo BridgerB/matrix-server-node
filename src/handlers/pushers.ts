@@ -3,31 +3,23 @@ import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { Pusher } from "../types/push.ts";
 
-// =============================================================================
-// GET /_matrix/client/v3/pushers
-// =============================================================================
-
-export function getPushers(storage: Storage): Handler {
-	return async (req) => {
+export const getPushers =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const userId = req.userId as string;
 		const pushers = await storage.getPushers(userId);
 		return { status: 200, body: { pushers } };
 	};
-}
 
-// =============================================================================
-// POST /_matrix/client/v3/pushers/set
-// =============================================================================
-
-export function postPushersSet(storage: Storage): Handler {
-	return async (req) => {
+export const postPushersSet =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const userId = req.userId as string;
 		const body = (req.body ?? {}) as Partial<Pusher>;
 
 		if (!body.pushkey) throw missingParam("pushkey");
 		if (!body.app_id) throw missingParam("app_id");
 
-		// kind=null means delete
 		if (body.kind === null) {
 			await storage.deletePusher(userId, body.app_id, body.pushkey);
 			return { status: 200, body: {} };
@@ -58,7 +50,6 @@ export function postPushersSet(storage: Storage): Handler {
 			profile_tag: body.profile_tag,
 		};
 
-		// If not appending, remove this pushkey+app_id from all users
 		if (!body.append) {
 			await storage.deletePusherByKey(body.app_id, body.pushkey);
 		}
@@ -66,4 +57,3 @@ export function postPushersSet(storage: Storage): Handler {
 		await storage.setPusher(userId, pusher);
 		return { status: 200, body: {} };
 	};
-}

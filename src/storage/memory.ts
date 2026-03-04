@@ -106,8 +106,6 @@ export class MemoryStorage implements Storage {
 	>();
 	private federationTxns = new Set<string>();
 
-	// Users
-
 	async createUser(account: UserAccount): Promise<void> {
 		this.users.set(account.localpart, account);
 		this.usersByFullId.set(account.user_id, account);
@@ -122,8 +120,6 @@ export class MemoryStorage implements Storage {
 	async getUserById(userId: UserId): Promise<UserAccount | undefined> {
 		return this.usersByFullId.get(userId);
 	}
-
-	// Sessions
 
 	async createSession(session: StoredSession): Promise<void> {
 		this.sessions.set(session.access_token, session);
@@ -147,11 +143,7 @@ export class MemoryStorage implements Storage {
 	}
 
 	async getSessionsByUser(userId: UserId): Promise<StoredSession[]> {
-		const result: StoredSession[] = [];
-		for (const session of this.sessions.values()) {
-			if (session.user_id === userId) result.push(session);
-		}
-		return result;
+		return [...this.sessions.values()].filter((s) => s.user_id === userId);
 	}
 
 	async deleteSession(token: AccessToken): Promise<void> {
@@ -214,8 +206,6 @@ export class MemoryStorage implements Storage {
 		}
 	}
 
-	// UIAA
-
 	async createUIAASession(sessionId: string): Promise<void> {
 		this.uiaaSessions.set(sessionId, { completed: [] });
 	}
@@ -227,17 +217,12 @@ export class MemoryStorage implements Storage {
 	}
 
 	async addUIAACompleted(sessionId: string, stageType: string): Promise<void> {
-		const session = this.uiaaSessions.get(sessionId);
-		if (session) {
-			session.completed.push(stageType);
-		}
+		this.uiaaSessions.get(sessionId)?.completed.push(stageType);
 	}
 
 	async deleteUIAASession(sessionId: string): Promise<void> {
 		this.uiaaSessions.delete(sessionId);
 	}
-
-	// Rooms
 
 	async createRoom(state: RoomState): Promise<void> {
 		this.rooms.set(state.room_id, state);
@@ -249,19 +234,16 @@ export class MemoryStorage implements Storage {
 	}
 
 	async getRoomsForUser(userId: UserId): Promise<RoomId[]> {
-		const result: RoomId[] = [];
-		for (const room of this.rooms.values()) {
-			const memberEvent = room.state_events.get(`m.room.member\0${userId}`);
-			if (memberEvent) {
-				const membership = (memberEvent.content as Record<string, unknown>)
-					.membership;
-				if (membership === "join") result.push(room.room_id);
-			}
-		}
-		return result;
+		return [...this.rooms.values()]
+			.filter((room) => {
+				const memberEvent = room.state_events.get(`m.room.member\0${userId}`);
+				return (
+					(memberEvent?.content as Record<string, unknown>)?.membership ===
+					"join"
+				);
+			})
+			.map((room) => room.room_id);
 	}
-
-	// Events
 
 	async storeEvent(event: PDU, eventId: EventId): Promise<void> {
 		this.events.set(eventId, event);
@@ -270,7 +252,6 @@ export class MemoryStorage implements Storage {
 			this.streamCounter++;
 			timeline.push({ eventId, streamPos: this.streamCounter });
 		}
-		// Wake long-polling sync connections
 		for (const waiter of this.eventWaiters) {
 			waiter();
 		}
@@ -293,12 +274,10 @@ export class MemoryStorage implements Storage {
 		const timeline = this.roomTimeline.get(roomId) ?? [];
 		const fromPos = from ?? (direction === "f" ? 0 : this.streamCounter + 1);
 
-		let filtered: typeof timeline;
-		if (direction === "f") {
-			filtered = timeline.filter((e) => e.streamPos > fromPos);
-		} else {
-			filtered = timeline.filter((e) => e.streamPos < fromPos).reverse();
-		}
+		const filtered =
+			direction === "f"
+				? timeline.filter((e) => e.streamPos > fromPos)
+				: timeline.filter((e) => e.streamPos < fromPos).reverse();
 
 		const sliced = filtered.slice(0, limit);
 		const events = sliced.map((e) => ({
@@ -306,25 +285,21 @@ export class MemoryStorage implements Storage {
 			eventId: e.eventId,
 		}));
 
-		const lastEntry = sliced[sliced.length - 1];
-		const end = lastEntry ? lastEntry.streamPos : undefined;
-		return { events, end };
+		return { events, end: sliced[sliced.length - 1]?.streamPos };
 	}
 
 	async getStreamPosition(): Promise<number> {
 		return this.streamCounter;
 	}
 
-	// State
-
 	async getStateEvent(
 		roomId: RoomId,
 		eventType: string,
 		stateKey: string,
 	): Promise<{ event: PDU; eventId: EventId } | undefined> {
-		const room = this.rooms.get(roomId);
-		if (!room) return undefined;
-		const event = room.state_events.get(`${eventType}\0${stateKey}`);
+		const event = this.rooms
+			.get(roomId)
+			?.state_events.get(`${eventType}\0${stateKey}`);
 		if (!event) return undefined;
 		return { event, eventId: computeEventId(event) };
 	}
@@ -334,11 +309,10 @@ export class MemoryStorage implements Storage {
 	): Promise<{ event: PDU; eventId: EventId }[]> {
 		const room = this.rooms.get(roomId);
 		if (!room) return [];
-		const result: { event: PDU; eventId: EventId }[] = [];
-		for (const event of room.state_events.values()) {
-			result.push({ event, eventId: computeEventId(event) });
-		}
-		return result;
+		return [...room.state_events.values()].map((event) => ({
+			event,
+			eventId: computeEventId(event),
+		}));
 	}
 
 	async setStateEvent(
@@ -348,28 +322,19 @@ export class MemoryStorage implements Storage {
 	): Promise<void> {
 		const room = this.rooms.get(roomId);
 		if (!room) return;
-		const key = `${event.type}\0${event.state_key ?? ""}`;
-		room.state_events.set(key, event);
+		room.state_events.set(`${event.type}\0${event.state_key ?? ""}`, event);
 		await this.storeEvent(event, eventId);
 	}
-
-	// Members
 
 	async getMemberEvents(
 		roomId: RoomId,
 	): Promise<{ event: PDU; eventId: EventId }[]> {
 		const room = this.rooms.get(roomId);
 		if (!room) return [];
-		const result: { event: PDU; eventId: EventId }[] = [];
-		for (const [key, event] of room.state_events) {
-			if (key.startsWith("m.room.member\0")) {
-				result.push({ event, eventId: computeEventId(event) });
-			}
-		}
-		return result;
+		return [...room.state_events.entries()]
+			.filter(([key]) => key.startsWith("m.room.member\0"))
+			.map(([, event]) => ({ event, eventId: computeEventId(event) }));
 	}
-
-	// Transaction idempotency
 
 	async getTxnEventId(
 		userId: UserId,
@@ -388,21 +353,20 @@ export class MemoryStorage implements Storage {
 		this.txnMap.set(`${userId}|${deviceId}|${txnId}`, eventId);
 	}
 
-	// Sync
-
 	async getRoomsForUserWithMembership(
 		userId: UserId,
 	): Promise<{ roomId: RoomId; membership: string }[]> {
-		const result: { roomId: RoomId; membership: string }[] = [];
-		for (const room of this.rooms.values()) {
-			const memberEvent = room.state_events.get(`m.room.member\0${userId}`);
-			if (memberEvent) {
-				const membership = (memberEvent.content as Record<string, unknown>)
-					.membership as string | undefined;
-				if (membership) result.push({ roomId: room.room_id, membership });
-			}
-		}
-		return result;
+		return [...this.rooms.values()]
+			.map((room) => {
+				const memberEvent = room.state_events.get(`m.room.member\0${userId}`);
+				const membership = (memberEvent?.content as Record<string, unknown>)
+					?.membership as string | undefined;
+				return membership ? { roomId: room.room_id, membership } : undefined;
+			})
+			.filter(
+				(entry): entry is { roomId: RoomId; membership: string } =>
+					entry !== undefined,
+			);
 	}
 
 	async getEventsByRoomSince(
@@ -416,7 +380,6 @@ export class MemoryStorage implements Storage {
 		const timeline = this.roomTimeline.get(roomId) ?? [];
 		const filtered = timeline.filter((e) => e.streamPos > since);
 		const limited = filtered.length > limit;
-		// When limited, take the most recent events (tail)
 		const sliced = limited ? filtered.slice(filtered.length - limit) : filtered;
 		const events = sliced.map((e) => ({
 			event: this.events.get(e.eventId) as PDU,
@@ -437,19 +400,17 @@ export class MemoryStorage implements Storage {
 			"m.room.name",
 			"m.room.encryption",
 		]);
-		const result: StrippedStateEvent[] = [];
-		for (const [key, event] of room.state_events) {
-			const type = key.split("\0")[0] as string;
-			if (INVITE_STATE_TYPES.has(type) || type === "m.room.member") {
-				result.push({
-					content: event.content,
-					sender: event.sender,
-					state_key: event.state_key ?? "",
-					type: event.type,
-				});
-			}
-		}
-		return result;
+		return [...room.state_events.entries()]
+			.filter(([key]) => {
+				const type = key.split("\0")[0] as string;
+				return INVITE_STATE_TYPES.has(type) || type === "m.room.member";
+			})
+			.map(([, event]) => ({
+				content: event.content,
+				sender: event.sender,
+				state_key: event.state_key ?? "",
+				type: event.type,
+			}));
 	}
 
 	async waitForEvents(since: number, timeoutMs: number): Promise<void> {
@@ -471,8 +432,6 @@ export class MemoryStorage implements Storage {
 			this.eventWaiters.add(wake);
 		});
 	}
-
-	// Profile
 
 	async getProfile(userId: UserId): Promise<UserProfile | undefined> {
 		const user = this.usersByFullId.get(userId);
@@ -506,38 +465,31 @@ export class MemoryStorage implements Storage {
 		}
 	}
 
-	// Devices
-
 	async getDevice(
 		userId: UserId,
 		deviceId: DeviceId,
 	): Promise<Device | undefined> {
-		for (const session of this.sessions.values()) {
-			if (session.user_id === userId && session.device_id === deviceId) {
-				return {
-					device_id: session.device_id,
-					display_name: session.display_name,
-					last_seen_ip: session.last_seen_ip,
-					last_seen_ts: session.last_seen_ts,
-				};
-			}
-		}
-		return undefined;
+		const session = [...this.sessions.values()].find(
+			(s) => s.user_id === userId && s.device_id === deviceId,
+		);
+		if (!session) return undefined;
+		return {
+			device_id: session.device_id,
+			display_name: session.display_name,
+			last_seen_ip: session.last_seen_ip,
+			last_seen_ts: session.last_seen_ts,
+		};
 	}
 
 	async getAllDevices(userId: UserId): Promise<Device[]> {
-		const result: Device[] = [];
-		for (const session of this.sessions.values()) {
-			if (session.user_id === userId) {
-				result.push({
-					device_id: session.device_id,
-					display_name: session.display_name,
-					last_seen_ip: session.last_seen_ip,
-					last_seen_ts: session.last_seen_ts,
-				});
-			}
-		}
-		return result;
+		return [...this.sessions.values()]
+			.filter((s) => s.user_id === userId)
+			.map((s) => ({
+				device_id: s.device_id,
+				display_name: s.display_name,
+				last_seen_ip: s.last_seen_ip,
+				last_seen_ts: s.last_seen_ts,
+			}));
 	}
 
 	async updateDeviceDisplayName(
@@ -565,8 +517,6 @@ export class MemoryStorage implements Storage {
 		}
 	}
 
-	// Account
-
 	async updatePassword(userId: UserId, newPasswordHash: string): Promise<void> {
 		const user = this.usersByFullId.get(userId);
 		if (user) {
@@ -581,8 +531,6 @@ export class MemoryStorage implements Storage {
 		}
 		await this.deleteAllSessions(userId);
 	}
-
-	// Aliases
 
 	async createRoomAlias(
 		roomAlias: RoomAlias,
@@ -606,18 +554,14 @@ export class MemoryStorage implements Storage {
 	}
 
 	async getAliasesForRoom(roomId: RoomId): Promise<RoomAlias[]> {
-		const result: RoomAlias[] = [];
-		for (const [alias, entry] of this.aliases) {
-			if (entry.room_id === roomId) result.push(alias);
-		}
-		return result;
+		return [...this.aliases.entries()]
+			.filter(([, entry]) => entry.room_id === roomId)
+			.map(([alias]) => alias);
 	}
 
 	async getAliasCreator(roomAlias: RoomAlias): Promise<UserId | undefined> {
 		return this.aliases.get(roomAlias)?.creator;
 	}
-
-	// Directory
 
 	async setRoomVisibility(
 		roomId: RoomId,
@@ -637,8 +581,6 @@ export class MemoryStorage implements Storage {
 	async getPublicRoomIds(): Promise<RoomId[]> {
 		return [...this.publicRooms];
 	}
-
-	// Account data
 
 	async getGlobalAccountData(
 		userId: UserId,
@@ -665,11 +607,7 @@ export class MemoryStorage implements Storage {
 	): Promise<{ type: string; content: JsonObject }[]> {
 		const userMap = this.globalAccountData.get(userId);
 		if (!userMap) return [];
-		const result: { type: string; content: JsonObject }[] = [];
-		for (const [type, content] of userMap) {
-			result.push({ type, content });
-		}
-		return result;
+		return [...userMap.entries()].map(([type, content]) => ({ type, content }));
 	}
 
 	async getRoomAccountData(
@@ -677,8 +615,7 @@ export class MemoryStorage implements Storage {
 		roomId: RoomId,
 		type: string,
 	): Promise<JsonObject | undefined> {
-		const key = `${userId}\0${roomId}`;
-		return this.roomAccountDataMap.get(key)?.get(type);
+		return this.roomAccountDataMap.get(`${userId}\0${roomId}`)?.get(type);
 	}
 
 	async setRoomAccountData(
@@ -700,17 +637,10 @@ export class MemoryStorage implements Storage {
 		userId: UserId,
 		roomId: RoomId,
 	): Promise<{ type: string; content: JsonObject }[]> {
-		const key = `${userId}\0${roomId}`;
-		const dataMap = this.roomAccountDataMap.get(key);
+		const dataMap = this.roomAccountDataMap.get(`${userId}\0${roomId}`);
 		if (!dataMap) return [];
-		const result: { type: string; content: JsonObject }[] = [];
-		for (const [type, content] of dataMap) {
-			result.push({ type, content });
-		}
-		return result;
+		return [...dataMap.entries()].map(([type, content]) => ({ type, content }));
 	}
-
-	// Typing
 
 	private wakeWaiters(): void {
 		for (const waiter of this.eventWaiters) {
@@ -730,7 +660,6 @@ export class MemoryStorage implements Storage {
 			this.typingTimers.set(roomId, roomTyping);
 		}
 
-		// Clear existing timer
 		const existing = roomTyping.get(userId);
 		if (existing) {
 			clearTimeout(existing);
@@ -755,8 +684,6 @@ export class MemoryStorage implements Storage {
 		return [...roomTyping.keys()];
 	}
 
-	// Receipts
-
 	async setReceipt(
 		roomId: RoomId,
 		userId: UserId,
@@ -769,8 +696,7 @@ export class MemoryStorage implements Storage {
 			roomReceipts = new Map();
 			this.receiptsMap.set(roomId, roomReceipts);
 		}
-		const key = `${userId}\0${receiptType}`;
-		roomReceipts.set(key, { eventId, ts });
+		roomReceipts.set(`${userId}\0${receiptType}`, { eventId, ts });
 		this.wakeWaiters();
 	}
 
@@ -781,25 +707,11 @@ export class MemoryStorage implements Storage {
 	> {
 		const roomReceipts = this.receiptsMap.get(roomId);
 		if (!roomReceipts) return [];
-		const result: {
-			eventId: EventId;
-			receiptType: string;
-			userId: UserId;
-			ts: Timestamp;
-		}[] = [];
-		for (const [key, value] of roomReceipts) {
+		return [...roomReceipts.entries()].map(([key, value]) => {
 			const [userId, receiptType] = key.split("\0") as [UserId, string];
-			result.push({
-				eventId: value.eventId,
-				receiptType,
-				userId,
-				ts: value.ts,
-			});
-		}
-		return result;
+			return { eventId: value.eventId, receiptType, userId, ts: value.ts };
+		});
 	}
-
-	// Presence
 
 	async setPresence(
 		userId: UserId,
@@ -825,11 +737,11 @@ export class MemoryStorage implements Storage {
 		return this.presenceMap.get(userId);
 	}
 
-	// Media
-
 	async storeMedia(media: StoredMedia, data: Buffer): Promise<void> {
-		const key = `${media.origin}/${media.media_id}`;
-		this.mediaStore.set(key, { metadata: media, data });
+		this.mediaStore.set(`${media.origin}/${media.media_id}`, {
+			metadata: media,
+			data,
+		});
 	}
 
 	async getMedia(
@@ -838,8 +750,6 @@ export class MemoryStorage implements Storage {
 	): Promise<{ metadata: StoredMedia; data: Buffer } | undefined> {
 		return this.mediaStore.get(`${serverName}/${mediaId}`);
 	}
-
-	// Filters
 
 	async createFilter(userId: UserId, filter: JsonObject): Promise<string> {
 		let userFilters = this.filters.get(userId);
@@ -858,8 +768,6 @@ export class MemoryStorage implements Storage {
 	): Promise<JsonObject | undefined> {
 		return this.filters.get(userId)?.get(filterId);
 	}
-
-	// E2EE - Device keys
 
 	async setDeviceKeys(
 		userId: UserId,
@@ -883,14 +791,11 @@ export class MemoryStorage implements Storage {
 		const prefix = `${userId}\0`;
 		for (const [key, value] of this.deviceKeysMap) {
 			if (key.startsWith(prefix)) {
-				const deviceId = key.slice(prefix.length) as DeviceId;
-				result[deviceId] = value;
+				result[key.slice(prefix.length) as DeviceId] = value;
 			}
 		}
 		return result;
 	}
-
-	// E2EE - One-time keys
 
 	async addOneTimeKeys(
 		userId: UserId,
@@ -923,12 +828,11 @@ export class MemoryStorage implements Storage {
 				}
 			}
 		}
-		// Fall back to fallback keys
 		const fallbacks = this.fallbackKeysMap.get(mapKey);
 		if (fallbacks) {
 			for (const [keyId, key] of fallbacks) {
 				if (keyId.startsWith(`${algorithm}:`)) {
-					return { keyId, key }; // Don't delete fallback keys
+					return { keyId, key };
 				}
 			}
 		}
@@ -939,8 +843,7 @@ export class MemoryStorage implements Storage {
 		userId: UserId,
 		deviceId: DeviceId,
 	): Promise<Record<string, number>> {
-		const mapKey = `${userId}\0${deviceId}`;
-		const otks = this.oneTimeKeysMap.get(mapKey);
+		const otks = this.oneTimeKeysMap.get(`${userId}\0${deviceId}`);
 		if (!otks) return {};
 		const counts: Record<string, number> = {};
 		for (const keyId of otks.keys()) {
@@ -950,36 +853,30 @@ export class MemoryStorage implements Storage {
 		return counts;
 	}
 
-	// E2EE - Fallback keys
-
 	async setFallbackKeys(
 		userId: UserId,
 		deviceId: DeviceId,
 		keys: Record<KeyId, string | OneTimeKey>,
 	): Promise<void> {
-		const mapKey = `${userId}\0${deviceId}`;
 		const fallbacks = new Map<KeyId, string | OneTimeKey>();
 		for (const [keyId, key] of Object.entries(keys)) {
 			fallbacks.set(keyId as KeyId, key);
 		}
-		this.fallbackKeysMap.set(mapKey, fallbacks);
+		this.fallbackKeysMap.set(`${userId}\0${deviceId}`, fallbacks);
 	}
 
 	async getFallbackKeyTypes(
 		userId: UserId,
 		deviceId: DeviceId,
 	): Promise<string[]> {
-		const mapKey = `${userId}\0${deviceId}`;
-		const fallbacks = this.fallbackKeysMap.get(mapKey);
+		const fallbacks = this.fallbackKeysMap.get(`${userId}\0${deviceId}`);
 		if (!fallbacks) return [];
-		const types = new Set<string>();
-		for (const keyId of fallbacks.keys()) {
-			types.add(keyId.split(":")[0] as string);
-		}
-		return [...types];
+		return [
+			...new Set(
+				[...fallbacks.keys()].map((keyId) => keyId.split(":")[0] as string),
+			),
+		];
 	}
-
-	// To-device messages
 
 	async sendToDevice(
 		userId: UserId,
@@ -1009,8 +906,6 @@ export class MemoryStorage implements Storage {
 	): Promise<void> {
 		this.toDeviceInbox.delete(`${userId}\0${deviceId}`);
 	}
-
-	// Pushers
 
 	async getPushers(userId: UserId): Promise<Pusher[]> {
 		return this.pushersMap.get(userId) ?? [];
@@ -1054,8 +949,6 @@ export class MemoryStorage implements Storage {
 		}
 	}
 
-	// Relations
-
 	async storeRelation(
 		eventId: EventId,
 		roomId: RoomId,
@@ -1066,10 +959,10 @@ export class MemoryStorage implements Storage {
 		const event = this.events.get(eventId);
 		if (!event) return;
 
-		// Find stream position for this event
 		const timeline = this.roomTimeline.get(roomId) ?? [];
-		const entry = timeline.find((e) => e.eventId === eventId);
-		const streamPos = entry?.streamPos ?? this.streamCounter;
+		const streamPos =
+			timeline.find((e) => e.eventId === eventId)?.streamPos ??
+			this.streamCounter;
 
 		let relations = this.relationsMap.get(targetEventId);
 		if (!relations) {
@@ -1104,22 +997,16 @@ export class MemoryStorage implements Storage {
 		if (eventType)
 			relations = relations.filter((r) => r.eventType === eventType);
 
-		// Sort by stream position
 		relations = [...relations].sort((a, b) =>
 			direction === "f" ? a.streamPos - b.streamPos : b.streamPos - a.streamPos,
 		);
 
-		// Apply pagination
 		const fromPos = from ? parseInt(from, 10) : undefined;
 		if (fromPos !== undefined) {
 			const startIdx = relations.findIndex((r) =>
 				direction === "f" ? r.streamPos > fromPos : r.streamPos < fromPos,
 			);
-			if (startIdx >= 0) {
-				relations = relations.slice(startIdx);
-			} else {
-				relations = [];
-			}
+			relations = startIdx >= 0 ? relations.slice(startIdx) : [];
 		}
 
 		const sliced = relations.slice(0, limit);
@@ -1142,8 +1029,7 @@ export class MemoryStorage implements Storage {
 	async getAnnotationCounts(
 		eventId: EventId,
 	): Promise<{ type: string; key: string; count: number }[]> {
-		const relations = this.relationsMap.get(eventId) ?? [];
-		const annotations = relations.filter(
+		const annotations = (this.relationsMap.get(eventId) ?? []).filter(
 			(r) => r.relType === "m.annotation" && r.key,
 		);
 
@@ -1171,8 +1057,7 @@ export class MemoryStorage implements Storage {
 		eventId: EventId,
 		sender: UserId,
 	): Promise<{ event: PDU; eventId: EventId } | undefined> {
-		const relations = this.relationsMap.get(eventId) ?? [];
-		const edits = relations
+		const edits = (this.relationsMap.get(eventId) ?? [])
 			.filter((r) => r.relType === "m.replace" && r.sender === sender)
 			.sort((a, b) => b.streamPos - a.streamPos);
 
@@ -1194,8 +1079,7 @@ export class MemoryStorage implements Storage {
 		  }
 		| undefined
 	> {
-		const relations = this.relationsMap.get(eventId) ?? [];
-		const threadReplies = relations
+		const threadReplies = (this.relationsMap.get(eventId) ?? [])
 			.filter((r) => r.relType === "m.thread")
 			.sort((a, b) => a.streamPos - b.streamPos);
 
@@ -1207,18 +1091,12 @@ export class MemoryStorage implements Storage {
 		const latestEvent = this.events.get(latest.eventId);
 		if (!latestEvent) return undefined;
 
-		const currentUserParticipated = threadReplies.some(
-			(r) => r.sender === userId,
-		);
-
 		return {
 			latestEvent: { event: latestEvent, eventId: latest.eventId },
 			count: threadReplies.length,
-			currentUserParticipated,
+			currentUserParticipated: threadReplies.some((r) => r.sender === userId),
 		};
 	}
-
-	// Reports
 
 	async storeReport(
 		userId: UserId,
@@ -1237,8 +1115,6 @@ export class MemoryStorage implements Storage {
 		});
 	}
 
-	// OpenID
-
 	async storeOpenIdToken(
 		token: string,
 		userId: UserId,
@@ -1252,8 +1128,6 @@ export class MemoryStorage implements Storage {
 	): Promise<{ userId: UserId; expiresAt: number } | undefined> {
 		return this.openIdTokens.get(token);
 	}
-
-	// 3PIDs
 
 	async getThreePids(
 		userId: UserId,
@@ -1271,10 +1145,7 @@ export class MemoryStorage implements Storage {
 			pids = [];
 			this.threePidsMap.set(userId, pids);
 		}
-		const existing = pids.findIndex(
-			(p) => p.medium === medium && p.address === address,
-		);
-		if (existing >= 0) return;
+		if (pids.some((p) => p.medium === medium && p.address === address)) return;
 		pids.push({ medium, address, added_at: Date.now() });
 	}
 
@@ -1290,8 +1161,6 @@ export class MemoryStorage implements Storage {
 		);
 		if (idx >= 0) pids.splice(idx, 1);
 	}
-
-	// User directory
 
 	async searchUserDirectory(
 		searchTerm: string,
@@ -1321,8 +1190,6 @@ export class MemoryStorage implements Storage {
 		return results;
 	}
 
-	// Thread roots
-
 	async getThreadRoots(
 		roomId: RoomId,
 		userId: UserId,
@@ -1333,7 +1200,6 @@ export class MemoryStorage implements Storage {
 		events: { event: PDU; eventId: EventId }[];
 		nextBatch?: string;
 	}> {
-		// Collect thread roots with their latest reply stream position
 		const threadRoots = new Map<EventId, number>();
 		const participatedIn = new Set<EventId>();
 
@@ -1341,38 +1207,30 @@ export class MemoryStorage implements Storage {
 			const threadReplies = relations.filter((r) => r.relType === "m.thread");
 			if (threadReplies.length === 0) continue;
 
-			// Check the target event is in this room
 			const targetEvent = this.events.get(targetId);
 			if (!targetEvent || targetEvent.room_id !== roomId) continue;
 
-			const latestStreamPos = Math.max(
-				...threadReplies.map((r) => r.streamPos),
+			threadRoots.set(
+				targetId,
+				Math.max(...threadReplies.map((r) => r.streamPos)),
 			);
-			threadRoots.set(targetId, latestStreamPos);
 
 			if (threadReplies.some((r) => r.sender === userId)) {
 				participatedIn.add(targetId);
 			}
 		}
 
-		// Filter by participation
 		let rootIds = [...threadRoots.entries()];
 		if (include === "participated") {
 			rootIds = rootIds.filter(([id]) => participatedIn.has(id));
 		}
 
-		// Sort by latest reply (most recent first)
 		rootIds.sort((a, b) => b[1] - a[1]);
 
-		// Pagination
 		if (from) {
 			const fromPos = parseInt(from, 10);
 			const startIdx = rootIds.findIndex(([, pos]) => pos < fromPos);
-			if (startIdx >= 0) {
-				rootIds = rootIds.slice(startIdx);
-			} else {
-				rootIds = [];
-			}
+			rootIds = startIdx >= 0 ? rootIds.slice(startIdx) : [];
 		}
 
 		const sliced = rootIds.slice(0, limit);
@@ -1392,8 +1250,6 @@ export class MemoryStorage implements Storage {
 		return { events, nextBatch };
 	}
 
-	// Search
-
 	async searchRoomEvents(
 		roomIds: RoomId[],
 		searchTerm: string,
@@ -1408,15 +1264,12 @@ export class MemoryStorage implements Storage {
 		const results: { event: PDU; eventId: EventId; streamPos: number }[] = [];
 		const fromPos = from ? parseInt(from, 10) : undefined;
 
-		// Collect all timeline entries across specified rooms, sorted by stream pos descending
-		const allEntries: { eventId: EventId; streamPos: number }[] = [];
-		for (const roomId of roomIds) {
+		const allEntries = roomIds.flatMap((roomId) => {
 			const timeline = this.roomTimeline.get(roomId) ?? [];
-			for (const entry of timeline) {
-				if (fromPos !== undefined && entry.streamPos >= fromPos) continue;
-				allEntries.push(entry);
-			}
-		}
+			return fromPos !== undefined
+				? timeline.filter((entry) => entry.streamPos < fromPos)
+				: timeline;
+		});
 		allEntries.sort((a, b) => b.streamPos - a.streamPos);
 
 		for (const entry of allEntries) {
@@ -1426,8 +1279,7 @@ export class MemoryStorage implements Storage {
 			if (!event) continue;
 
 			const content = event.content as Record<string, unknown>;
-			let matched = false;
-			for (const key of keys) {
+			const matched = keys.some((key) => {
 				const field =
 					key === "content.body"
 						? content.body
@@ -1436,11 +1288,8 @@ export class MemoryStorage implements Storage {
 							: key === "content.topic"
 								? content.topic
 								: undefined;
-				if (typeof field === "string" && field.toLowerCase().includes(term)) {
-					matched = true;
-					break;
-				}
-			}
+				return typeof field === "string" && field.toLowerCase().includes(term);
+			});
 
 			if (matched) {
 				results.push({
@@ -1458,8 +1307,6 @@ export class MemoryStorage implements Storage {
 
 		return { events: results, nextBatch };
 	}
-
-	// Federation - Remote server key cache
 
 	async storeServerKeys(
 		serverName: ServerName,
@@ -1479,8 +1326,6 @@ export class MemoryStorage implements Storage {
 	): Promise<{ key: string; validUntil: number } | undefined> {
 		return this.serverKeysCache.get(`${serverName}\0${keyId}`);
 	}
-
-	// Federation - Auth chain
 
 	async getAuthChain(eventIds: EventId[]): Promise<PDU[]> {
 		const visited = new Set<EventId>();
@@ -1514,9 +1359,12 @@ export class MemoryStorage implements Storage {
 		for (const [key, event] of room.state_events) {
 			if (key.startsWith("m.room.member\0")) {
 				if ((event.content as Record<string, unknown>).membership === "join") {
-					const userId = event.state_key as string;
-					const serverName = userId.split(":").slice(1).join(":") as ServerName;
-					servers.add(serverName);
+					servers.add(
+						(event.state_key as string)
+							.split(":")
+							.slice(1)
+							.join(":") as ServerName,
+					);
 				}
 			}
 		}
@@ -1528,13 +1376,10 @@ export class MemoryStorage implements Storage {
 		_roomId: RoomId,
 		_eventId: EventId,
 	): Promise<Map<string, PDU> | undefined> {
-		// Simplified: return current room state (future: snapshot per event)
 		const room = this.rooms.get(_roomId);
 		if (!room) return undefined;
 		return new Map(room.state_events);
 	}
-
-	// Federation - Transaction dedup
 
 	async getFederationTxn(origin: ServerName, txnId: string): Promise<boolean> {
 		return this.federationTxns.has(`${origin}\0${txnId}`);
@@ -1544,21 +1389,16 @@ export class MemoryStorage implements Storage {
 		this.federationTxns.add(`${origin}\0${txnId}`);
 	}
 
-	// Federation - Room import
-
 	async importRoomState(
 		roomId: RoomId,
 		roomVersion: RoomVersion,
 		stateEvents: PDU[],
 		authChain: PDU[],
 	): Promise<void> {
-		// Store all auth chain events
 		for (const event of authChain) {
-			const eventId = computeEventId(event);
-			this.events.set(eventId, event);
+			this.events.set(computeEventId(event), event);
 		}
 
-		// Create room state from state events
 		const stateMap = new Map<string, PDU>();
 		let maxDepth = 0;
 		const extremities: EventId[] = [];
@@ -1567,10 +1407,8 @@ export class MemoryStorage implements Storage {
 			const eventId = computeEventId(event);
 			this.events.set(eventId, event);
 
-			const key = `${event.type}\0${event.state_key ?? ""}`;
-			stateMap.set(key, event);
+			stateMap.set(`${event.type}\0${event.state_key ?? ""}`, event);
 
-			// Track timeline
 			const timeline = this.roomTimeline.get(roomId) ?? [];
 			this.streamCounter++;
 			timeline.push({ eventId, streamPos: this.streamCounter });
@@ -1581,17 +1419,14 @@ export class MemoryStorage implements Storage {
 			extremities.push(eventId);
 		}
 
-		const roomState: RoomState = {
+		this.rooms.set(roomId, {
 			room_id: roomId,
 			room_version: roomVersion,
 			state_events: stateMap,
 			depth: maxDepth + 1,
 			forward_extremities: extremities,
-		};
+		});
 
-		this.rooms.set(roomId, roomState);
-
-		// Notify waiters
 		for (const waiter of this.eventWaiters) waiter();
 		this.eventWaiters.clear();
 	}

@@ -6,25 +6,22 @@ import type { LoginFlow, LoginRequest, LoginResponse } from "../types/index.ts";
 
 const SUPPORTED_FLOWS: LoginFlow[] = [{ type: "m.login.password" }];
 
-export function getLoginFlows(): Handler {
-	return async () => ({
-		status: 200,
-		body: { flows: SUPPORTED_FLOWS },
-	});
-}
+export const getLoginFlows = (): Handler => async () => ({
+	status: 200,
+	body: { flows: SUPPORTED_FLOWS },
+});
 
-export function postLogin(storage: Storage, serverName: string): Handler {
-	return async (req) => {
+export const postLogin =
+	(storage: Storage, serverName: string): Handler =>
+	async (req) => {
 		const body = req.body as LoginRequest;
 
 		if (!body.type) throw badJson("Missing 'type' field");
-		if (body.type !== "m.login.password") {
+		if (body.type !== "m.login.password")
 			throw invalidParam(`Unsupported login type: ${body.type}`);
-		}
 
-		if (!body.identifier || body.identifier.type !== "m.id.user") {
+		if (!body.identifier || body.identifier.type !== "m.id.user")
 			throw invalidParam("Only m.id.user identifier is supported");
-		}
 
 		let localpart = body.identifier.user;
 		if (localpart.startsWith("@")) {
@@ -75,4 +72,3 @@ export function postLogin(storage: Storage, serverName: string): Handler {
 
 		return { status: 200, body: response };
 	};
-}

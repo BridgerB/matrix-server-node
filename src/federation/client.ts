@@ -20,8 +20,6 @@ export class FederationClient {
 		body?: unknown,
 	): Promise<{ status: number; body: unknown }> {
 		const resolved = await resolveServer(destination);
-
-		// Build the signed authorization header
 		const authHeader = this.buildAuthHeader(destination, method, path, body);
 
 		const bodyStr = body !== undefined ? JSON.stringify(body) : undefined;

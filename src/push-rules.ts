@@ -8,11 +8,6 @@ import type {
 	PushRulesContent,
 } from "./types/push.ts";
 import type { RoomPowerLevelsContent } from "./types/state-events.ts";
-
-// =============================================================================
-// TYPES
-// =============================================================================
-
 export interface EvaluationContext {
 	event: PDU;
 	userId: UserId;
@@ -43,14 +38,8 @@ const VALID_KINDS = new Set<string>([
 	"underride",
 ]);
 
-export function isValidKind(kind: string): kind is PushRuleKind {
-	return VALID_KINDS.has(kind);
-}
-
-// =============================================================================
-// DEFAULT PUSH RULES
-// =============================================================================
-
+export const isValidKind = (kind: string): kind is PushRuleKind =>
+	VALID_KINDS.has(kind);
 export function getDefaultRules(userId: UserId): PushRulesContent {
 	return {
 		global: {
@@ -218,11 +207,6 @@ export function getDefaultRules(userId: UserId): PushRulesContent {
 		},
 	};
 }
-
-// =============================================================================
-// LAZY INIT / PERSISTENCE
-// =============================================================================
-
 export async function getOrInitRules(
 	storage: Storage,
 	userId: UserId,
@@ -250,144 +234,34 @@ export async function saveRules(
 		rules as unknown as JsonObject,
 	);
 }
+const escapeGlob = (pattern: string) =>
+	pattern
+		.replace(/[.+^${}()|[\]\\]/g, "\\$&")
+		.replace(/\*/g, ".*")
+		.replace(/\?/g, ".");
 
-// =============================================================================
-// PUSH RULE EVALUATOR
-// =============================================================================
+const globMatch = (pattern: string, value: string) =>
+	new RegExp(`^${escapeGlob(pattern)}$`, "i").test(value);
 
-export function evaluatePushRules(
-	rules: PushRulesContent,
-	ctx: EvaluationContext,
-): PushEvalResult {
-	const noMatch: PushEvalResult = { notify: false, highlight: false };
+const globMatchWordBoundary = (pattern: string, body: string) =>
+	new RegExp(`(?:^|\\W)(${escapeGlob(pattern)})(?:$|\\W)`, "i").test(body);
 
-	// Skip own events
-	if (ctx.event.sender === ctx.userId) return noMatch;
+const jsonValueEquals = (a: unknown, b: unknown): boolean => {
+	if (a === b) return true;
+	if (a === null || b === null) return a === b;
+	if (typeof a !== typeof b) return false;
+	if (typeof a === "object") return JSON.stringify(a) === JSON.stringify(b);
+	return false;
+};
 
-	const ruleset = rules.global;
-
-	// Check override rules
-	for (const rule of ruleset.override ?? []) {
-		if (!rule.enabled) continue;
-		if (checkConditions(rule.conditions ?? [], ctx))
-			return parseActions(rule.actions);
-	}
-
-	// Check content rules
-	for (const rule of ruleset.content ?? []) {
-		if (!rule.enabled) continue;
-		// Content rules can use conditions (e.g. contains_display_name) or pattern
-		if (rule.conditions && rule.conditions.length > 0) {
-			if (checkConditions(rule.conditions, ctx))
-				return parseActions(rule.actions);
-		} else if (rule.pattern) {
-			const body = getNestedValue(ctx.event, "content.body");
-			if (
-				typeof body === "string" &&
-				globMatchWordBoundary(rule.pattern, body)
-			) {
-				return parseActions(rule.actions);
-			}
-		}
-	}
-
-	// Check room rules
-	for (const rule of ruleset.room ?? []) {
-		if (!rule.enabled) continue;
-		if (ctx.event.room_id === rule.rule_id) return parseActions(rule.actions);
-	}
-
-	// Check sender rules
-	for (const rule of ruleset.sender ?? []) {
-		if (!rule.enabled) continue;
-		if (ctx.event.sender === rule.rule_id) return parseActions(rule.actions);
-	}
-
-	// Check underride rules
-	for (const rule of ruleset.underride ?? []) {
-		if (!rule.enabled) continue;
-		if (checkConditions(rule.conditions ?? [], ctx))
-			return parseActions(rule.actions);
-	}
-
-	return noMatch;
-}
-
-// =============================================================================
-// CONDITION MATCHERS
-// =============================================================================
-
-function checkConditions(
-	conditions: PushCondition[],
-	ctx: EvaluationContext,
-): boolean {
-	return conditions.every((c) => checkCondition(c, ctx));
-}
-
-function checkCondition(cond: PushCondition, ctx: EvaluationContext): boolean {
-	switch (cond.kind) {
-		case "event_match": {
-			if (!cond.key || cond.pattern === undefined) return false;
-			const value = getNestedValue(ctx.event, cond.key);
-			if (typeof value !== "string") return false;
-			// content.body uses word-boundary matching
-			if (cond.key === "content.body") {
-				return globMatchWordBoundary(cond.pattern, value);
-			}
-			return globMatch(cond.pattern, value);
-		}
-
-		case "contains_display_name": {
-			if (!ctx.displayName) return false;
-			const body = getNestedValue(ctx.event, "content.body");
-			if (typeof body !== "string") return false;
-			return globMatchWordBoundary(ctx.displayName, body);
-		}
-
-		case "room_member_count": {
-			if (!cond.is) return false;
-			return matchMemberCount(ctx.memberCount, cond.is);
-		}
-
-		case "sender_notification_permission": {
-			if (!cond.key) return false;
-			const threshold =
-				ctx.powerLevels?.notifications?.[cond.key as "room"] ?? 50;
-			return ctx.senderPowerLevel >= threshold;
-		}
-
-		case "event_property_is": {
-			if (!cond.key) return false;
-			const value = getNestedValue(ctx.event, cond.key);
-			return jsonValueEquals(value as JsonValue, cond.value);
-		}
-
-		case "event_property_contains": {
-			if (!cond.key) return false;
-			const value = getNestedValue(ctx.event, cond.key);
-			if (!Array.isArray(value)) return false;
-			return value.some((item) =>
-				jsonValueEquals(item as JsonValue, cond.value),
-			);
-		}
-
-		default:
-			return false;
-	}
-}
-
-// =============================================================================
-// HELPERS
-// =============================================================================
-
-function getNestedValue(obj: unknown, key: string): unknown {
-	// Parse dot-separated path, handling escaped dots (\.)
+const getNestedValue = (obj: unknown, key: string): unknown => {
+	// Parses dot-separated path with escaped dots (\.)
 	const parts: string[] = [];
 	let current = "";
 	for (let i = 0; i < key.length; i++) {
 		if (key[i] === "\\" && i + 1 < key.length && key[i + 1] === ".") {
 			current += ".";
-			i++; // skip the dot
+			i++;
 		} else if (key[i] === ".") {
 			parts.push(current);
 			current = "";
@@ -404,33 +278,13 @@ function getNestedValue(obj: unknown, key: string): unknown {
 		value = (value as Record<string, unknown>)[part];
 	}
 	return value;
-}
+};
 
-function globMatch(pattern: string, value: string): boolean {
-	// Convert glob pattern to regex: * -> .*, ? -> .
-	const escaped = pattern
-		.replace(/[.+^${}()|[\]\\]/g, "\\$&")
-		.replace(/\*/g, ".*")
-		.replace(/\?/g, ".");
-	const regex = new RegExp(`^${escaped}$`, "i");
-	return regex.test(value);
-}
-
-function globMatchWordBoundary(pattern: string, body: string): boolean {
-	// Word-boundary aware matching for content.body
-	const escaped = pattern
-		.replace(/[.+^${}()|[\]\\]/g, "\\$&")
-		.replace(/\*/g, ".*")
-		.replace(/\?/g, ".");
-	const regex = new RegExp(`(?:^|\\W)(${escaped})(?:$|\\W)`, "i");
-	return regex.test(body);
-}
-
-function matchMemberCount(actual: number, is: string): boolean {
+const matchMemberCount = (actual: number, is: string): boolean => {
 	const match = is.match(/^(==|<=|>=|<|>)?(\d+)$/);
 	if (!match) return false;
-	const op = match[1] || "==";
-	const target = parseInt(match[2] as string, 10);
+	const [, op = "==", num] = match;
+	const target = parseInt(num as string, 10);
 	switch (op) {
 		case "==":
 			return actual === target;
@@ -445,30 +299,113 @@ function matchMemberCount(actual: number, is: string): boolean {
 		default:
 			return false;
 	}
-}
+};
 
-function parseActions(actions: PushAction[]): PushEvalResult {
+const checkCondition = (
+	cond: PushCondition,
+	ctx: EvaluationContext,
+): boolean => {
+	switch (cond.kind) {
+		case "event_match": {
+			if (!cond.key || cond.pattern === undefined) return false;
+			const value = getNestedValue(ctx.event, cond.key);
+			if (typeof value !== "string") return false;
+			return cond.key === "content.body"
+				? globMatchWordBoundary(cond.pattern, value)
+				: globMatch(cond.pattern, value);
+		}
+		case "contains_display_name": {
+			if (!ctx.displayName) return false;
+			const body = getNestedValue(ctx.event, "content.body");
+			return (
+				typeof body === "string" && globMatchWordBoundary(ctx.displayName, body)
+			);
+		}
+		case "room_member_count":
+			return !!cond.is && matchMemberCount(ctx.memberCount, cond.is);
+		case "sender_notification_permission": {
+			if (!cond.key) return false;
+			return (
+				ctx.senderPowerLevel >=
+				(ctx.powerLevels?.notifications?.[cond.key as "room"] ?? 50)
+			);
+		}
+		case "event_property_is": {
+			if (!cond.key) return false;
+			return jsonValueEquals(
+				getNestedValue(ctx.event, cond.key) as JsonValue,
+				cond.value,
+			);
+		}
+		case "event_property_contains": {
+			if (!cond.key) return false;
+			const value = getNestedValue(ctx.event, cond.key);
+			return (
+				Array.isArray(value) &&
+				value.some((item) => jsonValueEquals(item as JsonValue, cond.value))
+			);
+		}
+		default:
+			return false;
+	}
+};
+
+const checkConditions = (conditions: PushCondition[], ctx: EvaluationContext) =>
+	conditions.every((c) => checkCondition(c, ctx));
+
+const parseActions = (actions: PushAction[]): PushEvalResult => {
 	const result: PushEvalResult = { notify: false, highlight: false };
 	for (const action of actions) {
-		if (action === "notify") {
-			result.notify = true;
-		} else if (action === "dont_notify") {
-			result.notify = false;
-		} else if (typeof action === "object") {
-			if (action.set_tweak === "highlight") {
+		if (action === "notify") result.notify = true;
+		else if (action === "dont_notify") result.notify = false;
+		else if (typeof action === "object") {
+			if (action.set_tweak === "highlight")
 				result.highlight = action.value !== false;
-			} else if (action.set_tweak === "sound") {
-				result.sound = action.value;
-			}
+			else if (action.set_tweak === "sound") result.sound = action.value;
 		}
 	}
 	return result;
-}
+};
 
-function jsonValueEquals(a: unknown, b: unknown): boolean {
-	if (a === b) return true;
-	if (a === null || b === null) return a === b;
-	if (typeof a !== typeof b) return false;
-	if (typeof a === "object") return JSON.stringify(a) === JSON.stringify(b);
-	return false;
-}
+export const evaluatePushRules = (
+	rules: PushRulesContent,
+	ctx: EvaluationContext,
+): PushEvalResult => {
+	const noMatch: PushEvalResult = { notify: false, highlight: false };
+	if (ctx.event.sender === ctx.userId) return noMatch;
+
+	const { global: ruleset } = rules;
+
+	const overrideMatch = (ruleset.override ?? []).find(
+		(r) => r.enabled && checkConditions(r.conditions ?? [], ctx),
+	);
+	if (overrideMatch) return parseActions(overrideMatch.actions);
+
+	const contentMatch = (ruleset.content ?? []).find((rule) => {
+		if (!rule.enabled) return false;
+		if (rule.conditions?.length) return checkConditions(rule.conditions, ctx);
+		if (!rule.pattern) return false;
+		const body = getNestedValue(ctx.event, "content.body");
+		return (
+			typeof body === "string" && globMatchWordBoundary(rule.pattern, body)
+		);
+	});
+	if (contentMatch) return parseActions(contentMatch.actions);
+
+	const roomMatch = (ruleset.room ?? []).find(
+		(r) => r.enabled && ctx.event.room_id === r.rule_id,
+	);
+	if (roomMatch) return parseActions(roomMatch.actions);
+
+	const senderMatch = (ruleset.sender ?? []).find(
+		(r) => r.enabled && ctx.event.sender === r.rule_id,
+	);
+	if (senderMatch) return parseActions(senderMatch.actions);
+
+	const underrideMatch = (ruleset.underride ?? []).find(
+		(r) => r.enabled && checkConditions(r.conditions ?? [], ctx),
+	);
+	if (underrideMatch) return parseActions(underrideMatch.actions);
+
+	return noMatch;
+};

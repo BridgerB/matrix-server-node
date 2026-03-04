@@ -44,21 +44,20 @@ interface Route {
 	middleware: Middleware[];
 }
 
-function readBody(req: IncomingMessage): Promise<Buffer> {
-	return new Promise((resolve, reject) => {
+const readBody = (req: IncomingMessage): Promise<Buffer> =>
+	new Promise((resolve, reject) => {
 		const chunks: Buffer[] = [];
 		req.on("data", (chunk: Buffer) => chunks.push(chunk));
 		req.on("end", () => resolve(Buffer.concat(chunks)));
 		req.on("error", reject);
 	});
-}
 
-function respondJson(
+const respondJson = (
 	res: ServerResponse,
 	status: number,
 	body: unknown,
 	headers?: Record<string, string>,
-): void {
+) => {
 	const json = JSON.stringify(body);
 	res.writeHead(status, {
 		"Content-Type": "application/json",
@@ -66,27 +65,24 @@ function respondJson(
 		...headers,
 	});
 	res.end(json);
-}
+};
 
-function matchRoute(
+const matchRoute = (
 	routeSegments: string[],
 	pathSegments: string[],
-): Record<string, string> | null {
+): Record<string, string> | null => {
 	if (routeSegments.length !== pathSegments.length) return null;
-
 	const params: Record<string, string> = {};
-	for (let i = 0; i < routeSegments.length; i++) {
-		const routeSeg = routeSegments[i] as string;
+	const matched = routeSegments.every((routeSeg, i) => {
 		const pathSeg = pathSegments[i] as string;
-
 		if (routeSeg.startsWith(":")) {
 			params[routeSeg.slice(1)] = decodeURIComponent(pathSeg);
-		} else if (routeSeg !== pathSeg) {
-			return null;
+			return true;
 		}
-	}
-	return params;
-}
+		return routeSeg === pathSeg;
+	});
+	return matched ? params : null;
+};
 
 export class Router {
 	private routes: Route[] = [];
@@ -135,7 +131,6 @@ export class Router {
 		const method = (req.method ?? "GET").toUpperCase();
 		const pathSegments = url.pathname.split("/").filter(Boolean);
 
-		// Find matching route
 		let matchedRoute: Route | undefined;
 		let params: Record<string, string> = {};
 
@@ -149,7 +144,6 @@ export class Router {
 			}
 		}
 
-		// Parse body
 		let body: unknown;
 		let rawBody: Buffer | undefined;
 		const isMedia = url.pathname.startsWith("/_matrix/media/");
@@ -198,7 +192,6 @@ export class Router {
 			rawBody,
 		};
 
-		// If no route matched, run global middleware then 404
 		if (!matchedRoute) {
 			const notFoundHandler: Handler = () => ({
 				status: 404,
@@ -217,7 +210,6 @@ export class Router {
 			return;
 		}
 
-		// Compose and execute middleware chain
 		const allMiddleware = [
 			...this.globalMiddleware,
 			...matchedRoute.middleware,
@@ -234,33 +226,30 @@ export class Router {
 	}
 
 	private compose(middleware: Middleware[], handler: Handler): Handler {
-		let current: Handler = handler;
-		for (let i = middleware.length - 1; i >= 0; i--) {
-			const mw = middleware[i] as Middleware;
-			const next = current;
-			current = (req) => mw(req, next);
-		}
-		return current;
+		return middleware.reduceRight<Handler>(
+			(next, mw) => (req) => mw(req, next),
+			handler,
+		);
 	}
 
 	private respond(res: ServerResponse, response: RouterResponse): void {
 		if (Buffer.isBuffer(response.body)) {
 			res.writeHead(response.status, response.headers);
 			res.end(response.body);
-		} else {
-			respondJson(res, response.status, response.body, response.headers);
+			return;
 		}
+		respondJson(res, response.status, response.body, response.headers);
 	}
 
 	private handleError(res: ServerResponse, err: unknown): void {
 		if (err instanceof MatrixError) {
 			respondJson(res, err.statusCode, err.toJSON());
-		} else {
-			console.error("Unhandled error:", err);
-			respondJson(res, 500, {
-				errcode: "M_UNKNOWN",
-				error: "Internal server error",
-			});
+			return;
 		}
+		console.error("Unhandled error:", err);
+		respondJson(res, 500, {
+			errcode: "M_UNKNOWN",
+			error: "Internal server error",
+		});
 	}
 }

@@ -3,12 +3,9 @@ import type { Handler } from "../../router.ts";
 import type { Storage } from "../../storage/interface.ts";
 import type { DeviceId, KeyId, UserId } from "../../types/index.ts";
 
-// =============================================================================
-// POST /_matrix/federation/v1/user/devices/:userId
-// =============================================================================
-
-export function postFederationUserDevices(storage: Storage): Handler {
-	return async (req) => {
+export const postFederationUserDevices =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const userId = req.params.userId as UserId;
 
 		const user = await storage.getUserById(userId);
@@ -44,14 +41,10 @@ export function postFederationUserDevices(storage: Storage): Handler {
 			},
 		};
 	};
-}
 
-// =============================================================================
-// POST /_matrix/federation/v1/user/keys/query
-// =============================================================================
-
-export function postFederationKeysQuery(storage: Storage): Handler {
-	return async (req) => {
+export const postFederationKeysQuery =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const body = (req.body ?? {}) as {
 			device_keys?: Record<UserId, DeviceId[]>;
 		};
@@ -62,7 +55,6 @@ export function postFederationKeysQuery(storage: Storage): Handler {
 			for (const [userId, deviceIds] of Object.entries(body.device_keys)) {
 				deviceKeys[userId as UserId] = {};
 				if (deviceIds.length === 0) {
-					// All devices
 					const allKeys = await storage.getAllDeviceKeys(userId as UserId);
 					for (const [deviceId, keys] of Object.entries(allKeys)) {
 						(deviceKeys[userId as UserId] as Record<DeviceId, unknown>)[
@@ -90,14 +82,10 @@ export function postFederationKeysQuery(storage: Storage): Handler {
 			body: { device_keys: deviceKeys },
 		};
 	};
-}
 
-// =============================================================================
-// POST /_matrix/federation/v1/user/keys/claim
-// =============================================================================
-
-export function postFederationKeysClaim(storage: Storage): Handler {
-	return async (req) => {
+export const postFederationKeysClaim =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const body = (req.body ?? {}) as {
 			one_time_keys?: Record<UserId, Record<DeviceId, string>>;
 		};
@@ -135,4 +123,3 @@ export function postFederationKeysClaim(storage: Storage): Handler {
 			body: { one_time_keys: oneTimeKeys },
 		};
 	};
-}

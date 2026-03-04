@@ -4,12 +4,9 @@ import { bundleAggregations } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 
-// =============================================================================
-// GET /rooms/:roomId/relations/:eventId(/:relType(/:eventType))
-// =============================================================================
-
-export function getRelations(storage: Storage): Handler {
-	return async (req) => {
+export const getRelations =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as string;
 		const eventId = req.params.eventId as string;
 		const relType = req.params.relType;
@@ -20,7 +17,6 @@ export function getRelations(storage: Storage): Handler {
 		if (!room) throw roomNotFound();
 		if (getMembership(room, userId) !== "join") throw notJoined();
 
-		// Verify target event exists
 		const target = await storage.getEvent(eventId);
 		if (!target || target.event.room_id !== roomId)
 			throw notFound("Event not found");
@@ -43,7 +39,6 @@ export function getRelations(storage: Storage): Handler {
 			pduToClientEvent(e.event, e.eventId),
 		);
 
-		// Bundle aggregations on the related events themselves
 		await bundleAggregations(storage, chunk, userId);
 
 		return {
@@ -54,4 +49,3 @@ export function getRelations(storage: Storage): Handler {
 			},
 		};
 	};
-}

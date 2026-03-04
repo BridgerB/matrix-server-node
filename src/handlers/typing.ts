@@ -3,8 +3,9 @@ import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { RoomId, UserId } from "../types/index.ts";
 
-export function putTyping(storage: Storage): Handler {
-	return async (req) => {
+export const putTyping =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as RoomId;
 		const userId = req.params.userId as UserId;
 
@@ -18,4 +19,3 @@ export function putTyping(storage: Storage): Handler {
 		await storage.setTyping(roomId, userId, typing, timeout);
 		return { status: 200, body: {} };
 	};
-}

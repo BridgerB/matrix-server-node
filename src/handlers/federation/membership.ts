@@ -13,18 +13,28 @@ import type { SigningKey } from "../../signing.ts";
 import { signEvent, verifyEventSignature } from "../../signing.ts";
 import type { Storage } from "../../storage/interface.ts";
 import type { PDU } from "../../types/events.ts";
-import type {
-	EventId,
-	KeyId,
-	RoomId,
-	ServerName,
-	UserId,
-} from "../../types/index.ts";
+import type { KeyId, RoomId, ServerName, UserId } from "../../types/index.ts";
 
-// =============================================================================
-// GET /_matrix/federation/v1/make_join/:roomId/:userId
-// =============================================================================
+const verifyOriginSignature = async (
+	event: PDU,
+	origin: string,
+	remoteKeyStore: RemoteKeyStore,
+	federationClient: FederationClient,
+) => {
+	const originSigs = event.signatures?.[origin];
+	if (!originSigs) throw forbidden("No signature from origin");
 
+	for (const keyId of Object.keys(originSigs)) {
+		const pubKey = await remoteKeyStore.getServerKey(
+			origin,
+			keyId as KeyId,
+			federationClient,
+		);
+		if (pubKey && verifyEventSignature(event, origin, keyId as KeyId, pubKey))
+			return;
+	}
+	throw forbidden("Invalid event signature");
+};
 export function getMakeJoin(storage: Storage, _serverName: string): Handler {
 	return async (req) => {
 		const roomId = req.params.roomId as RoomId;
@@ -33,20 +43,15 @@ export function getMakeJoin(storage: Storage, _serverName: string): Handler {
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
 
-		// Check if federation is allowed
-		const createEvent = room.state_events.get("m.room.create\0");
-		if (createEvent) {
-			const federate = (createEvent.content as Record<string, unknown>)
-				.federate;
-			if (federate === false) throw forbidden("Room does not federate");
-		}
+		const createContent = room.state_events.get("m.room.create\0")?.content as
+			| Record<string, unknown>
+			| undefined;
+		if (createContent?.federate === false)
+			throw forbidden("Room does not federate");
 
-		// Check ACL
-		if (!isServerAllowedByAcl(req.origin as ServerName, room)) {
+		if (!isServerAllowedByAcl(req.origin as ServerName, room))
 			throw forbidden("Server is denied by ACL");
-		}
 
-		// Check join rules
 		const joinRulesEvent = room.state_events.get("m.room.join_rules\0");
 		const joinRule = joinRulesEvent
 			? ((joinRulesEvent.content as Record<string, unknown>)
@@ -56,11 +61,9 @@ export function getMakeJoin(storage: Storage, _serverName: string): Handler {
 		const currentMembership = getMembership(room, userId);
 		if (currentMembership === "ban") throw forbidden("User is banned");
 
-		if (joinRule !== "public" && currentMembership !== "invite") {
+		if (joinRule !== "public" && currentMembership !== "invite")
 			throw unableToAuthoriseJoin("Room is not public and user is not invited");
-		}
 
-		// Build join template
 		const authEvents = selectAuthEvents("m.room.member", userId, room, userId);
 
 		const template: Partial<PDU> = {
@@ -84,11 +87,6 @@ export function getMakeJoin(storage: Storage, _serverName: string): Handler {
 		};
 	};
 }
-
-// =============================================================================
-// PUT /_matrix/federation/v2/send_join/:roomId/:eventId
-// =============================================================================
-
 export function putSendJoin(
 	storage: Storage,
 	serverName: string,
@@ -104,47 +102,23 @@ export function putSendJoin(
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
 
-		// Verify event signature from origin
-		const originSigs = event.signatures?.[origin];
-		if (!originSigs) throw forbidden("No signature from origin");
+		await verifyOriginSignature(
+			event,
+			origin,
+			remoteKeyStore,
+			federationClient,
+		);
 
-		let sigValid = false;
-		for (const keyId of Object.keys(originSigs)) {
-			const pubKey = await remoteKeyStore.getServerKey(
-				origin,
-				keyId as KeyId,
-				federationClient,
-			);
-			if (
-				pubKey &&
-				verifyEventSignature(event, origin, keyId as KeyId, pubKey)
-			) {
-				sigValid = true;
-				break;
-			}
-		}
-		if (!sigValid) throw forbidden("Invalid event signature");
-
-		// Verify event ID
 		const eventId = computeEventId(event);
-
-		// Auth check
 		checkEventAuth(event, eventId, room);
 
-		// Co-sign the event
 		const coSigned = signEvent(event, serverName as ServerName, signingKey);
-
-		// Store the event
 		await storage.setStateEvent(roomId, coSigned, eventId);
 		room.depth = Math.max(room.depth, event.depth + 1);
 		room.forward_extremities = [eventId];
 
-		// Build response with full state + auth chain
 		const stateEvents = [...room.state_events.values()];
-		const authEventIds: EventId[] = [];
-		for (const se of stateEvents) {
-			for (const id of se.auth_events) authEventIds.push(id);
-		}
+		const authEventIds = stateEvents.flatMap((se) => se.auth_events);
 		const authChain = await storage.getAuthChain(authEventIds);
 		const servers = await storage.getServersInRoom(roomId);
 
@@ -161,11 +135,6 @@ export function putSendJoin(
 		};
 	};
 }
-
-// =============================================================================
-// GET /_matrix/federation/v1/make_leave/:roomId/:userId
-// =============================================================================
-
 export function getMakeLeave(storage: Storage, _serverName: string): Handler {
 	return async (req) => {
 		const roomId = req.params.roomId as RoomId;
@@ -202,11 +171,6 @@ export function getMakeLeave(storage: Storage, _serverName: string): Handler {
 		};
 	};
 }
-
-// =============================================================================
-// PUT /_matrix/federation/v2/send_leave/:roomId/:eventId
-// =============================================================================
-
 export function putSendLeave(
 	storage: Storage,
 	_serverName: string,
@@ -222,26 +186,12 @@ export function putSendLeave(
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
 
-		// Verify signature
-		const originSigs = event.signatures?.[origin];
-		if (!originSigs) throw forbidden("No signature from origin");
-
-		let sigValid = false;
-		for (const keyId of Object.keys(originSigs)) {
-			const pubKey = await remoteKeyStore.getServerKey(
-				origin,
-				keyId as KeyId,
-				federationClient,
-			);
-			if (
-				pubKey &&
-				verifyEventSignature(event, origin, keyId as KeyId, pubKey)
-			) {
-				sigValid = true;
-				break;
-			}
-		}
-		if (!sigValid) throw forbidden("Invalid event signature");
+		await verifyOriginSignature(
+			event,
+			origin,
+			remoteKeyStore,
+			federationClient,
+		);
 
 		const eventId = computeEventId(event);
 		checkEventAuth(event, eventId, room);
@@ -253,11 +203,6 @@ export function putSendLeave(
 		return { status: 200, body: {} };
 	};
 }
-
-// =============================================================================
-// PUT /_matrix/federation/v2/invite/:roomId/:eventId
-// =============================================================================
-
 export function putFederationInvite(
 	storage: Storage,
 	serverName: string,
@@ -272,42 +217,26 @@ export function putFederationInvite(
 			invite_room_state?: unknown[];
 		};
 
-		const event = body.event;
+		const { event } = body;
 		const origin = req.origin as string;
 
-		// Verify the invited user is local
-		const targetUserId = event.state_key as string;
-		const targetServer = targetUserId.split(":").slice(1).join(":");
-		if (targetServer !== serverName) {
+		const targetServer = (event.state_key as string)
+			.split(":")
+			.slice(1)
+			.join(":");
+		if (targetServer !== serverName)
 			throw forbidden("Invited user is not on this server");
-		}
 
-		// Verify signature from origin
-		const originSigs = event.signatures?.[origin];
-		if (!originSigs) throw forbidden("No signature from origin");
+		await verifyOriginSignature(
+			event,
+			origin,
+			remoteKeyStore,
+			federationClient,
+		);
 
-		let sigValid = false;
-		for (const keyId of Object.keys(originSigs)) {
-			const pubKey = await remoteKeyStore.getServerKey(
-				origin,
-				keyId as KeyId,
-				federationClient,
-			);
-			if (
-				pubKey &&
-				verifyEventSignature(event, origin, keyId as KeyId, pubKey)
-			) {
-				sigValid = true;
-				break;
-			}
-		}
-		if (!sigValid) throw forbidden("Invalid event signature");
-
-		// Co-sign the event
 		const coSigned = signEvent(event, serverName as ServerName, signingKey);
 		const eventId = computeEventId(coSigned);
 
-		// Store the invite - create room state if we don't have it
 		const room = await storage.getRoom(event.room_id);
 		if (!room) {
 			await storage.importRoomState(

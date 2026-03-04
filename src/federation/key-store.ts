@@ -16,13 +16,9 @@ export class RemoteKeyStore {
 		keyId: KeyId,
 		client: FederationClient,
 	): Promise<string | undefined> {
-		// Check cache first
 		const cached = await this.storage.getServerKeys(serverName, keyId);
-		if (cached && cached.validUntil > Date.now()) {
-			return cached.key;
-		}
+		if (cached && cached.validUntil > Date.now()) return cached.key;
 
-		// Fetch from remote server
 		try {
 			const resp = await client.request(
 				serverName,
@@ -36,7 +32,6 @@ export class RemoteKeyStore {
 			if (!keys?.server_name || keys.server_name !== serverName)
 				return undefined;
 
-			// Verify self-signature
 			const firstKeyId = Object.keys(keys.verify_keys)[0];
 			if (!firstKeyId) return undefined;
 			const firstKey = keys.verify_keys[firstKeyId as KeyId]?.key;
@@ -50,12 +45,8 @@ export class RemoteKeyStore {
 			);
 			if (!valid) return undefined;
 
-			// Cache the keys
 			await this.storage.storeServerKeys(serverName, keys);
-
-			// Return the requested key
-			const requested = keys.verify_keys[keyId];
-			return requested?.key;
+			return keys.verify_keys[keyId]?.key;
 		} catch {
 			return undefined;
 		}

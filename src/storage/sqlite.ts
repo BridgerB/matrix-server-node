@@ -41,7 +41,6 @@ export class SqliteStorage implements Storage {
 	// the same RoomState reference that ctx.roomState holds
 	private roomCache = new Map<RoomId, RoomState>();
 
-	// Ephemeral data kept in memory
 	private typingTimers = new Map<
 		RoomId,
 		Map<UserId, ReturnType<typeof setTimeout>>
@@ -51,7 +50,6 @@ export class SqliteStorage implements Storage {
 		{ presence: PresenceState; status_msg?: string; last_active_ts?: Timestamp }
 	>();
 
-	// Prepared statements (initialized in init())
 	private stmts!: {
 		insertEvent: Database.Statement;
 		getEvent: Database.Statement;
@@ -289,19 +287,16 @@ export class SqliteStorage implements Storage {
 			);
 		`);
 
-		// Initialize stream counter from DB
 		const maxPos = this.db
 			.prepare("SELECT MAX(stream_pos) as m FROM events")
 			.get() as { m: number | null } | undefined;
 		this.streamCounter = maxPos?.m ?? 0;
 
-		// Initialize filter counter
 		const maxFilter = this.db
 			.prepare("SELECT MAX(CAST(filter_id AS INTEGER)) as m FROM filters")
 			.get() as { m: number | null } | undefined;
 		this.filterCounter = maxFilter?.m ?? 0;
 
-		// Prepare hot-path statements
 		this.stmts = {
 			insertEvent: this.db.prepare(
 				"INSERT OR REPLACE INTO events (event_id, room_id, stream_pos, event_json) VALUES (?, ?, ?, ?)",
@@ -336,10 +331,6 @@ export class SqliteStorage implements Storage {
 	private wakeWaiters(): void {
 		for (const waiter of this.eventWaiters) waiter();
 	}
-
-	// =========================================================================
-	// Users
-	// =========================================================================
 
 	async createUser(account: UserAccount): Promise<void> {
 		this.db
@@ -389,10 +380,6 @@ export class SqliteStorage implements Storage {
 			.get(userId) as Record<string, unknown> | undefined;
 		return row ? this.rowToUser(row) : undefined;
 	}
-
-	// =========================================================================
-	// Sessions
-	// =========================================================================
 
 	private rowToSession(row: Record<string, unknown>): StoredSession {
 		const session: StoredSession = {
@@ -493,10 +480,6 @@ export class SqliteStorage implements Storage {
 			.run(ip, Date.now(), userAgent, token);
 	}
 
-	// =========================================================================
-	// UIAA Sessions
-	// =========================================================================
-
 	async createUIAASession(sessionId: string): Promise<void> {
 		this.db
 			.prepare(
@@ -530,10 +513,6 @@ export class SqliteStorage implements Storage {
 			.run(sessionId);
 	}
 
-	// =========================================================================
-	// Rooms
-	// =========================================================================
-
 	async createRoom(state: RoomState): Promise<void> {
 		this.db
 			.prepare(
@@ -546,7 +525,6 @@ export class SqliteStorage implements Storage {
 				JSON.stringify(state.forward_extremities),
 			);
 
-		// Store state events
 		for (const [key, event] of state.state_events) {
 			const [eventType, stateKey] = key.split("\0") as [string, string];
 			const eventId = computeEventId(event);
@@ -609,10 +587,6 @@ export class SqliteStorage implements Storage {
 			.all(userId) as { room_id: string }[];
 		return rows.map((r) => r.room_id as RoomId);
 	}
-
-	// =========================================================================
-	// Events
-	// =========================================================================
 
 	async storeEvent(event: PDU, eventId: EventId): Promise<void> {
 		this.streamCounter++;
@@ -678,10 +652,6 @@ export class SqliteStorage implements Storage {
 		return this.streamCounter;
 	}
 
-	// =========================================================================
-	// State
-	// =========================================================================
-
 	async getStateEvent(
 		roomId: RoomId,
 		eventType: string,
@@ -734,10 +704,6 @@ export class SqliteStorage implements Storage {
 		await this.storeEvent(event, eventId);
 	}
 
-	// =========================================================================
-	// Members
-	// =========================================================================
-
 	async getMemberEvents(
 		roomId: RoomId,
 	): Promise<{ event: PDU; eventId: EventId }[]> {
@@ -751,10 +717,6 @@ export class SqliteStorage implements Storage {
 			eventId: r.event_id as EventId,
 		}));
 	}
-
-	// =========================================================================
-	// Transaction idempotency
-	// =========================================================================
 
 	async getTxnEventId(
 		userId: UserId,
@@ -775,10 +737,6 @@ export class SqliteStorage implements Storage {
 	): Promise<void> {
 		this.stmts.setTxn.run(userId, deviceId, txnId, eventId);
 	}
-
-	// =========================================================================
-	// Sync
-	// =========================================================================
 
 	async getRoomsForUserWithMembership(
 		userId: UserId,
@@ -883,10 +841,6 @@ export class SqliteStorage implements Storage {
 		});
 	}
 
-	// =========================================================================
-	// Profile
-	// =========================================================================
-
 	async getProfile(userId: UserId): Promise<UserProfile | undefined> {
 		const row = this.db
 			.prepare("SELECT displayname, avatar_url FROM users WHERE user_id = ?")
@@ -914,10 +868,6 @@ export class SqliteStorage implements Storage {
 			.prepare("UPDATE users SET avatar_url = ? WHERE user_id = ?")
 			.run(avatarUrl, userId);
 	}
-
-	// =========================================================================
-	// Devices
-	// =========================================================================
 
 	async getDevice(
 		userId: UserId,
@@ -969,10 +919,6 @@ export class SqliteStorage implements Storage {
 			.run(userId, deviceId);
 	}
 
-	// =========================================================================
-	// Account
-	// =========================================================================
-
 	async updatePassword(userId: UserId, newPasswordHash: string): Promise<void> {
 		this.db
 			.prepare("UPDATE users SET password_hash = ? WHERE user_id = ?")
@@ -985,10 +931,6 @@ export class SqliteStorage implements Storage {
 			.run(userId);
 		await this.deleteAllSessions(userId);
 	}
-
-	// =========================================================================
-	// Aliases
-	// =========================================================================
 
 	async createRoomAlias(
 		roomAlias: RoomAlias,
@@ -1037,10 +979,6 @@ export class SqliteStorage implements Storage {
 		return row ? (row.creator as UserId) : undefined;
 	}
 
-	// =========================================================================
-	// Directory
-	// =========================================================================
-
 	async setRoomVisibility(
 		roomId: RoomId,
 		visibility: "public" | "private",
@@ -1065,10 +1003,6 @@ export class SqliteStorage implements Storage {
 			.all() as { room_id: string }[];
 		return rows.map((r) => r.room_id as RoomId);
 	}
-
-	// =========================================================================
-	// Account data
-	// =========================================================================
 
 	async getGlobalAccountData(
 		userId: UserId,
@@ -1143,10 +1077,6 @@ export class SqliteStorage implements Storage {
 		return rows.map((r) => ({ type: r.type, content: JSON.parse(r.content) }));
 	}
 
-	// =========================================================================
-	// Typing (ephemeral — in-memory)
-	// =========================================================================
-
 	async setTyping(
 		roomId: RoomId,
 		userId: UserId,
@@ -1182,10 +1112,6 @@ export class SqliteStorage implements Storage {
 		if (!roomTyping) return [];
 		return [...roomTyping.keys()];
 	}
-
-	// =========================================================================
-	// Receipts
-	// =========================================================================
 
 	async setReceipt(
 		roomId: RoomId,
@@ -1223,10 +1149,6 @@ export class SqliteStorage implements Storage {
 		}));
 	}
 
-	// =========================================================================
-	// Presence (ephemeral — in-memory)
-	// =========================================================================
-
 	async setPresence(
 		userId: UserId,
 		presence: PresenceState,
@@ -1250,10 +1172,6 @@ export class SqliteStorage implements Storage {
 	> {
 		return this.presenceMap.get(userId);
 	}
-
-	// =========================================================================
-	// Media
-	// =========================================================================
 
 	async storeMedia(media: StoredMedia, data: Buffer): Promise<void> {
 		this.db
@@ -1298,10 +1216,6 @@ export class SqliteStorage implements Storage {
 		};
 	}
 
-	// =========================================================================
-	// Filters
-	// =========================================================================
-
 	async createFilter(userId: UserId, filter: JsonObject): Promise<string> {
 		const filterId = String(++this.filterCounter);
 		this.db
@@ -1323,10 +1237,6 @@ export class SqliteStorage implements Storage {
 			.get(userId, filterId) as { filter_json: string } | undefined;
 		return row ? JSON.parse(row.filter_json) : undefined;
 	}
-
-	// =========================================================================
-	// E2EE - Device keys
-	// =========================================================================
 
 	async setDeviceKeys(
 		userId: UserId,
@@ -1364,10 +1274,6 @@ export class SqliteStorage implements Storage {
 		}
 		return result;
 	}
-
-	// =========================================================================
-	// E2EE - One-time keys
-	// =========================================================================
 
 	async addOneTimeKeys(
 		userId: UserId,
@@ -1443,10 +1349,6 @@ export class SqliteStorage implements Storage {
 		return counts;
 	}
 
-	// =========================================================================
-	// E2EE - Fallback keys
-	// =========================================================================
-
 	async setFallbackKeys(
 		userId: UserId,
 		deviceId: DeviceId,
@@ -1482,10 +1384,6 @@ export class SqliteStorage implements Storage {
 		return [...types];
 	}
 
-	// =========================================================================
-	// To-device messages
-	// =========================================================================
-
 	async sendToDevice(
 		userId: UserId,
 		deviceId: DeviceId,
@@ -1520,10 +1418,6 @@ export class SqliteStorage implements Storage {
 			.run(userId, deviceId);
 	}
 
-	// =========================================================================
-	// Pushers
-	// =========================================================================
-
 	async getPushers(userId: UserId): Promise<Pusher[]> {
 		const rows = this.db
 			.prepare("SELECT pusher_json FROM pushers WHERE user_id = ?")
@@ -1556,10 +1450,6 @@ export class SqliteStorage implements Storage {
 			.prepare("DELETE FROM pushers WHERE app_id = ? AND pushkey = ?")
 			.run(appId, pushkey);
 	}
-
-	// =========================================================================
-	// Relations
-	// =========================================================================
 
 	async storeRelation(
 		eventId: EventId,
@@ -1725,10 +1615,6 @@ export class SqliteStorage implements Storage {
 		};
 	}
 
-	// =========================================================================
-	// Reports
-	// =========================================================================
-
 	async storeReport(
 		userId: UserId,
 		roomId: RoomId,
@@ -1742,10 +1628,6 @@ export class SqliteStorage implements Storage {
 			)
 			.run(userId, roomId, eventId, score ?? null, reason ?? null, Date.now());
 	}
-
-	// =========================================================================
-	// OpenID
-	// =========================================================================
 
 	async storeOpenIdToken(
 		token: string,
@@ -1768,10 +1650,6 @@ export class SqliteStorage implements Storage {
 		if (!row) return undefined;
 		return { userId: row.user_id as UserId, expiresAt: row.expires_at };
 	}
-
-	// =========================================================================
-	// 3PIDs
-	// =========================================================================
 
 	async getThreePids(
 		userId: UserId,
@@ -1807,10 +1685,6 @@ export class SqliteStorage implements Storage {
 			.run(userId, medium, address);
 	}
 
-	// =========================================================================
-	// User directory
-	// =========================================================================
-
 	async searchUserDirectory(
 		searchTerm: string,
 		limit: number,
@@ -1833,10 +1707,6 @@ export class SqliteStorage implements Storage {
 			avatar_url: r.avatar_url ?? undefined,
 		}));
 	}
-
-	// =========================================================================
-	// Thread roots
-	// =========================================================================
 
 	async getThreadRoots(
 		roomId: RoomId,
@@ -1888,10 +1758,6 @@ export class SqliteStorage implements Storage {
 
 		return { events, nextBatch };
 	}
-
-	// =========================================================================
-	// Search
-	// =========================================================================
 
 	async searchRoomEvents(
 		roomIds: RoomId[],
@@ -1961,10 +1827,6 @@ export class SqliteStorage implements Storage {
 		return { events: results, nextBatch };
 	}
 
-	// =========================================================================
-	// Federation - Remote server key cache
-	// =========================================================================
-
 	async storeServerKeys(
 		serverName: ServerName,
 		keys: ServerKeys,
@@ -1993,10 +1855,6 @@ export class SqliteStorage implements Storage {
 		if (!row) return undefined;
 		return { key: row.key, validUntil: row.valid_until };
 	}
-
-	// =========================================================================
-	// Federation - Auth chain
-	// =========================================================================
 
 	async getAuthChain(eventIds: EventId[]): Promise<PDU[]> {
 		const visited = new Set<EventId>();
@@ -2051,10 +1909,6 @@ export class SqliteStorage implements Storage {
 		return new Map(room.state_events);
 	}
 
-	// =========================================================================
-	// Federation - Transaction dedup
-	// =========================================================================
-
 	async getFederationTxn(origin: ServerName, txnId: string): Promise<boolean> {
 		const row = this.db
 			.prepare("SELECT 1 FROM federation_txns WHERE origin = ? AND txn_id = ?")
@@ -2070,10 +1924,6 @@ export class SqliteStorage implements Storage {
 			.run(origin, txnId);
 	}
 
-	// =========================================================================
-	// Federation - Room import
-	// =========================================================================
-
 	async importRoomState(
 		roomId: RoomId,
 		roomVersion: RoomVersion,
@@ -2081,7 +1931,6 @@ export class SqliteStorage implements Storage {
 		authChain: PDU[],
 	): Promise<void> {
 		this.db.transaction(() => {
-			// Store auth chain events
 			for (const event of authChain) {
 				const eventId = computeEventId(event);
 				this.streamCounter++;
@@ -2093,7 +1942,6 @@ export class SqliteStorage implements Storage {
 				);
 			}
 
-			// Store state events and build state map
 			let maxDepth = 0;
 			const extremities: EventId[] = [];
 

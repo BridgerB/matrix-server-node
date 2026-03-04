@@ -1,7 +1,3 @@
-// =============================================================================
-// Matrix Protocol Types - Barrel Export
-// =============================================================================
-
 export * from "./account-data.ts";
 export * from "./appservice.ts";
 export * from "./auth.ts";

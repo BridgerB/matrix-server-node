@@ -6,15 +6,9 @@ import type { Storage } from "../../storage/interface.ts";
 import type { PDU } from "../../types/events.ts";
 import type { EventId, RoomId, ServerName } from "../../types/index.ts";
 
-// =============================================================================
-// GET /_matrix/federation/v1/event/:eventId
-// =============================================================================
-
-export function getFederationEvent(
-	storage: Storage,
-	serverName: string,
-): Handler {
-	return async (req) => {
+export const getFederationEvent =
+	(storage: Storage, serverName: string): Handler =>
+	async (req) => {
 		const eventId = req.params.eventId as EventId;
 		const result = await storage.getEvent(eventId);
 		if (!result) throw notFound("Event not found");
@@ -28,24 +22,18 @@ export function getFederationEvent(
 			},
 		};
 	};
-}
 
-// =============================================================================
-// GET /_matrix/federation/v1/state/:roomId
-// =============================================================================
-
-export function getFederationRoomState(storage: Storage): Handler {
-	return async (req) => {
+export const getFederationRoomState =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as RoomId;
 		const eventId = req.query.get("event_id") as EventId | null;
 
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
 
-		// Check ACL
-		if (!isServerAllowedByAcl(req.origin as ServerName, room)) {
+		if (!isServerAllowedByAcl(req.origin as ServerName, room))
 			throw forbidden("Server is denied by ACL");
-		}
 
 		const stateMap = eventId
 			? await storage.getStateAtEvent(roomId, eventId)
@@ -65,23 +53,18 @@ export function getFederationRoomState(storage: Storage): Handler {
 			body: { pdus, auth_chain: authChain },
 		};
 	};
-}
 
-// =============================================================================
-// GET /_matrix/federation/v1/state_ids/:roomId
-// =============================================================================
-
-export function getFederationRoomStateIds(storage: Storage): Handler {
-	return async (req) => {
+export const getFederationRoomStateIds =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as RoomId;
 		const eventId = req.query.get("event_id") as EventId | null;
 
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
 
-		if (!isServerAllowedByAcl(req.origin as ServerName, room)) {
+		if (!isServerAllowedByAcl(req.origin as ServerName, room))
 			throw forbidden("Server is denied by ACL");
-		}
 
 		const stateMap = eventId
 			? await storage.getStateAtEvent(roomId, eventId)
@@ -102,14 +85,10 @@ export function getFederationRoomStateIds(storage: Storage): Handler {
 			body: { pdu_ids: pduIds, auth_chain_ids: authChainIds },
 		};
 	};
-}
 
-// =============================================================================
-// GET /_matrix/federation/v1/event_auth/:roomId/:eventId
-// =============================================================================
-
-export function getFederationEventAuth(storage: Storage): Handler {
-	return async (req) => {
+export const getFederationEventAuth =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const eventId = req.params.eventId as EventId;
 		const result = await storage.getEvent(eventId);
 		if (!result) throw notFound("Event not found");
@@ -121,27 +100,18 @@ export function getFederationEventAuth(storage: Storage): Handler {
 			body: { auth_chain: authChain },
 		};
 	};
-}
 
-// =============================================================================
-// POST /_matrix/federation/v1/backfill/:roomId
-// =============================================================================
-
-export function postFederationBackfill(
-	storage: Storage,
-	serverName: string,
-): Handler {
-	return async (req) => {
+export const postFederationBackfill =
+	(storage: Storage, serverName: string): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as RoomId;
 		const limit = Math.min(parseInt(req.query.get("limit") ?? "100", 10), 500);
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
 
-		if (!isServerAllowedByAcl(req.origin as ServerName, room)) {
+		if (!isServerAllowedByAcl(req.origin as ServerName, room))
 			throw forbidden("Server is denied by ACL");
-		}
 
-		// Get events before the given event IDs
 		const result = await storage.getEventsByRoom(roomId, limit, undefined, "b");
 
 		return {
@@ -153,14 +123,10 @@ export function postFederationBackfill(
 			},
 		};
 	};
-}
 
-// =============================================================================
-// POST /_matrix/federation/v1/get_missing_events/:roomId
-// =============================================================================
-
-export function postFederationMissingEvents(storage: Storage): Handler {
-	return async (req) => {
+export const postFederationMissingEvents =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as RoomId;
 		const body = (req.body ?? {}) as {
 			limit?: number;
@@ -172,15 +138,13 @@ export function postFederationMissingEvents(storage: Storage): Handler {
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
 
-		if (!isServerAllowedByAcl(req.origin as ServerName, room)) {
+		if (!isServerAllowedByAcl(req.origin as ServerName, room))
 			throw forbidden("Server is denied by ACL");
-		}
 
 		const limit = Math.min(body.limit ?? 10, 50);
 		const earliest = new Set(body.earliest_events ?? []);
 		const latest = body.latest_events ?? [];
 
-		// BFS backwards from latest_events to earliest_events
 		const visited = new Set<EventId>();
 		const result: PDU[] = [];
 		const queue = [...latest];
@@ -207,4 +171,3 @@ export function postFederationMissingEvents(storage: Storage): Handler {
 			body: { events: result },
 		};
 	};
-}

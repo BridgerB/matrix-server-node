@@ -15,7 +15,6 @@ const STORAGE_TYPE = process.env.STORAGE ?? "sqlite";
 const DATABASE_PATH = process.env.DATABASE_PATH ?? "./data/matrix.db";
 const DATABASE_URL = process.env.DATABASE_URL ?? "postgres://localhost/matrix";
 
-// Generate or load signing key for federation
 const KEY_SEED = process.env.SIGNING_KEY_SEED;
 const signingKey = KEY_SEED
 	? importSigningKey(

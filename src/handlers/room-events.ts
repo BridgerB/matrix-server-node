@@ -20,27 +20,19 @@ import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { JsonObject } from "../types/json.ts";
 
-// =============================================================================
-// HELPERS
-// =============================================================================
-
-function requireJoined(roomMembership: string | undefined): void {
+const requireJoined = (roomMembership: string | undefined): void => {
 	if (roomMembership !== "join") throw notJoined();
-}
+};
 
-// =============================================================================
-// PUT /rooms/:roomId/send/:eventType/:txnId
-// =============================================================================
-
-export function putSendEvent(storage: Storage, serverName: string): Handler {
-	return async (req) => {
+export const putSendEvent =
+	(storage: Storage, serverName: string): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as string;
 		const eventType = req.params.eventType as string;
 		const txnId = req.params.txnId as string;
 		const userId = req.userId as string;
 		const deviceId = req.deviceId as string;
 
-		// Idempotency check
 		const existing = await storage.getTxnEventId(userId, deviceId, txnId);
 		if (existing) return { status: 200, body: { event_id: existing } };
 
@@ -70,14 +62,10 @@ export function putSendEvent(storage: Storage, serverName: string): Handler {
 		await storage.setTxnEventId(userId, deviceId, txnId, eventId);
 		return { status: 200, body: { event_id: eventId } };
 	};
-}
 
-// =============================================================================
-// PUT /rooms/:roomId/state/:eventType(/:stateKey)
-// =============================================================================
-
-export function putStateEvent(storage: Storage, serverName: string): Handler {
-	return async (req) => {
+export const putStateEvent =
+	(storage: Storage, serverName: string): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as string;
 		const eventType = req.params.eventType as string;
 		const stateKey = req.params.stateKey ?? "";
@@ -108,14 +96,10 @@ export function putStateEvent(storage: Storage, serverName: string): Handler {
 
 		return { status: 200, body: { event_id: eventId } };
 	};
-}
 
-// =============================================================================
-// GET /rooms/:roomId/state
-// =============================================================================
-
-export function getAllState(storage: Storage): Handler {
-	return async (req) => {
+export const getAllState =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as string;
 		const room = await storage.getRoom(roomId);
 		if (!room) throw roomNotFound();
@@ -127,14 +111,10 @@ export function getAllState(storage: Storage): Handler {
 		);
 		return { status: 200, body: events };
 	};
-}
 
-// =============================================================================
-// GET /rooms/:roomId/state/:eventType(/:stateKey)
-// =============================================================================
-
-export function getStateEvent(storage: Storage): Handler {
-	return async (req) => {
+export const getStateEvent =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as string;
 		const eventType = req.params.eventType as string;
 		const stateKey = req.params.stateKey ?? "";
@@ -148,14 +128,10 @@ export function getStateEvent(storage: Storage): Handler {
 
 		return { status: 200, body: entry.event.content };
 	};
-}
 
-// =============================================================================
-// GET /rooms/:roomId/messages
-// =============================================================================
-
-export function getMessages(storage: Storage): Handler {
-	return async (req) => {
+export const getMessages =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as string;
 		const room = await storage.getRoom(roomId);
 		if (!room) throw roomNotFound();
@@ -184,14 +160,10 @@ export function getMessages(storage: Storage): Handler {
 			},
 		};
 	};
-}
 
-// =============================================================================
-// GET /rooms/:roomId/members
-// =============================================================================
-
-export function getMembers(storage: Storage): Handler {
-	return async (req) => {
+export const getMembers =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as string;
 		const room = await storage.getRoom(roomId);
 		if (!room) throw roomNotFound();
@@ -218,14 +190,10 @@ export function getMembers(storage: Storage): Handler {
 		const chunk = entries.map((e) => pduToClientEvent(e.event, e.eventId));
 		return { status: 200, body: { chunk } };
 	};
-}
 
-// =============================================================================
-// GET /rooms/:roomId/event/:eventId
-// =============================================================================
-
-export function getEvent(storage: Storage): Handler {
-	return async (req) => {
+export const getEvent =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as string;
 		const eventId = req.params.eventId as string;
 
@@ -241,21 +209,16 @@ export function getEvent(storage: Storage): Handler {
 		await bundleAggregations(storage, [clientEvent], req.userId as string);
 		return { status: 200, body: clientEvent };
 	};
-}
 
-// =============================================================================
-// POST /rooms/:roomId/redact/:eventId/:txnId
-// =============================================================================
-
-export function postRedact(storage: Storage, serverName: string): Handler {
-	return async (req) => {
+export const postRedact =
+	(storage: Storage, serverName: string): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as string;
 		const targetEventId = req.params.eventId as string;
 		const txnId = req.params.txnId as string;
 		const userId = req.userId as string;
 		const deviceId = req.deviceId as string;
 
-		// Idempotency check
 		const existing = await storage.getTxnEventId(userId, deviceId, txnId);
 		if (existing) return { status: 200, body: { event_id: existing } };
 
@@ -263,13 +226,10 @@ export function postRedact(storage: Storage, serverName: string): Handler {
 		if (!room) throw roomNotFound();
 		requireJoined(getMembership(room, userId));
 
-		// Check target event exists
 		const targetEntry = await storage.getEvent(targetEventId);
-		if (!targetEntry || targetEntry.event.room_id !== roomId) {
+		if (!targetEntry || targetEntry.event.room_id !== roomId)
 			throw notFound("Event not found");
-		}
 
-		// Check power: sender needs redact PL, OR is the original sender
 		const pl = getPowerLevels(room);
 		const senderPl = getUserPowerLevel(userId, room);
 		const redactPl = pl.redact ?? 50;
@@ -305,26 +265,20 @@ export function postRedact(storage: Storage, serverName: string): Handler {
 		room.depth++;
 		room.forward_extremities = [eventId];
 
-		// Apply redaction to target event
 		const redacted = redactEvent(targetEntry.event);
 		redacted.unsigned = {
 			...redacted.unsigned,
 			redacted_because: pduToClientEvent(event, eventId),
 		};
-		// Update the stored event in-place (memory storage)
 		Object.assign(targetEntry.event, redacted);
 
 		await storage.setTxnEventId(userId, deviceId, txnId, eventId);
 		return { status: 200, body: { event_id: eventId } };
 	};
-}
 
-// =============================================================================
-// GET /rooms/:roomId/context/:eventId
-// =============================================================================
-
-export function getContext(storage: Storage): Handler {
-	return async (req) => {
+export const getContext =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as string;
 		const eventId = req.params.eventId as string;
 		const userId = req.userId as string;
@@ -343,7 +297,6 @@ export function getContext(storage: Storage): Handler {
 		);
 		const halfLimit = Math.max(Math.floor(limit / 2), 1);
 
-		// Get full timeline to find surrounding events
 		const timeline = await storage.getEventsByRoom(
 			roomId,
 			10000,
@@ -399,4 +352,3 @@ export function getContext(storage: Storage): Handler {
 			},
 		};
 	};
-}

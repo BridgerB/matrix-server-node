@@ -10,17 +10,13 @@ import type {
 import type { DeviceId, UserId } from "../types/index.ts";
 import type { JsonObject } from "../types/json.ts";
 
-// =============================================================================
-// POST /_matrix/client/v3/keys/upload
-// =============================================================================
-
-export function postKeysUpload(storage: Storage): Handler {
-	return async (req) => {
+export const postKeysUpload =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const userId = req.userId as UserId;
 		const deviceId = req.deviceId as DeviceId;
 		const body = (req.body ?? {}) as KeysUploadRequest;
 
-		// Store device keys
 		if (body.device_keys) {
 			if (
 				body.device_keys.user_id !== userId ||
@@ -33,12 +29,9 @@ export function postKeysUpload(storage: Storage): Handler {
 			await storage.setDeviceKeys(userId, deviceId, body.device_keys);
 		}
 
-		// Add one-time keys
-		if (body.one_time_keys && Object.keys(body.one_time_keys).length > 0) {
+		if (body.one_time_keys && Object.keys(body.one_time_keys).length > 0)
 			await storage.addOneTimeKeys(userId, deviceId, body.one_time_keys);
-		}
 
-		// Set fallback keys (replaces previous)
 		if (body.fallback_keys && Object.keys(body.fallback_keys).length > 0) {
 			await storage.setFallbackKeys(userId, deviceId, body.fallback_keys);
 		}
@@ -46,59 +39,39 @@ export function postKeysUpload(storage: Storage): Handler {
 		const counts = await storage.getOneTimeKeyCounts(userId, deviceId);
 		return { status: 200, body: { one_time_key_counts: counts } };
 	};
-}
 
-// =============================================================================
-// POST /_matrix/client/v3/keys/query
-// =============================================================================
-
-export function postKeysQuery(storage: Storage): Handler {
-	return async (req) => {
+export const postKeysQuery =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const body = (req.body ?? {}) as KeysQueryRequest;
-
-		if (!body.device_keys) {
-			throw badJson("Missing device_keys field");
-		}
+		if (!body.device_keys) throw badJson("Missing device_keys field");
 
 		const deviceKeys: Record<UserId, Record<DeviceId, DeviceKeys>> = {};
 
 		for (const [targetUserId, deviceIds] of Object.entries(body.device_keys)) {
 			if (deviceIds.length === 0) {
-				// Empty array = return all devices
 				const allKeys = await storage.getAllDeviceKeys(targetUserId as UserId);
-				if (Object.keys(allKeys).length > 0) {
+				if (Object.keys(allKeys).length > 0)
 					deviceKeys[targetUserId as UserId] = allKeys;
-				}
 			} else {
-				// Specific devices requested
 				const userDeviceKeys: Record<DeviceId, DeviceKeys> = {};
 				for (const did of deviceIds) {
 					const keys = await storage.getDeviceKeys(targetUserId as UserId, did);
-					if (keys) {
-						userDeviceKeys[did] = keys;
-					}
+					if (keys) userDeviceKeys[did] = keys;
 				}
-				if (Object.keys(userDeviceKeys).length > 0) {
+				if (Object.keys(userDeviceKeys).length > 0)
 					deviceKeys[targetUserId as UserId] = userDeviceKeys;
-				}
 			}
 		}
 
 		return { status: 200, body: { device_keys: deviceKeys } };
 	};
-}
 
-// =============================================================================
-// POST /_matrix/client/v3/keys/claim
-// =============================================================================
-
-export function postKeysClaim(storage: Storage): Handler {
-	return async (req) => {
+export const postKeysClaim =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const body = (req.body ?? {}) as KeysClaimRequest;
-
-		if (!body.one_time_keys) {
-			throw badJson("Missing one_time_keys field");
-		}
+		if (!body.one_time_keys) throw badJson("Missing one_time_keys field");
 
 		const oneTimeKeys: Record<
 			UserId,
@@ -113,16 +86,15 @@ export function postKeysClaim(storage: Storage): Handler {
 					algorithm,
 				);
 				if (claimed) {
-					if (!oneTimeKeys[targetUserId as UserId]) {
-						oneTimeKeys[targetUserId as UserId] = {};
-					}
+					oneTimeKeys[targetUserId as UserId] ??= {} as Record<
+						DeviceId,
+						Record<string, string | JsonObject>
+					>;
 					const userKeys = oneTimeKeys[targetUserId as UserId] as Record<
 						DeviceId,
 						Record<string, string | JsonObject>
 					>;
-					if (!userKeys[targetDeviceId as DeviceId]) {
-						userKeys[targetDeviceId as DeviceId] = {};
-					}
+					userKeys[targetDeviceId as DeviceId] ??= {};
 					(
 						userKeys[targetDeviceId as DeviceId] as Record<
 							string,
@@ -135,28 +107,21 @@ export function postKeysClaim(storage: Storage): Handler {
 
 		return { status: 200, body: { one_time_keys: oneTimeKeys } };
 	};
-}
 
-// =============================================================================
-// PUT /_matrix/client/v3/sendToDevice/:eventType/:txnId
-// =============================================================================
-
-export function putSendToDevice(storage: Storage): Handler {
-	return async (req) => {
+export const putSendToDevice =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const eventType = req.params.eventType as string;
 		const userId = req.userId as UserId;
 		const body = (req.body ?? {}) as {
 			messages?: Record<UserId, Record<DeviceId, JsonObject>>;
 		};
 
-		if (!body.messages) {
-			throw badJson("Missing messages field");
-		}
+		if (!body.messages) throw badJson("Missing messages field");
 
 		for (const [targetUserId, devices] of Object.entries(body.messages)) {
 			for (const [targetDeviceId, content] of Object.entries(devices)) {
 				if (targetDeviceId === "*") {
-					// Wildcard: send to all devices for this user
 					const allDevices = await storage.getAllDevices(
 						targetUserId as UserId,
 					);
@@ -187,15 +152,8 @@ export function putSendToDevice(storage: Storage): Handler {
 
 		return { status: 200, body: {} };
 	};
-}
 
-// =============================================================================
-// GET /_matrix/client/v3/keys/changes
-// =============================================================================
-
-export function getKeysChanges(): Handler {
-	return async () => {
-		// Stub: no federation tracking yet, return empty lists
-		return { status: 200, body: { changed: [], left: [] } };
-	};
-}
+export const getKeysChanges = (): Handler => async () => ({
+	status: 200,
+	body: { changed: [], left: [] },
+});

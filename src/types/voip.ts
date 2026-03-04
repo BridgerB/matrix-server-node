@@ -1,7 +1,3 @@
-// =============================================================================
-// EVENT CONTENT TYPES - VOIP / CALLS
-// =============================================================================
-
 export interface CallInviteContent {
 	call_id: string;
 	party_id: string;

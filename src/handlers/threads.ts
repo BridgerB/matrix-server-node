@@ -5,12 +5,9 @@ import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { RoomId } from "../types/index.ts";
 
-// =============================================================================
-// GET /_matrix/client/v3/rooms/:roomId/threads
-// =============================================================================
-
-export function getThreads(storage: Storage): Handler {
-	return async (req) => {
+export const getThreads =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as RoomId;
 		const userId = req.userId as string;
 
@@ -45,4 +42,3 @@ export function getThreads(storage: Storage): Handler {
 			},
 		};
 	};
-}

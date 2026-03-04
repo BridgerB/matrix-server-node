@@ -3,8 +3,9 @@ import { badJson, unknownToken } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 
-export function postRefresh(storage: Storage): Handler {
-	return async (req) => {
+export const postRefresh =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const body = req.body as { refresh_token?: string };
 
 		if (!body.refresh_token) throw badJson("Missing 'refresh_token' field");
@@ -34,4 +35,3 @@ export function postRefresh(storage: Storage): Handler {
 			},
 		};
 	};
-}

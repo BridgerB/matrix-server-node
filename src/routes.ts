@@ -148,32 +148,28 @@ import type { SigningKey } from "./signing.ts";
 import type { Storage } from "./storage/interface.ts";
 import type { ServerName } from "./types/index.ts";
 
-export function registerRoutes(
+export const registerRoutes = (
 	router: Router,
 	storage: Storage,
 	serverName: string,
 	signingKey?: SigningKey,
-): void {
+): void => {
 	const auth = requireAuth(storage);
 
-	// Discovery (public + authenticated)
 	router.get("/_matrix/client/versions", versionsHandler(serverName));
 	router.get("/.well-known/matrix/server", wellKnownServerHandler(serverName));
 	router.get("/.well-known/matrix/client", wellKnownClientHandler(serverName));
 	router.get("/_matrix/client/v3/capabilities", getCapabilities(), auth);
 
-	// Auth (public)
 	router.get("/_matrix/client/v3/login", getLoginFlows());
 	router.post("/_matrix/client/v3/login", postLogin(storage, serverName));
 	router.post("/_matrix/client/v3/register", postRegister(storage, serverName));
 	router.post("/_matrix/client/v3/refresh", postRefresh(storage));
 
-	// Auth (authenticated)
 	router.post("/_matrix/client/v3/logout", postLogout(storage), auth);
 	router.post("/_matrix/client/v3/logout/all", postLogoutAll(storage), auth);
 	router.get("/_matrix/client/v3/account/whoami", getWhoAmI(), auth);
 
-	// Account management (authenticated)
 	router.post(
 		"/_matrix/client/v3/account/password",
 		postChangePassword(storage),
@@ -185,7 +181,6 @@ export function registerRoutes(
 		auth,
 	);
 
-	// Profile (public GET, authenticated PUT)
 	router.get("/_matrix/client/v3/profile/:userId", getProfile(storage));
 	router.get(
 		"/_matrix/client/v3/profile/:userId/displayname",
@@ -206,7 +201,6 @@ export function registerRoutes(
 		auth,
 	);
 
-	// Devices (authenticated)
 	router.get("/_matrix/client/v3/devices", getDevices(storage), auth);
 	router.get("/_matrix/client/v3/devices/:deviceId", getDevice(storage), auth);
 	router.put("/_matrix/client/v3/devices/:deviceId", putDevice(storage), auth);
@@ -221,7 +215,6 @@ export function registerRoutes(
 		auth,
 	);
 
-	// Directory (public GET, authenticated PUT/DELETE)
 	router.get(
 		"/_matrix/client/v3/directory/room/:roomAlias",
 		getDirectoryRoom(storage),
@@ -248,7 +241,6 @@ export function registerRoutes(
 	router.get("/_matrix/client/v3/publicRooms", getPublicRooms(storage));
 	router.post("/_matrix/client/v3/publicRooms", postPublicRooms(storage), auth);
 
-	// Rooms
 	router.post(
 		"/_matrix/client/v3/createRoom",
 		postCreateRoom(storage, serverName),
@@ -256,7 +248,6 @@ export function registerRoutes(
 	);
 	router.get("/_matrix/client/v3/joined_rooms", getJoinedRooms(storage), auth);
 
-	// Membership
 	router.post(
 		"/_matrix/client/v3/join/:roomIdOrAlias",
 		postJoin(storage, serverName),
@@ -293,7 +284,6 @@ export function registerRoutes(
 		auth,
 	);
 
-	// Send events
 	router.put(
 		"/_matrix/client/v3/rooms/:roomId/send/:eventType/:txnId",
 		putSendEvent(storage, serverName),
@@ -310,7 +300,6 @@ export function registerRoutes(
 		auth,
 	);
 
-	// Read events
 	router.get(
 		"/_matrix/client/v3/rooms/:roomId/state",
 		getAllState(storage),
@@ -347,14 +336,12 @@ export function registerRoutes(
 		auth,
 	);
 
-	// Redaction
 	router.post(
 		"/_matrix/client/v3/rooms/:roomId/redact/:eventId/:txnId",
 		postRedact(storage, serverName),
 		auth,
 	);
 
-	// Relations (more specific routes first)
 	router.get(
 		"/_matrix/client/v3/rooms/:roomId/relations/:eventId/:relType/:eventType",
 		getRelations(storage),
@@ -371,7 +358,6 @@ export function registerRoutes(
 		auth,
 	);
 
-	// Filters (authenticated)
 	router.post(
 		"/_matrix/client/v3/user/:userId/filter",
 		postCreateFilter(storage),
@@ -383,7 +369,6 @@ export function registerRoutes(
 		auth,
 	);
 
-	// Account data (authenticated)
 	router.get(
 		"/_matrix/client/v3/user/:userId/account_data/:type",
 		getGlobalAccountData(storage),
@@ -405,7 +390,6 @@ export function registerRoutes(
 		auth,
 	);
 
-	// Tags (authenticated)
 	router.get(
 		"/_matrix/client/v3/user/:userId/rooms/:roomId/tags",
 		getTags(storage),
@@ -422,21 +406,18 @@ export function registerRoutes(
 		auth,
 	);
 
-	// Typing (authenticated)
 	router.put(
 		"/_matrix/client/v3/rooms/:roomId/typing/:userId",
 		putTyping(storage),
 		auth,
 	);
 
-	// Receipts (authenticated)
 	router.post(
 		"/_matrix/client/v3/rooms/:roomId/receipt/:receiptType/:eventId",
 		postReceipt(storage),
 		auth,
 	);
 
-	// Presence (authenticated)
 	router.get(
 		"/_matrix/client/v3/presence/:userId/status",
 		getPresence(storage),
@@ -448,7 +429,6 @@ export function registerRoutes(
 		auth,
 	);
 
-	// Media (upload authenticated, download/thumbnail public)
 	router.post(
 		"/_matrix/media/v3/upload",
 		postUpload(storage, serverName),
@@ -468,7 +448,6 @@ export function registerRoutes(
 	);
 	router.get("/_matrix/media/v3/config", getConfig(), auth);
 
-	// Push rules (authenticated) — more specific routes must come first
 	router.get(
 		"/_matrix/client/v3/pushrules/global/:kind/:ruleId/enabled",
 		getPushRuleEnabled(storage),
@@ -516,41 +495,34 @@ export function registerRoutes(
 	);
 	router.get("/_matrix/client/v3/pushrules", getAllPushRules(storage), auth);
 
-	// Pushers (authenticated)
 	router.get("/_matrix/client/v3/pushers", getPushers(storage), auth);
 	router.post("/_matrix/client/v3/pushers/set", postPushersSet(storage), auth);
 
-	// E2EE - Key management (authenticated)
 	router.post("/_matrix/client/v3/keys/upload", postKeysUpload(storage), auth);
 	router.post("/_matrix/client/v3/keys/query", postKeysQuery(storage), auth);
 	router.post("/_matrix/client/v3/keys/claim", postKeysClaim(storage), auth);
 	router.get("/_matrix/client/v3/keys/changes", getKeysChanges(), auth);
 
-	// To-device messaging (authenticated)
 	router.put(
 		"/_matrix/client/v3/sendToDevice/:eventType/:txnId",
 		putSendToDevice(storage),
 		auth,
 	);
 
-	// VoIP (authenticated)
 	router.get("/_matrix/client/v3/voip/turnServer", getTurnServer(), auth);
 
-	// Reporting (authenticated)
 	router.post(
 		"/_matrix/client/v3/rooms/:roomId/report/:eventId",
 		postReportEvent(storage),
 		auth,
 	);
 
-	// OpenID (authenticated)
 	router.post(
 		"/_matrix/client/v3/user/:userId/openid/request_token",
 		postOpenIdToken(storage, serverName),
 		auth,
 	);
 
-	// 3PIDs (authenticated)
 	router.get("/_matrix/client/v3/account/3pid", getThreePids(storage), auth);
 	router.post(
 		"/_matrix/client/v3/account/3pid/add",
@@ -563,50 +535,39 @@ export function registerRoutes(
 		auth,
 	);
 
-	// User directory (authenticated)
 	router.post(
 		"/_matrix/client/v3/user_directory/search",
 		postUserDirectorySearch(storage),
 		auth,
 	);
 
-	// Threads (authenticated)
 	router.get(
 		"/_matrix/client/v3/rooms/:roomId/threads",
 		getThreads(storage),
 		auth,
 	);
 
-	// Notifications (authenticated)
 	router.get(
 		"/_matrix/client/v3/notifications",
 		getNotifications(storage),
 		auth,
 	);
 
-	// Search (authenticated)
 	router.post("/_matrix/client/v3/search", postSearch(storage), auth);
 
-	// Space hierarchy (authenticated)
 	router.get(
 		"/_matrix/client/v3/rooms/:roomId/hierarchy",
 		getSpaceHierarchy(storage),
 		auth,
 	);
 
-	// Room upgrade (authenticated)
 	router.post(
 		"/_matrix/client/v3/rooms/:roomId/upgrade",
 		postRoomUpgrade(storage, serverName),
 		auth,
 	);
 
-	// Sync
 	router.get("/_matrix/client/v3/sync", getSync(storage, serverName), auth);
-
-	// ===========================================================================
-	// FEDERATION (Server-Server API)
-	// ===========================================================================
 
 	if (signingKey) {
 		const federationClient = new FederationClient(
@@ -620,14 +581,12 @@ export function registerRoutes(
 			federationClient,
 		);
 
-		// Key server (public)
 		router.get("/_matrix/key/v2/server", getServerKeys(serverName, signingKey));
 		router.get(
 			"/_matrix/key/v2/server/:keyId",
 			getServerKeys(serverName, signingKey),
 		);
 
-		// Federation queries (authenticated)
 		router.get(
 			"/_matrix/federation/v1/query/profile",
 			getQueryProfile(storage),
@@ -644,7 +603,6 @@ export function registerRoutes(
 			fedAuth,
 		);
 
-		// Federation events (authenticated)
 		router.get(
 			"/_matrix/federation/v1/event/:eventId",
 			getFederationEvent(storage, serverName),
@@ -676,7 +634,6 @@ export function registerRoutes(
 			fedAuth,
 		);
 
-		// Federation devices (authenticated)
 		router.post(
 			"/_matrix/federation/v1/user/devices/:userId",
 			postFederationUserDevices(storage),
@@ -693,7 +650,6 @@ export function registerRoutes(
 			fedAuth,
 		);
 
-		// Federation transactions (authenticated)
 		router.put(
 			"/_matrix/federation/v1/send/:txnId",
 			putFederationSend(
@@ -706,7 +662,6 @@ export function registerRoutes(
 			fedAuth,
 		);
 
-		// Federation membership (authenticated)
 		router.get(
 			"/_matrix/federation/v1/make_join/:roomId/:userId",
 			getMakeJoin(storage, serverName),
@@ -751,4 +706,4 @@ export function registerRoutes(
 			fedAuth,
 		);
 	}
-}
+};

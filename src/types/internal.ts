@@ -1,8 +1,3 @@
-// =============================================================================
-// INTERNAL / SERVER-SIDE TYPES
-// These aren't part of the spec but needed for implementation.
-// =============================================================================
-
 import type { PDU } from "./events.ts";
 import type {
 	Base64,

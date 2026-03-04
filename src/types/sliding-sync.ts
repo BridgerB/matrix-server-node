@@ -1,7 +1,3 @@
-// =============================================================================
-// SLIDING SYNC (MSC3575 / v5)
-// =============================================================================
-
 import type { ClientEvent, StrippedStateEvent } from "./events.ts";
 import type { MxcUri, RoomId, Timestamp, UserId } from "./identifiers.ts";
 import type { JsonObject } from "./json.ts";

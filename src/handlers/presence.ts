@@ -4,8 +4,9 @@ import type { Storage } from "../storage/interface.ts";
 import type { PresenceState } from "../types/ephemeral.ts";
 import type { UserId } from "../types/index.ts";
 
-export function getPresence(storage: Storage): Handler {
-	return async (req) => {
+export const getPresence =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const userId = req.params.userId as UserId;
 
 		const data = await storage.getPresence(userId);
@@ -23,10 +24,10 @@ export function getPresence(storage: Storage): Handler {
 		}
 		return { status: 200, body: result };
 	};
-}
 
-export function putPresence(storage: Storage): Handler {
-	return async (req) => {
+export const putPresence =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const userId = req.params.userId as UserId;
 		if (req.userId !== userId)
 			throw forbidden("Cannot set another user's presence");
@@ -38,4 +39,3 @@ export function putPresence(storage: Storage): Handler {
 		await storage.setPresence(userId, presence, statusMsg);
 		return { status: 200, body: {} };
 	};
-}
