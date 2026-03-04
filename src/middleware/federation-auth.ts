@@ -1,8 +1,9 @@
 import { forbidden, serverNotTrusted } from "../errors.ts";
 import type { FederationClient } from "../federation/client.ts";
-import type { RemoteKeyStore } from "../federation/key-store.ts";
+import { getServerKey } from "../federation/key-store.ts";
 import type { Middleware } from "../router.ts";
 import { verifyJsonSignature } from "../signing.ts";
+import type { Storage } from "../storage/interface.ts";
 import type { KeyId, ServerName } from "../types/index.ts";
 
 const parseXMatrixAuth = (
@@ -29,7 +30,7 @@ const parseXMatrixAuth = (
 export const requireFederationAuth =
 	(
 		serverName: string,
-		remoteKeyStore: RemoteKeyStore,
+		storage: Storage,
 		federationClient: FederationClient,
 	): Middleware =>
 	async (req, next) => {
@@ -45,7 +46,8 @@ export const requireFederationAuth =
 				`Destination mismatch: expected ${serverName}, got ${params.destination}`,
 			);
 
-		const pubKey = await remoteKeyStore.getServerKey(
+		const pubKey = await getServerKey(
+			storage,
 			params.origin as ServerName,
 			params.key as KeyId,
 			federationClient,

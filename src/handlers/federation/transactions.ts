@@ -5,7 +5,6 @@ import {
 } from "../../events.ts";
 import { isServerAllowedByAcl } from "../../federation/acl.ts";
 import type { FederationClient } from "../../federation/client.ts";
-import type { RemoteKeyStore } from "../../federation/key-store.ts";
 import { verifyOriginSignature } from "../../federation/verify.ts";
 import type { Handler } from "../../router.ts";
 import type { SigningKey } from "../../signing.ts";
@@ -18,7 +17,6 @@ const processPdu = async (
 	pdu: PDU,
 	eventId: EventId,
 	origin: ServerName,
-	remoteKeyStore: RemoteKeyStore,
 	federationClient: FederationClient,
 ): Promise<void> => {
 	const expectedHash = computeContentHash(pdu);
@@ -26,7 +24,7 @@ const processPdu = async (
 		throw new Error("Content hash mismatch");
 	}
 
-	await verifyOriginSignature(pdu, origin, remoteKeyStore, federationClient);
+	await verifyOriginSignature(pdu, origin, storage, federationClient);
 
 	const computedId = computeEventId(pdu);
 	if (computedId !== eventId) {
@@ -121,7 +119,6 @@ export const putFederationSend =
 		storage: Storage,
 		_serverName: string,
 		_signingKey: SigningKey,
-		remoteKeyStore: RemoteKeyStore,
 		federationClient: FederationClient,
 	): Handler =>
 	async (req) => {
@@ -143,14 +140,7 @@ export const putFederationSend =
 		for (const pdu of pdus) {
 			const eventId = computeEventId(pdu);
 			try {
-				await processPdu(
-					storage,
-					pdu,
-					eventId,
-					origin,
-					remoteKeyStore,
-					federationClient,
-				);
+				await processPdu(storage, pdu, eventId, origin, federationClient);
 				pduResults[eventId] = {};
 			} catch (err) {
 				pduResults[eventId] = {

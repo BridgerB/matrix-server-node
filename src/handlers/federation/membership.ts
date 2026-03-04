@@ -7,7 +7,6 @@ import {
 } from "../../events.ts";
 import { isServerAllowedByAcl } from "../../federation/acl.ts";
 import type { FederationClient } from "../../federation/client.ts";
-import type { RemoteKeyStore } from "../../federation/key-store.ts";
 import { verifyOriginSignature } from "../../federation/verify.ts";
 import type { Handler } from "../../router.ts";
 import type { SigningKey } from "../../signing.ts";
@@ -72,7 +71,6 @@ export const putSendJoin =
 		storage: Storage,
 		serverName: string,
 		signingKey: SigningKey,
-		remoteKeyStore: RemoteKeyStore,
 		federationClient: FederationClient,
 	): Handler =>
 	async (req) => {
@@ -83,12 +81,7 @@ export const putSendJoin =
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
 
-		await verifyOriginSignature(
-			event,
-			origin,
-			remoteKeyStore,
-			federationClient,
-		);
+		await verifyOriginSignature(event, origin, storage, federationClient);
 
 		const eventId = computeEventId(event);
 		checkEventAuth(event, eventId, room);
@@ -156,7 +149,6 @@ export const putSendLeave =
 		storage: Storage,
 		_serverName: string,
 		_signingKey: SigningKey,
-		remoteKeyStore: RemoteKeyStore,
 		federationClient: FederationClient,
 	): Handler =>
 	async (req) => {
@@ -167,12 +159,7 @@ export const putSendLeave =
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
 
-		await verifyOriginSignature(
-			event,
-			origin,
-			remoteKeyStore,
-			federationClient,
-		);
+		await verifyOriginSignature(event, origin, storage, federationClient);
 
 		const eventId = computeEventId(event);
 		checkEventAuth(event, eventId, room);
@@ -188,7 +175,6 @@ export const putFederationInvite =
 		storage: Storage,
 		serverName: string,
 		signingKey: SigningKey,
-		remoteKeyStore: RemoteKeyStore,
 		federationClient: FederationClient,
 	): Handler =>
 	async (req) => {
@@ -208,12 +194,7 @@ export const putFederationInvite =
 		if (targetServer !== serverName)
 			throw forbidden("Invited user is not on this server");
 
-		await verifyOriginSignature(
-			event,
-			origin,
-			remoteKeyStore,
-			federationClient,
-		);
+		await verifyOriginSignature(event, origin, storage, federationClient);
 
 		const coSigned = signEvent(event, serverName as ServerName, signingKey);
 		const eventId = computeEventId(coSigned);

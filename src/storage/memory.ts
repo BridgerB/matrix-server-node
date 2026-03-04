@@ -1,6 +1,5 @@
 import { computeEventId } from "../events.ts";
 import type { DeviceKeys, OneTimeKey } from "../types/e2ee.ts";
-import type { PresenceState } from "../types/ephemeral.ts";
 import type {
 	PDU,
 	StrippedStateEvent,
@@ -26,10 +25,14 @@ import type { JsonObject } from "../types/json.ts";
 import type { Pusher } from "../types/push.ts";
 import type { RoomVersion } from "../types/room-versions.ts";
 import type { Device, UserProfile } from "../types/user.ts";
-import { eventToStrippedState, INVITE_STATE_TYPES } from "./ephemeral.ts";
+import {
+	EphemeralMixin,
+	eventToStrippedState,
+	INVITE_STATE_TYPES,
+} from "./ephemeral.ts";
 import type { Storage, StoredSession } from "./interface.ts";
 
-export class MemoryStorage implements Storage {
+export class MemoryStorage extends EphemeralMixin implements Storage {
 	private users = new Map<string, UserAccount>();
 	private usersByFullId = new Map<UserId, UserAccount>();
 	private sessions = new Map<AccessToken, StoredSession>();
@@ -41,9 +44,7 @@ export class MemoryStorage implements Storage {
 		RoomId,
 		{ eventId: EventId; streamPos: number }[]
 	>();
-	private streamCounter = 0;
 	private txnMap = new Map<string, EventId>();
-	private eventWaiters = new Set<() => void>();
 	private aliases = new Map<
 		RoomAlias,
 		{ room_id: RoomId; servers: ServerName[]; creator: UserId }
@@ -51,24 +52,15 @@ export class MemoryStorage implements Storage {
 	private publicRooms = new Set<RoomId>();
 	private globalAccountData = new Map<UserId, Map<string, JsonObject>>();
 	private roomAccountDataMap = new Map<string, Map<string, JsonObject>>();
-	private typingTimers = new Map<
-		RoomId,
-		Map<UserId, ReturnType<typeof setTimeout>>
-	>();
 	private receiptsMap = new Map<
 		RoomId,
 		Map<string, { eventId: EventId; ts: Timestamp }>
-	>();
-	private presenceMap = new Map<
-		UserId,
-		{ presence: PresenceState; status_msg?: string; last_active_ts?: Timestamp }
 	>();
 	private mediaStore = new Map<
 		string,
 		{ metadata: StoredMedia; data: Buffer }
 	>();
 	private filters = new Map<UserId, Map<string, JsonObject>>();
-	private filterCounter = 0;
 	private deviceKeysMap = new Map<string, DeviceKeys>();
 	private oneTimeKeysMap = new Map<string, Map<KeyId, string | OneTimeKey>>();
 	private fallbackKeysMap = new Map<string, Map<KeyId, string | OneTimeKey>>();
@@ -253,9 +245,7 @@ export class MemoryStorage implements Storage {
 			this.streamCounter++;
 			timeline.push({ eventId, streamPos: this.streamCounter });
 		}
-		for (const waiter of this.eventWaiters) {
-			waiter();
-		}
+		this.wakeWaiters();
 	}
 
 	async getEvent(
@@ -400,26 +390,6 @@ export class MemoryStorage implements Storage {
 				),
 			)
 			.map(([, event]) => eventToStrippedState(event));
-	}
-
-	async waitForEvents(since: number, timeoutMs: number): Promise<void> {
-		if (this.streamCounter > since) return;
-		if (timeoutMs <= 0) return;
-
-		return new Promise<void>((resolve) => {
-			const timer = setTimeout(() => {
-				this.eventWaiters.delete(wake);
-				resolve();
-			}, timeoutMs);
-
-			const wake = () => {
-				clearTimeout(timer);
-				this.eventWaiters.delete(wake);
-				resolve();
-			};
-
-			this.eventWaiters.add(wake);
-		});
 	}
 
 	async getProfile(userId: UserId): Promise<UserProfile | undefined> {
@@ -631,48 +601,6 @@ export class MemoryStorage implements Storage {
 		return [...dataMap.entries()].map(([type, content]) => ({ type, content }));
 	}
 
-	private wakeWaiters(): void {
-		for (const waiter of this.eventWaiters) {
-			waiter();
-		}
-	}
-
-	async setTyping(
-		roomId: RoomId,
-		userId: UserId,
-		typing: boolean,
-		timeout?: number,
-	): Promise<void> {
-		let roomTyping = this.typingTimers.get(roomId);
-		if (!roomTyping) {
-			roomTyping = new Map();
-			this.typingTimers.set(roomId, roomTyping);
-		}
-
-		const existing = roomTyping.get(userId);
-		if (existing) {
-			clearTimeout(existing);
-			roomTyping.delete(userId);
-		}
-
-		if (typing) {
-			const ms = Math.min(timeout ?? 30000, 120000);
-			const timer = setTimeout(() => {
-				roomTyping?.delete(userId);
-				this.wakeWaiters();
-			}, ms);
-			roomTyping.set(userId, timer);
-		}
-
-		this.wakeWaiters();
-	}
-
-	async getTypingUsers(roomId: RoomId): Promise<UserId[]> {
-		const roomTyping = this.typingTimers.get(roomId);
-		if (!roomTyping) return [];
-		return [...roomTyping.keys()];
-	}
-
 	async setReceipt(
 		roomId: RoomId,
 		userId: UserId,
@@ -700,30 +628,6 @@ export class MemoryStorage implements Storage {
 			const [userId, receiptType] = key.split("\0") as [UserId, string];
 			return { eventId: value.eventId, receiptType, userId, ts: value.ts };
 		});
-	}
-
-	async setPresence(
-		userId: UserId,
-		presence: PresenceState,
-		statusMsg?: string,
-	): Promise<void> {
-		this.presenceMap.set(userId, {
-			presence,
-			status_msg: statusMsg,
-			last_active_ts: Date.now(),
-		});
-		this.wakeWaiters();
-	}
-
-	async getPresence(userId: UserId): Promise<
-		| {
-				presence: PresenceState;
-				status_msg?: string;
-				last_active_ts?: Timestamp;
-		  }
-		| undefined
-	> {
-		return this.presenceMap.get(userId);
 	}
 
 	async storeMedia(media: StoredMedia, data: Buffer): Promise<void> {
@@ -1416,7 +1320,6 @@ export class MemoryStorage implements Storage {
 			forward_extremities: extremities,
 		});
 
-		for (const waiter of this.eventWaiters) waiter();
-		this.eventWaiters.clear();
+		this.wakeWaiters();
 	}
 }

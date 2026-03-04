@@ -1,5 +1,4 @@
 import { FederationClient } from "./federation/client.ts";
-import { RemoteKeyStore } from "./federation/key-store.ts";
 import {
 	getWhoAmI,
 	postChangePassword,
@@ -574,10 +573,9 @@ export const registerRoutes = (
 			serverName as ServerName,
 			signingKey,
 		);
-		const remoteKeyStore = new RemoteKeyStore(storage);
 		const fedAuth = requireFederationAuth(
 			serverName,
-			remoteKeyStore,
+			storage,
 			federationClient,
 		);
 
@@ -652,13 +650,7 @@ export const registerRoutes = (
 
 		router.put(
 			"/_matrix/federation/v1/send/:txnId",
-			putFederationSend(
-				storage,
-				serverName,
-				signingKey,
-				remoteKeyStore,
-				federationClient,
-			),
+			putFederationSend(storage, serverName, signingKey, federationClient),
 			fedAuth,
 		);
 
@@ -669,13 +661,7 @@ export const registerRoutes = (
 		);
 		router.put(
 			"/_matrix/federation/v2/send_join/:roomId/:eventId",
-			putSendJoin(
-				storage,
-				serverName,
-				signingKey,
-				remoteKeyStore,
-				federationClient,
-			),
+			putSendJoin(storage, serverName, signingKey, federationClient),
 			fedAuth,
 		);
 		router.get(
@@ -685,24 +671,12 @@ export const registerRoutes = (
 		);
 		router.put(
 			"/_matrix/federation/v2/send_leave/:roomId/:eventId",
-			putSendLeave(
-				storage,
-				serverName,
-				signingKey,
-				remoteKeyStore,
-				federationClient,
-			),
+			putSendLeave(storage, serverName, signingKey, federationClient),
 			fedAuth,
 		);
 		router.put(
 			"/_matrix/federation/v2/invite/:roomId/:eventId",
-			putFederationInvite(
-				storage,
-				serverName,
-				signingKey,
-				remoteKeyStore,
-				federationClient,
-			),
+			putFederationInvite(storage, serverName, signingKey, federationClient),
 			fedAuth,
 		);
 	}
