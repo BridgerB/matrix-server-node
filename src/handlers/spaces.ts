@@ -1,5 +1,5 @@
 import { notFound } from "../errors.ts";
-import { getMembership } from "../events.ts";
+import { countJoinedMembers, getMembership } from "../events.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { SpaceHierarchyRoom } from "../types/directory.ts";
@@ -25,11 +25,7 @@ const buildHierarchyRoom = (
 	const guestEvent = room.state_events.get("m.room.guest_access\0");
 	const createEvent = room.state_events.get("m.room.create\0");
 
-	const memberCount = [...room.state_events.entries()].filter(
-		([key, event]) =>
-			key.startsWith("m.room.member\0") &&
-			(event.content as Record<string, unknown>).membership === "join",
-	).length;
+	const memberCount = countJoinedMembers(room.state_events);
 
 	const histVis = histVisEvent
 		? (histVisEvent.content as Record<string, unknown>).history_visibility

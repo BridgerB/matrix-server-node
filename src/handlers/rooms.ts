@@ -6,59 +6,16 @@ import {
 	notFound,
 	roomNotFound,
 } from "../errors.ts";
-import {
-	buildEvent,
-	checkEventAuth,
-	getMembership,
-	selectAuthEvents,
-} from "../events.ts";
+import { type EventContext, getMembership, sendStateEvent } from "../events.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { RoomState } from "../types/internal.ts";
 import type { JsonObject } from "../types/json.ts";
 import type { CreateRoomRequest } from "../types/room-operations.ts";
 import type { RoomPowerLevelsContent } from "../types/state-events.ts";
-
-interface EventContext {
-	roomState: RoomState;
-	depth: number;
-	prevEvents: string[];
-}
-
-const sendStateEvent = async (
-	storage: Storage,
-	serverName: string,
-	ctx: EventContext,
-	sender: string,
-	type: string,
-	stateKey: string,
-	content: JsonObject,
-): Promise<string> => {
-	const authEvents = selectAuthEvents(type, stateKey, ctx.roomState, sender);
-	const { event, eventId } = buildEvent({
-		roomId: ctx.roomState.room_id,
-		sender,
-		type,
-		content,
-		stateKey,
-		depth: ctx.depth,
-		prevEvents: ctx.prevEvents,
-		authEvents,
-		serverName,
-	});
-
-	checkEventAuth(event, eventId, ctx.roomState);
-	await storage.setStateEvent(ctx.roomState.room_id, event, eventId);
-
-	ctx.depth++;
-	ctx.prevEvents = [eventId];
-	ctx.roomState.depth = ctx.depth;
-	ctx.roomState.forward_extremities = [eventId];
-
-	return eventId;
-};
-export function postCreateRoom(storage: Storage, serverName: string): Handler {
-	return async (req) => {
+export const postCreateRoom =
+	(storage: Storage, serverName: string): Handler =>
+	async (req) => {
 		const body = (req.body ?? {}) as CreateRoomRequest;
 		const userId = req.userId as string;
 		const roomVersion = body.room_version ?? "11";
@@ -259,13 +216,12 @@ export function postCreateRoom(storage: Storage, serverName: string): Handler {
 
 		return { status: 200, body: { room_id: roomId } };
 	};
-}
-export function getJoinedRooms(storage: Storage): Handler {
-	return async (req) => {
+export const getJoinedRooms =
+	(storage: Storage): Handler =>
+	async (req) => {
 		const rooms = await storage.getRoomsForUser(req.userId as string);
 		return { status: 200, body: { joined_rooms: rooms } };
 	};
-}
 const sendMembershipEvent = async (
 	storage: Storage,
 	serverName: string,
@@ -298,8 +254,9 @@ const sendMembershipEvent = async (
 	);
 };
 
-export function postJoin(storage: Storage, serverName: string): Handler {
-	return async (req) => {
+export const postJoin =
+	(storage: Storage, serverName: string): Handler =>
+	async (req) => {
 		const roomIdOrAlias = req.params.roomIdOrAlias ?? req.params.roomId;
 		if (!roomIdOrAlias) throw badJson("Missing room ID or alias");
 
@@ -322,10 +279,10 @@ export function postJoin(storage: Storage, serverName: string): Handler {
 		);
 		return { status: 200, body: { room_id: roomId } };
 	};
-}
 
-export function postLeave(storage: Storage, serverName: string): Handler {
-	return async (req) => {
+export const postLeave =
+	(storage: Storage, serverName: string): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as string;
 		const body = (req.body ?? {}) as { reason?: string };
 		await sendMembershipEvent(
@@ -339,10 +296,10 @@ export function postLeave(storage: Storage, serverName: string): Handler {
 		);
 		return { status: 200, body: {} };
 	};
-}
 
-export function postInvite(storage: Storage, serverName: string): Handler {
-	return async (req) => {
+export const postInvite =
+	(storage: Storage, serverName: string): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as string;
 		const body = req.body as { user_id?: string; reason?: string } | undefined;
 		if (!body?.user_id) throw missingParam("Missing 'user_id'");
@@ -357,10 +314,10 @@ export function postInvite(storage: Storage, serverName: string): Handler {
 		);
 		return { status: 200, body: {} };
 	};
-}
 
-export function postKick(storage: Storage, serverName: string): Handler {
-	return async (req) => {
+export const postKick =
+	(storage: Storage, serverName: string): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as string;
 		const body = req.body as { user_id?: string; reason?: string } | undefined;
 		if (!body?.user_id) throw missingParam("Missing 'user_id'");
@@ -375,10 +332,10 @@ export function postKick(storage: Storage, serverName: string): Handler {
 		);
 		return { status: 200, body: {} };
 	};
-}
 
-export function postBan(storage: Storage, serverName: string): Handler {
-	return async (req) => {
+export const postBan =
+	(storage: Storage, serverName: string): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as string;
 		const body = req.body as { user_id?: string; reason?: string } | undefined;
 		if (!body?.user_id) throw missingParam("Missing 'user_id'");
@@ -393,10 +350,10 @@ export function postBan(storage: Storage, serverName: string): Handler {
 		);
 		return { status: 200, body: {} };
 	};
-}
 
-export function postUnban(storage: Storage, serverName: string): Handler {
-	return async (req) => {
+export const postUnban =
+	(storage: Storage, serverName: string): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as string;
 		const body = req.body as { user_id?: string; reason?: string } | undefined;
 		if (!body?.user_id) throw missingParam("Missing 'user_id'");
@@ -417,4 +374,3 @@ export function postUnban(storage: Storage, serverName: string): Handler {
 		);
 		return { status: 200, body: {} };
 	};
-}

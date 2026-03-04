@@ -2,12 +2,13 @@ import { createHash } from "node:crypto";
 import { forbidden } from "./errors.ts";
 import type { SigningKey } from "./signing.ts";
 import { signEvent } from "./signing.ts";
+import type { Storage } from "./storage/interface.ts";
 import type { ClientEvent, PDU, UnsignedData } from "./types/events.ts";
 import type { EventId, RoomId, ServerName, UserId } from "./types/index.ts";
 import type { RoomState } from "./types/internal.ts";
 import type { JsonObject } from "./types/json.ts";
 import type { RoomPowerLevelsContent } from "./types/state-events.ts";
-export function canonicalJson(val: unknown): string {
+export const canonicalJson = (val: unknown): string => {
 	if (val === null || val === undefined) return "null";
 	if (typeof val === "boolean") return val ? "true" : "false";
 	if (typeof val === "number") return JSON.stringify(val);
@@ -24,7 +25,7 @@ export function canonicalJson(val: unknown): string {
 		return `{${entries.join(",")}}`;
 	}
 	return JSON.stringify(val);
-}
+};
 const ALLOWED_TOP_LEVEL = new Set([
 	"auth_events",
 	"content",
@@ -68,7 +69,7 @@ const ALLOWED_CONTENT_KEYS: Record<string, Set<string>> = {
 	"m.room.redaction": new Set(["redacts"]),
 };
 
-export function redactEvent(event: PDU): PDU {
+export const redactEvent = (event: PDU): PDU => {
 	const redacted: Record<string, unknown> = {};
 	for (const key of ALLOWED_TOP_LEVEL) {
 		if (key in event) {
@@ -86,7 +87,7 @@ export function redactEvent(event: PDU): PDU {
 		: {};
 
 	return redacted as unknown as PDU;
-}
+};
 export const computeContentHash = (event: PDU): string => {
 	const copy: Record<string, unknown> = { ...event };
 	delete copy.unsigned;
@@ -96,7 +97,7 @@ export const computeContentHash = (event: PDU): string => {
 	return createHash("sha256").update(canonicalJson(copy)).digest("base64url");
 };
 
-export function computeEventId(event: PDU): EventId {
+export const computeEventId = (event: PDU): EventId => {
 	const withHash: PDU = {
 		...event,
 		hashes: { sha256: computeContentHash(event) },
@@ -111,8 +112,8 @@ export function computeEventId(event: PDU): EventId {
 		.update(canonicalJson(forRef))
 		.digest("base64url");
 	return `$${hash}`;
-}
-export function buildEvent(params: {
+};
+export const buildEvent = (params: {
 	roomId: RoomId;
 	sender: UserId;
 	type: string;
@@ -125,7 +126,7 @@ export function buildEvent(params: {
 	unsigned?: UnsignedData;
 	serverName: ServerName;
 	signingKey?: SigningKey;
-}): { event: PDU; eventId: EventId } {
+}): { event: PDU; eventId: EventId } => {
 	const event: PDU = {
 		auth_events: params.authEvents,
 		content: params.content,
@@ -160,7 +161,7 @@ export function buildEvent(params: {
 	}
 
 	return { event, eventId };
-}
+};
 const getStateEventId = (
 	roomState: RoomState,
 	type: string,
@@ -170,12 +171,12 @@ const getStateEventId = (
 	return event ? computeEventId(event) : undefined;
 };
 
-export function selectAuthEvents(
+export const selectAuthEvents = (
 	eventType: string,
 	stateKey: string | undefined,
 	roomState: RoomState,
 	sender: UserId,
-): EventId[] {
+): EventId[] => {
 	const authEvents: EventId[] = [];
 
 	const createId = getStateEventId(roomState, "m.room.create", "");
@@ -202,7 +203,7 @@ export function selectAuthEvents(
 	}
 
 	return authEvents;
-}
+};
 export const getPowerLevels = (
 	roomState: RoomState,
 ): RoomPowerLevelsContent => {
@@ -212,10 +213,10 @@ export const getPowerLevels = (
 		: { users_default: 0, events_default: 0, state_default: 50 };
 };
 
-export function getUserPowerLevel(
+export const getUserPowerLevel = (
 	userId: UserId,
 	roomState: RoomState,
-): number {
+): number => {
 	const plEvent = roomState.state_events.get("m.room.power_levels\0");
 	if (!plEvent) {
 		// Before power_levels is set, the room creator has implicit PL 100
@@ -225,7 +226,7 @@ export function getUserPowerLevel(
 	}
 	const pl = plEvent.content as unknown as RoomPowerLevelsContent;
 	return pl.users?.[userId] ?? pl.users_default ?? 0;
-}
+};
 
 const getEventPowerLevel = (
 	eventType: string,
@@ -347,11 +348,11 @@ const checkMembershipAuth = (event: PDU, roomState: RoomState): void => {
 	}
 };
 
-export function checkEventAuth(
+export const checkEventAuth = (
 	event: PDU,
 	_eventId: EventId,
 	roomState: RoomState,
-): void {
+): void => {
 	if (event.type === "m.room.create") {
 		if (roomState.state_events.size > 0) {
 			throw forbidden("m.room.create can only be the first event");
@@ -377,8 +378,8 @@ export function checkEventAuth(
 			`Insufficient power level: need ${requiredPl}, have ${senderPl}`,
 		);
 	}
-}
-export function pduToClientEvent(pdu: PDU, eventId: EventId): ClientEvent {
+};
+export const pduToClientEvent = (pdu: PDU, eventId: EventId): ClientEvent => {
 	const ce: ClientEvent = {
 		content: pdu.content,
 		event_id: eventId,
@@ -391,4 +392,63 @@ export function pduToClientEvent(pdu: PDU, eventId: EventId): ClientEvent {
 	if (pdu.unsigned) ce.unsigned = pdu.unsigned;
 	if (pdu.redacts) ce.redacts = pdu.redacts;
 	return ce;
+};
+
+export const countJoinedMembers = (
+	stateEvents: Map<string, { content: unknown }>,
+): number =>
+	[...stateEvents.entries()].filter(
+		([key, event]) =>
+			key.startsWith("m.room.member\0") &&
+			(event.content as Record<string, unknown>).membership === "join",
+	).length;
+
+export const getStateContent = (
+	stateEvents: Map<string, { content: unknown }>,
+	key: string,
+	field: string,
+): string | undefined => {
+	const event = stateEvents.get(key);
+	return event
+		? ((event.content as Record<string, unknown>)[field] as string | undefined)
+		: undefined;
+};
+
+export interface EventContext {
+	roomState: RoomState;
+	depth: number;
+	prevEvents: string[];
 }
+
+export const sendStateEvent = async (
+	storage: Storage,
+	serverName: string,
+	ctx: EventContext,
+	sender: string,
+	type: string,
+	stateKey: string,
+	content: JsonObject,
+): Promise<string> => {
+	const authEvents = selectAuthEvents(type, stateKey, ctx.roomState, sender);
+	const { event, eventId } = buildEvent({
+		roomId: ctx.roomState.room_id,
+		sender,
+		type,
+		content,
+		stateKey,
+		depth: ctx.depth,
+		prevEvents: ctx.prevEvents,
+		authEvents,
+		serverName,
+	});
+
+	checkEventAuth(event, eventId, ctx.roomState);
+	await storage.setStateEvent(ctx.roomState.room_id, event, eventId);
+
+	ctx.depth++;
+	ctx.prevEvents = [eventId];
+	ctx.roomState.depth = ctx.depth;
+	ctx.roomState.forward_extremities = [eventId];
+
+	return eventId;
+};

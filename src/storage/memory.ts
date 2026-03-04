@@ -26,6 +26,7 @@ import type { JsonObject } from "../types/json.ts";
 import type { Pusher } from "../types/push.ts";
 import type { RoomVersion } from "../types/room-versions.ts";
 import type { Device, UserProfile } from "../types/user.ts";
+import { INVITE_STATE_TYPES } from "./ephemeral.ts";
 import type { Storage, StoredSession } from "./interface.ts";
 
 export class MemoryStorage implements Storage {
@@ -392,19 +393,12 @@ export class MemoryStorage implements Storage {
 	async getStrippedState(roomId: RoomId): Promise<StrippedStateEvent[]> {
 		const room = this.rooms.get(roomId);
 		if (!room) return [];
-		const INVITE_STATE_TYPES = new Set([
-			"m.room.create",
-			"m.room.join_rules",
-			"m.room.canonical_alias",
-			"m.room.avatar",
-			"m.room.name",
-			"m.room.encryption",
-		]);
 		return [...room.state_events.entries()]
-			.filter(([key]) => {
-				const type = key.split("\0")[0] as string;
-				return INVITE_STATE_TYPES.has(type) || type === "m.room.member";
-			})
+			.filter(([key]) =>
+				INVITE_STATE_TYPES.includes(
+					key.split("\0")[0] as (typeof INVITE_STATE_TYPES)[number],
+				),
+			)
 			.map(([, event]) => ({
 				content: event.content,
 				sender: event.sender,

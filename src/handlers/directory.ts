@@ -1,5 +1,10 @@
 import { badJson, forbidden, notFound } from "../errors.ts";
-import { getMembership, getUserPowerLevel } from "../events.ts";
+import {
+	countJoinedMembers,
+	getMembership,
+	getStateContent,
+	getUserPowerLevel,
+} from "../events.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type {
@@ -10,29 +15,14 @@ import type { RoomAlias, RoomId } from "../types/index.ts";
 
 const MAX_PUBLIC_ROOMS = 100;
 
-const getStateContent = (
-	state: Map<string, { content: unknown }>,
-	key: string,
-	field: string,
-): string | undefined => {
-	const event = state.get(key);
-	return event
-		? ((event.content as Record<string, unknown>)[field] as string | undefined)
-		: undefined;
-};
-
-const buildPublicRoomEntry = async (
+export const buildPublicRoomEntry = async (
 	storage: Storage,
 	roomId: RoomId,
 ): Promise<PublicRoomEntry | undefined> => {
 	const room = await storage.getRoom(roomId);
 	if (!room) return undefined;
 
-	const numJoined = [...room.state_events.entries()].filter(
-		([key, event]) =>
-			key.startsWith("m.room.member\0") &&
-			(event.content as Record<string, unknown>).membership === "join",
-	).length;
+	const numJoined = countJoinedMembers(room.state_events);
 
 	const name = getStateContent(room.state_events, "m.room.name\0", "name");
 	const topic = getStateContent(room.state_events, "m.room.topic\0", "topic");

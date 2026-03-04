@@ -8,35 +8,16 @@ import {
 import { isServerAllowedByAcl } from "../../federation/acl.ts";
 import type { FederationClient } from "../../federation/client.ts";
 import type { RemoteKeyStore } from "../../federation/key-store.ts";
+import { verifyOriginSignature } from "../../federation/verify.ts";
 import type { Handler } from "../../router.ts";
 import type { SigningKey } from "../../signing.ts";
-import { signEvent, verifyEventSignature } from "../../signing.ts";
+import { signEvent } from "../../signing.ts";
 import type { Storage } from "../../storage/interface.ts";
 import type { PDU } from "../../types/events.ts";
-import type { KeyId, RoomId, ServerName, UserId } from "../../types/index.ts";
-
-const verifyOriginSignature = async (
-	event: PDU,
-	origin: string,
-	remoteKeyStore: RemoteKeyStore,
-	federationClient: FederationClient,
-) => {
-	const originSigs = event.signatures?.[origin];
-	if (!originSigs) throw forbidden("No signature from origin");
-
-	for (const keyId of Object.keys(originSigs)) {
-		const pubKey = await remoteKeyStore.getServerKey(
-			origin,
-			keyId as KeyId,
-			federationClient,
-		);
-		if (pubKey && verifyEventSignature(event, origin, keyId as KeyId, pubKey))
-			return;
-	}
-	throw forbidden("Invalid event signature");
-};
-export function getMakeJoin(storage: Storage, _serverName: string): Handler {
-	return async (req) => {
+import type { RoomId, ServerName, UserId } from "../../types/index.ts";
+export const getMakeJoin =
+	(storage: Storage, _serverName: string): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as RoomId;
 		const userId = req.params.userId as UserId;
 
@@ -86,15 +67,15 @@ export function getMakeJoin(storage: Storage, _serverName: string): Handler {
 			},
 		};
 	};
-}
-export function putSendJoin(
-	storage: Storage,
-	serverName: string,
-	signingKey: SigningKey,
-	remoteKeyStore: RemoteKeyStore,
-	federationClient: FederationClient,
-): Handler {
-	return async (req) => {
+export const putSendJoin =
+	(
+		storage: Storage,
+		serverName: string,
+		signingKey: SigningKey,
+		remoteKeyStore: RemoteKeyStore,
+		federationClient: FederationClient,
+	): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as RoomId;
 		const event = req.body as PDU;
 		const origin = req.origin as string;
@@ -134,9 +115,9 @@ export function putSendJoin(
 			},
 		};
 	};
-}
-export function getMakeLeave(storage: Storage, _serverName: string): Handler {
-	return async (req) => {
+export const getMakeLeave =
+	(storage: Storage, _serverName: string): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as RoomId;
 		const userId = req.params.userId as UserId;
 
@@ -170,15 +151,15 @@ export function getMakeLeave(storage: Storage, _serverName: string): Handler {
 			},
 		};
 	};
-}
-export function putSendLeave(
-	storage: Storage,
-	_serverName: string,
-	_signingKey: SigningKey,
-	remoteKeyStore: RemoteKeyStore,
-	federationClient: FederationClient,
-): Handler {
-	return async (req) => {
+export const putSendLeave =
+	(
+		storage: Storage,
+		_serverName: string,
+		_signingKey: SigningKey,
+		remoteKeyStore: RemoteKeyStore,
+		federationClient: FederationClient,
+	): Handler =>
+	async (req) => {
 		const roomId = req.params.roomId as RoomId;
 		const event = req.body as PDU;
 		const origin = req.origin as string;
@@ -202,15 +183,15 @@ export function putSendLeave(
 
 		return { status: 200, body: {} };
 	};
-}
-export function putFederationInvite(
-	storage: Storage,
-	serverName: string,
-	signingKey: SigningKey,
-	remoteKeyStore: RemoteKeyStore,
-	federationClient: FederationClient,
-): Handler {
-	return async (req) => {
+export const putFederationInvite =
+	(
+		storage: Storage,
+		serverName: string,
+		signingKey: SigningKey,
+		remoteKeyStore: RemoteKeyStore,
+		federationClient: FederationClient,
+	): Handler =>
+	async (req) => {
 		const body = req.body as {
 			room_version?: string;
 			event: PDU;
@@ -257,4 +238,3 @@ export function putFederationInvite(
 			body: { event: coSigned },
 		};
 	};
-}

@@ -6,38 +6,12 @@ import {
 import { isServerAllowedByAcl } from "../../federation/acl.ts";
 import type { FederationClient } from "../../federation/client.ts";
 import type { RemoteKeyStore } from "../../federation/key-store.ts";
+import { verifyOriginSignature } from "../../federation/verify.ts";
 import type { Handler } from "../../router.ts";
 import type { SigningKey } from "../../signing.ts";
-import { verifyEventSignature } from "../../signing.ts";
 import type { Storage } from "../../storage/interface.ts";
 import type { EDU, PDU } from "../../types/events.ts";
-import type {
-	EventId,
-	KeyId,
-	RoomId,
-	ServerName,
-	UserId,
-} from "../../types/index.ts";
-
-const verifyOriginSig = async (
-	pdu: PDU,
-	origin: ServerName,
-	remoteKeyStore: RemoteKeyStore,
-	federationClient: FederationClient,
-) => {
-	const originSigs = pdu.signatures?.[origin];
-	if (!originSigs) throw new Error(`No signature from origin ${origin}`);
-	for (const keyId of Object.keys(originSigs)) {
-		const pubKey = await remoteKeyStore.getServerKey(
-			origin,
-			keyId as KeyId,
-			federationClient,
-		);
-		if (pubKey && verifyEventSignature(pdu, origin, keyId as KeyId, pubKey))
-			return;
-	}
-	throw new Error("Invalid event signature");
-};
+import type { EventId, RoomId, ServerName, UserId } from "../../types/index.ts";
 
 const processPdu = async (
 	storage: Storage,
@@ -52,7 +26,7 @@ const processPdu = async (
 		throw new Error("Content hash mismatch");
 	}
 
-	await verifyOriginSig(pdu, origin, remoteKeyStore, federationClient);
+	await verifyOriginSignature(pdu, origin, remoteKeyStore, federationClient);
 
 	const computedId = computeEventId(pdu);
 	if (computedId !== eventId) {
@@ -142,14 +116,15 @@ const processEdu = async (
 	}
 };
 
-export function putFederationSend(
-	storage: Storage,
-	_serverName: string,
-	_signingKey: SigningKey,
-	remoteKeyStore: RemoteKeyStore,
-	federationClient: FederationClient,
-): Handler {
-	return async (req) => {
+export const putFederationSend =
+	(
+		storage: Storage,
+		_serverName: string,
+		_signingKey: SigningKey,
+		remoteKeyStore: RemoteKeyStore,
+		federationClient: FederationClient,
+	): Handler =>
+	async (req) => {
 		const txnId = req.params.txnId as string;
 		const origin = req.origin as string;
 
@@ -192,4 +167,3 @@ export function putFederationSend(
 
 		return { status: 200, body: { pdus: pduResults } };
 	};
-}

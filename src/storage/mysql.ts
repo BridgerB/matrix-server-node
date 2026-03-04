@@ -1,7 +1,6 @@
 import * as mariadb from "mariadb";
 import { computeEventId } from "../events.ts";
 import type { DeviceKeys, OneTimeKey } from "../types/e2ee.ts";
-import type { PresenceState } from "../types/ephemeral.ts";
 import type {
 	PDU,
 	StrippedStateEvent,
@@ -27,24 +26,14 @@ import type { JsonObject } from "../types/json.ts";
 import type { Pusher } from "../types/push.ts";
 import type { RoomVersion } from "../types/room-versions.ts";
 import type { Device, UserProfile } from "../types/user.ts";
+import { EphemeralMixin, INVITE_STATE_TYPES } from "./ephemeral.ts";
 import type { Storage, StoredSession } from "./interface.ts";
 
-export class MysqlStorage implements Storage {
+export class MysqlStorage extends EphemeralMixin implements Storage {
 	private pool: mariadb.Pool;
-	private streamCounter = 0;
-	private filterCounter = 0;
-	private eventWaiters = new Set<() => void>();
-	private roomCache = new Map<RoomId, RoomState>();
-	private typingTimers = new Map<
-		RoomId,
-		Map<UserId, ReturnType<typeof setTimeout>>
-	>();
-	private presenceMap = new Map<
-		UserId,
-		{ presence: PresenceState; status_msg?: string; last_active_ts?: Timestamp }
-	>();
 
 	private constructor(pool: mariadb.Pool) {
+		super();
 		this.pool = pool;
 	}
 
@@ -346,10 +335,6 @@ export class MysqlStorage implements Storage {
 			"SELECT MAX(filter_id) AS m FROM filters",
 		)) as { m: number | null }[];
 		this.filterCounter = maxFilter?.m ?? 0;
-	}
-
-	private wakeWaiters(): void {
-		for (const waiter of this.eventWaiters) waiter();
 	}
 
 	private json(val: unknown): string {
@@ -821,15 +806,6 @@ export class MysqlStorage implements Storage {
 	}
 
 	async getStrippedState(roomId: RoomId): Promise<StrippedStateEvent[]> {
-		const INVITE_STATE_TYPES = [
-			"m.room.create",
-			"m.room.join_rules",
-			"m.room.canonical_alias",
-			"m.room.avatar",
-			"m.room.name",
-			"m.room.encryption",
-			"m.room.member",
-		];
 		const placeholders = INVITE_STATE_TYPES.map(() => "?").join(",");
 		const rows = (await this.query(
 			`SELECT event_json FROM state_events WHERE room_id = ? AND event_type IN (${placeholders})`,
@@ -843,23 +819,6 @@ export class MysqlStorage implements Storage {
 				state_key: event.state_key ?? "",
 				type: event.type,
 			};
-		});
-	}
-
-	async waitForEvents(since: number, timeoutMs: number): Promise<void> {
-		if (this.streamCounter > since) return;
-		if (timeoutMs <= 0) return;
-		return new Promise<void>((resolve) => {
-			const timer = setTimeout(() => {
-				this.eventWaiters.delete(wake);
-				resolve();
-			}, timeoutMs);
-			const wake = () => {
-				clearTimeout(timer);
-				this.eventWaiters.delete(wake);
-				resolve();
-			};
-			this.eventWaiters.add(wake);
 		});
 	}
 
@@ -1110,39 +1069,6 @@ export class MysqlStorage implements Storage {
 		}));
 	}
 
-	async setTyping(
-		roomId: RoomId,
-		userId: UserId,
-		typing: boolean,
-		timeout?: number,
-	): Promise<void> {
-		let roomTyping = this.typingTimers.get(roomId);
-		if (!roomTyping) {
-			roomTyping = new Map();
-			this.typingTimers.set(roomId, roomTyping);
-		}
-		const existing = roomTyping.get(userId);
-		if (existing) {
-			clearTimeout(existing);
-			roomTyping.delete(userId);
-		}
-		if (typing) {
-			const ms = Math.min(timeout ?? 30000, 120000);
-			const timer = setTimeout(() => {
-				roomTyping?.delete(userId);
-				this.wakeWaiters();
-			}, ms);
-			roomTyping.set(userId, timer);
-		}
-		this.wakeWaiters();
-	}
-
-	async getTypingUsers(roomId: RoomId): Promise<UserId[]> {
-		const roomTyping = this.typingTimers.get(roomId);
-		if (!roomTyping) return [];
-		return [...roomTyping.keys()];
-	}
-
 	async setReceipt(
 		roomId: RoomId,
 		userId: UserId,
@@ -1172,30 +1098,6 @@ export class MysqlStorage implements Storage {
 			userId: r.user_id as UserId,
 			ts: Number(r.ts),
 		}));
-	}
-
-	async setPresence(
-		userId: UserId,
-		presence: PresenceState,
-		statusMsg?: string,
-	): Promise<void> {
-		this.presenceMap.set(userId, {
-			presence,
-			status_msg: statusMsg,
-			last_active_ts: Date.now(),
-		});
-		this.wakeWaiters();
-	}
-
-	async getPresence(userId: UserId): Promise<
-		| {
-				presence: PresenceState;
-				status_msg?: string;
-				last_active_ts?: Timestamp;
-		  }
-		| undefined
-	> {
-		return this.presenceMap.get(userId);
 	}
 
 	async storeMedia(media: StoredMedia, data: Buffer): Promise<void> {

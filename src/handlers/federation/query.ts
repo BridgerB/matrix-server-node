@@ -2,6 +2,7 @@ import { notFound } from "../../errors.ts";
 import type { Handler } from "../../router.ts";
 import type { Storage } from "../../storage/interface.ts";
 import type { RoomAlias, UserId } from "../../types/index.ts";
+import { buildPublicRoomEntry } from "../directory.ts";
 
 export const getQueryProfile =
 	(storage: Storage): Handler =>
@@ -49,42 +50,11 @@ export const getFederationPublicRooms =
 	(storage: Storage): Handler =>
 	async (_req) => {
 		const publicRoomIds = await storage.getPublicRoomIds();
-		const rooms: unknown[] = [];
-
-		for (const roomId of publicRoomIds) {
-			const room = await storage.getRoom(roomId);
-			if (!room) continue;
-
-			const nameEvent = room.state_events.get("m.room.name\0");
-			const topicEvent = room.state_events.get("m.room.topic\0");
-			const aliasEvent = room.state_events.get("m.room.canonical_alias\0");
-			const avatarEvent = room.state_events.get("m.room.avatar\0");
-
-			const memberCount = [...room.state_events.entries()].filter(
-				([key, event]) =>
-					key.startsWith("m.room.member\0") &&
-					(event.content as Record<string, unknown>).membership === "join",
-			).length;
-
-			rooms.push({
-				room_id: roomId,
-				name: nameEvent
-					? (nameEvent.content as Record<string, unknown>).name
-					: undefined,
-				topic: topicEvent
-					? (topicEvent.content as Record<string, unknown>).topic
-					: undefined,
-				canonical_alias: aliasEvent
-					? (aliasEvent.content as Record<string, unknown>).alias
-					: undefined,
-				avatar_url: avatarEvent
-					? (avatarEvent.content as Record<string, unknown>).url
-					: undefined,
-				num_joined_members: memberCount,
-				world_readable: false,
-				guest_can_join: false,
-			});
-		}
+		const rooms = (
+			await Promise.all(
+				publicRoomIds.map((roomId) => buildPublicRoomEntry(storage, roomId)),
+			)
+		).filter(Boolean);
 
 		return {
 			status: 200,

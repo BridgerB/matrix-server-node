@@ -4,15 +4,16 @@ import {
 	buildEvent,
 	checkEventAuth,
 	computeEventId,
+	type EventContext,
 	getMembership,
 	getUserPowerLevel,
 	selectAuthEvents,
+	sendStateEvent,
 } from "../events.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { EventId, RoomId } from "../types/index.ts";
 import type { RoomState } from "../types/internal.ts";
-import type { JsonObject } from "../types/json.ts";
 import type { RoomVersion } from "../types/room-versions.ts";
 import type { RoomPowerLevelsContent } from "../types/state-events.ts";
 
@@ -28,45 +29,6 @@ const STATE_TO_COPY = [
 	"m.room.server_acl",
 	"m.room.pinned_events",
 ];
-
-interface EventContext {
-	roomState: RoomState;
-	depth: number;
-	prevEvents: string[];
-}
-
-const sendStateEvent = async (
-	storage: Storage,
-	serverName: string,
-	ctx: EventContext,
-	sender: string,
-	type: string,
-	stateKey: string,
-	content: JsonObject,
-): Promise<string> => {
-	const authEvents = selectAuthEvents(type, stateKey, ctx.roomState, sender);
-	const { event, eventId } = buildEvent({
-		roomId: ctx.roomState.room_id,
-		sender,
-		type,
-		content,
-		stateKey,
-		depth: ctx.depth,
-		prevEvents: ctx.prevEvents,
-		authEvents,
-		serverName,
-	});
-
-	checkEventAuth(event, eventId, ctx.roomState);
-	await storage.setStateEvent(ctx.roomState.room_id, event, eventId);
-
-	ctx.depth++;
-	ctx.prevEvents = [eventId];
-	ctx.roomState.depth = ctx.depth;
-	ctx.roomState.forward_extremities = [eventId];
-
-	return eventId;
-};
 
 export const postRoomUpgrade =
 	(storage: Storage, serverName: string): Handler =>
