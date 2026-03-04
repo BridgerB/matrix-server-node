@@ -1,7 +1,7 @@
+import { generateToken } from "../crypto.ts";
+import { badJson, unknownToken } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import { badJson, unknownToken } from "../errors.ts";
-import { generateToken } from "../crypto.ts";
 
 export function postRefresh(storage: Storage): Handler {
 	return async (req) => {

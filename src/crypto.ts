@@ -13,5 +13,5 @@ export function generateDeviceId(): string {
 }
 
 export function generateRoomId(serverName: string): string {
-	return "!" + randomBytes(18).toString("base64url") + ":" + serverName;
+	return `!${randomBytes(18).toString("base64url")}:${serverName}`;
 }

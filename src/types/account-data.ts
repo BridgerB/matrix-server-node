@@ -2,14 +2,14 @@
 // EVENT CONTENT TYPES - ACCOUNT DATA
 // =============================================================================
 
-import type { UserId, RoomId, EventId } from "./identifiers.ts";
+import type { EventId, RoomId, UserId } from "./identifiers.ts";
 
 export interface DirectContent {
 	[userId: string]: RoomId[];
 }
 
 export interface IgnoredUserListContent {
-	ignored_users: Record<UserId, {}>;
+	ignored_users: Record<UserId, Record<string, unknown>>;
 }
 
 export interface FullyReadContent {

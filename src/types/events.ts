@@ -3,14 +3,14 @@
 // =============================================================================
 
 import type {
-	EventId,
-	RoomId,
-	UserId,
-	ServerName,
-	KeyId,
 	Base64,
+	EventId,
+	KeyId,
+	RoomId,
+	ServerName,
 	Timestamp,
 	TransactionId,
+	UserId,
 } from "./identifiers.ts";
 import type { JsonObject, JsonValue } from "./json.ts";
 

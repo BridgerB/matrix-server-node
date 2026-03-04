@@ -1,7 +1,7 @@
+import { badJson, missingParam } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { Pusher } from "../types/push.ts";
-import { badJson, missingParam } from "../errors.ts";
 
 // =============================================================================
 // GET /_matrix/client/v3/pushers
@@ -9,7 +9,7 @@ import { badJson, missingParam } from "../errors.ts";
 
 export function getPushers(storage: Storage): Handler {
 	return async (req) => {
-		const userId = req.userId!;
+		const userId = req.userId as string;
 		const pushers = await storage.getPushers(userId);
 		return { status: 200, body: { pushers } };
 	};
@@ -21,7 +21,7 @@ export function getPushers(storage: Storage): Handler {
 
 export function postPushersSet(storage: Storage): Handler {
 	return async (req) => {
-		const userId = req.userId!;
+		const userId = req.userId as string;
 		const body = (req.body ?? {}) as Partial<Pusher>;
 
 		if (!body.pushkey) throw missingParam("pushkey");

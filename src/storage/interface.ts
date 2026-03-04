@@ -1,33 +1,31 @@
-import type {
-	UserId,
-	RoomId,
-	RoomAlias,
-	EventId,
-	DeviceId,
-	AccessToken,
-	RefreshToken,
-	Timestamp,
-	ServerName,
-	KeyId,
-} from "../types/index.ts";
-import type {
-	UserAccount,
-	DeviceSession,
-	RoomState,
-	StoredMedia,
-} from "../types/index.ts";
+import type { DeviceKeys, OneTimeKey } from "../types/e2ee.ts";
+import type { PresenceState } from "../types/ephemeral.ts";
 import type {
 	PDU,
 	StrippedStateEvent,
 	ToDeviceEvent,
 } from "../types/events.ts";
-import type { UserProfile, Device } from "../types/user.ts";
-import type { JsonObject } from "../types/json.ts";
-import type { PresenceState } from "../types/ephemeral.ts";
-import type { DeviceKeys, OneTimeKey } from "../types/e2ee.ts";
-import type { Pusher } from "../types/push.ts";
 import type { ServerKeys } from "../types/federation.ts";
+import type {
+	AccessToken,
+	DeviceId,
+	DeviceSession,
+	EventId,
+	KeyId,
+	RefreshToken,
+	RoomAlias,
+	RoomId,
+	RoomState,
+	ServerName,
+	StoredMedia,
+	Timestamp,
+	UserAccount,
+	UserId,
+} from "../types/index.ts";
+import type { JsonObject } from "../types/json.ts";
+import type { Pusher } from "../types/push.ts";
 import type { RoomVersion } from "../types/room-versions.ts";
+import type { Device, UserProfile } from "../types/user.ts";
 
 export interface StoredSession extends DeviceSession {
 	access_token: AccessToken;
@@ -229,9 +227,7 @@ export interface Storage {
 		presence: PresenceState,
 		statusMsg?: string,
 	): Promise<void>;
-	getPresence(
-		userId: UserId,
-	): Promise<
+	getPresence(userId: UserId): Promise<
 		| {
 				presence: PresenceState;
 				status_msg?: string;

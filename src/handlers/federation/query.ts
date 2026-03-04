@@ -1,7 +1,7 @@
+import { notFound } from "../../errors.ts";
 import type { Handler } from "../../router.ts";
 import type { Storage } from "../../storage/interface.ts";
-import type { UserId, RoomAlias } from "../../types/index.ts";
-import { notFound } from "../../errors.ts";
+import type { RoomAlias, UserId } from "../../types/index.ts";
 
 // =============================================================================
 // GET /_matrix/federation/v1/query/profile
@@ -76,9 +76,7 @@ export function getFederationPublicRooms(storage: Storage): Handler {
 			let memberCount = 0;
 			for (const [key, event] of room.state_events) {
 				if (key.startsWith("m.room.member\0")) {
-					if (
-						(event.content as Record<string, unknown>)["membership"] === "join"
-					)
+					if ((event.content as Record<string, unknown>).membership === "join")
 						memberCount++;
 				}
 			}
@@ -86,16 +84,16 @@ export function getFederationPublicRooms(storage: Storage): Handler {
 			rooms.push({
 				room_id: roomId,
 				name: nameEvent
-					? (nameEvent.content as Record<string, unknown>)["name"]
+					? (nameEvent.content as Record<string, unknown>).name
 					: undefined,
 				topic: topicEvent
-					? (topicEvent.content as Record<string, unknown>)["topic"]
+					? (topicEvent.content as Record<string, unknown>).topic
 					: undefined,
 				canonical_alias: aliasEvent
-					? (aliasEvent.content as Record<string, unknown>)["alias"]
+					? (aliasEvent.content as Record<string, unknown>).alias
 					: undefined,
 				avatar_url: avatarEvent
-					? (avatarEvent.content as Record<string, unknown>)["url"]
+					? (avatarEvent.content as Record<string, unknown>).url
 					: undefined,
 				num_joined_members: memberCount,
 				world_readable: false,

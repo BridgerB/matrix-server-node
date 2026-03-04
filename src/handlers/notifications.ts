@@ -1,9 +1,9 @@
+import { pduToClientEvent } from "../events.ts";
+import { evaluatePushRules, getOrInitRules } from "../push-rules.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { UserId } from "../types/index.ts";
 import type { RoomPowerLevelsContent } from "../types/state-events.ts";
-import { pduToClientEvent } from "../events.ts";
-import { getOrInitRules, evaluatePushRules } from "../push-rules.ts";
 
 // =============================================================================
 // GET /_matrix/client/v3/notifications
@@ -11,7 +11,7 @@ import { getOrInitRules, evaluatePushRules } from "../push-rules.ts";
 
 export function getNotifications(storage: Storage): Handler {
 	return async (req) => {
-		const userId = req.userId!;
+		const userId = req.userId as string;
 		const fromStr = req.query.get("from");
 		const limitStr = req.query.get("limit");
 		const limit = Math.min(Math.max(parseInt(limitStr ?? "20", 10), 1), 100);
@@ -36,7 +36,7 @@ export function getNotifications(storage: Storage): Handler {
 			const memberEvents = await storage.getMemberEvents(roomId);
 			const memberCount = memberEvents.filter(
 				(m) =>
-					(m.event.content as Record<string, unknown>)["membership"] === "join",
+					(m.event.content as Record<string, unknown>).membership === "join",
 			).length;
 
 			const plEvent = await storage.getStateEvent(
@@ -117,7 +117,7 @@ export function getNotifications(storage: Storage): Handler {
 
 		const nextToken =
 			sliced.length === limit && sliced.length > 0
-				? String(sliced[sliced.length - 1]!.streamPos)
+				? String(sliced[sliced.length - 1]?.streamPos)
 				: undefined;
 
 		return {

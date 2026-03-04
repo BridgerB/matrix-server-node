@@ -1,7 +1,7 @@
-import type { Handler } from "../router.ts";
-import type { Storage } from "../storage/interface.ts";
 import { generateToken } from "../crypto.ts";
 import { forbidden } from "../errors.ts";
+import type { Handler } from "../router.ts";
+import type { Storage } from "../storage/interface.ts";
 
 // =============================================================================
 // POST /_matrix/client/v3/user/:userId/openid/request_token
@@ -9,7 +9,7 @@ import { forbidden } from "../errors.ts";
 
 export function postOpenIdToken(storage: Storage, serverName: string): Handler {
 	return async (req) => {
-		const targetUserId = req.params["userId"]!;
+		const targetUserId = req.params.userId as string;
 		if (req.userId !== targetUserId)
 			throw forbidden("Can only request tokens for yourself");
 
@@ -17,7 +17,7 @@ export function postOpenIdToken(storage: Storage, serverName: string): Handler {
 		const expiresIn = 3600;
 		const expiresAt = Date.now() + expiresIn * 1000;
 
-		await storage.storeOpenIdToken(token, req.userId!, expiresAt);
+		await storage.storeOpenIdToken(token, req.userId as string, expiresAt);
 
 		return {
 			status: 200,

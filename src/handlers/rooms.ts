@@ -1,23 +1,23 @@
-import type { Handler } from "../router.ts";
-import type { Storage } from "../storage/interface.ts";
-import type { JsonObject } from "../types/json.ts";
-import type { CreateRoomRequest } from "../types/room-operations.ts";
-import type { RoomPowerLevelsContent } from "../types/state-events.ts";
-import type { RoomState } from "../types/internal.ts";
 import { generateRoomId } from "../crypto.ts";
-import {
-	buildEvent,
-	selectAuthEvents,
-	checkEventAuth,
-	getMembership,
-} from "../events.ts";
 import {
 	badJson,
 	forbidden,
-	roomNotFound,
 	missingParam,
 	notFound,
+	roomNotFound,
 } from "../errors.ts";
+import {
+	buildEvent,
+	checkEventAuth,
+	getMembership,
+	selectAuthEvents,
+} from "../events.ts";
+import type { Handler } from "../router.ts";
+import type { Storage } from "../storage/interface.ts";
+import type { RoomState } from "../types/internal.ts";
+import type { JsonObject } from "../types/json.ts";
+import type { CreateRoomRequest } from "../types/room-operations.ts";
+import type { RoomPowerLevelsContent } from "../types/state-events.ts";
 
 // =============================================================================
 // HELPERS
@@ -70,7 +70,7 @@ async function sendStateEvent(
 export function postCreateRoom(storage: Storage, serverName: string): Handler {
 	return async (req) => {
 		const body = (req.body ?? {}) as CreateRoomRequest;
-		const userId = req.userId!;
+		const userId = req.userId as string;
 		const roomVersion = body.room_version ?? "11";
 		const roomId = generateRoomId(serverName);
 
@@ -143,7 +143,7 @@ export function postCreateRoom(storage: Storage, serverName: string): Handler {
 		};
 		if (preset === "trusted_private_chat" && body.invite) {
 			for (const invitee of body.invite) {
-				plContent.users![invitee] = 100;
+				(plContent.users as Record<string, number>)[invitee] = 100;
 			}
 		}
 		if (body.power_level_content_override) {
@@ -295,7 +295,7 @@ export function postCreateRoom(storage: Storage, serverName: string): Handler {
 
 export function getJoinedRooms(storage: Storage): Handler {
 	return async (req) => {
-		const rooms = await storage.getRoomsForUser(req.userId!);
+		const rooms = await storage.getRoomsForUser(req.userId as string);
 		return { status: 200, body: { joined_rooms: rooms } };
 	};
 }
@@ -317,7 +317,7 @@ async function sendMembershipEvent(
 	if (!room) throw roomNotFound();
 
 	const content: JsonObject = { membership };
-	if (reason) content["reason"] = reason;
+	if (reason) content.reason = reason;
 
 	const ctx: EventContext = {
 		roomState: room,
@@ -338,7 +338,7 @@ async function sendMembershipEvent(
 
 export function postJoin(storage: Storage, serverName: string): Handler {
 	return async (req) => {
-		const roomIdOrAlias = req.params["roomIdOrAlias"] ?? req.params["roomId"];
+		const roomIdOrAlias = req.params.roomIdOrAlias ?? req.params.roomId;
 		if (!roomIdOrAlias) throw badJson("Missing room ID or alias");
 
 		let roomId: string;
@@ -354,8 +354,8 @@ export function postJoin(storage: Storage, serverName: string): Handler {
 			storage,
 			serverName,
 			roomId,
-			req.userId!,
-			req.userId!,
+			req.userId as string,
+			req.userId as string,
 			"join",
 		);
 		return { status: 200, body: { room_id: roomId } };
@@ -364,14 +364,14 @@ export function postJoin(storage: Storage, serverName: string): Handler {
 
 export function postLeave(storage: Storage, serverName: string): Handler {
 	return async (req) => {
-		const roomId = req.params["roomId"]!;
+		const roomId = req.params.roomId as string;
 		const body = (req.body ?? {}) as { reason?: string };
 		await sendMembershipEvent(
 			storage,
 			serverName,
 			roomId,
-			req.userId!,
-			req.userId!,
+			req.userId as string,
+			req.userId as string,
 			"leave",
 			body.reason,
 		);
@@ -381,14 +381,14 @@ export function postLeave(storage: Storage, serverName: string): Handler {
 
 export function postInvite(storage: Storage, serverName: string): Handler {
 	return async (req) => {
-		const roomId = req.params["roomId"]!;
+		const roomId = req.params.roomId as string;
 		const body = req.body as { user_id?: string; reason?: string } | undefined;
 		if (!body?.user_id) throw missingParam("Missing 'user_id'");
 		await sendMembershipEvent(
 			storage,
 			serverName,
 			roomId,
-			req.userId!,
+			req.userId as string,
 			body.user_id,
 			"invite",
 			body.reason,
@@ -399,14 +399,14 @@ export function postInvite(storage: Storage, serverName: string): Handler {
 
 export function postKick(storage: Storage, serverName: string): Handler {
 	return async (req) => {
-		const roomId = req.params["roomId"]!;
+		const roomId = req.params.roomId as string;
 		const body = req.body as { user_id?: string; reason?: string } | undefined;
 		if (!body?.user_id) throw missingParam("Missing 'user_id'");
 		await sendMembershipEvent(
 			storage,
 			serverName,
 			roomId,
-			req.userId!,
+			req.userId as string,
 			body.user_id,
 			"leave",
 			body.reason,
@@ -417,14 +417,14 @@ export function postKick(storage: Storage, serverName: string): Handler {
 
 export function postBan(storage: Storage, serverName: string): Handler {
 	return async (req) => {
-		const roomId = req.params["roomId"]!;
+		const roomId = req.params.roomId as string;
 		const body = req.body as { user_id?: string; reason?: string } | undefined;
 		if (!body?.user_id) throw missingParam("Missing 'user_id'");
 		await sendMembershipEvent(
 			storage,
 			serverName,
 			roomId,
-			req.userId!,
+			req.userId as string,
 			body.user_id,
 			"ban",
 			body.reason,
@@ -435,7 +435,7 @@ export function postBan(storage: Storage, serverName: string): Handler {
 
 export function postUnban(storage: Storage, serverName: string): Handler {
 	return async (req) => {
-		const roomId = req.params["roomId"]!;
+		const roomId = req.params.roomId as string;
 		const body = req.body as { user_id?: string; reason?: string } | undefined;
 		if (!body?.user_id) throw missingParam("Missing 'user_id'");
 
@@ -448,7 +448,7 @@ export function postUnban(storage: Storage, serverName: string): Handler {
 			storage,
 			serverName,
 			roomId,
-			req.userId!,
+			req.userId as string,
 			body.user_id,
 			"leave",
 			body.reason,

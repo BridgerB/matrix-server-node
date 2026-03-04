@@ -3,16 +3,16 @@
 // These aren't part of the spec but needed for implementation.
 // =============================================================================
 
-import type {
-	UserId,
-	RoomId,
-	EventId,
-	DeviceId,
-	ServerName,
-	Base64,
-	Timestamp,
-} from "./identifiers.ts";
 import type { PDU } from "./events.ts";
+import type {
+	Base64,
+	DeviceId,
+	EventId,
+	RoomId,
+	ServerName,
+	Timestamp,
+	UserId,
+} from "./identifiers.ts";
 import type { RoomVersion } from "./room-versions.ts";
 
 /** Internal representation of a room */

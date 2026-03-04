@@ -1,12 +1,12 @@
+import { badJson, forbidden, notFound } from "../errors.ts";
+import { getMembership, getUserPowerLevel } from "../events.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { RoomAlias, RoomId } from "../types/index.ts";
 import type {
 	PublicRoomEntry,
 	PublicRoomsResponse,
 } from "../types/directory.ts";
-import { notFound, forbidden, badJson } from "../errors.ts";
-import { getMembership, getUserPowerLevel } from "../events.ts";
+import type { RoomAlias, RoomId } from "../types/index.ts";
 
 const MAX_PUBLIC_ROOMS = 100;
 
@@ -16,7 +16,7 @@ const MAX_PUBLIC_ROOMS = 100;
 
 export function getDirectoryRoom(storage: Storage): Handler {
 	return async (req) => {
-		const roomAlias = req.params["roomAlias"]! as RoomAlias;
+		const roomAlias = req.params.roomAlias as RoomAlias;
 		const result = await storage.getRoomByAlias(roomAlias);
 		if (!result) throw notFound("Room alias not found");
 		return {
@@ -31,7 +31,7 @@ export function putDirectoryRoom(
 	serverName: string,
 ): Handler {
 	return async (req) => {
-		const roomAlias = req.params["roomAlias"]! as RoomAlias;
+		const roomAlias = req.params.roomAlias as RoomAlias;
 		const body = req.body as { room_id?: string };
 		const roomId = body.room_id as RoomId | undefined;
 		if (!roomId) throw badJson("Missing 'room_id'");
@@ -50,11 +50,16 @@ export function putDirectoryRoom(
 		// Check user is in the room
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
-		const membership = getMembership(room, req.userId!);
+		const membership = getMembership(room, req.userId as string);
 		if (membership !== "join")
 			throw forbidden("Must be in the room to create an alias");
 
-		await storage.createRoomAlias(roomAlias, roomId, [serverName], req.userId!);
+		await storage.createRoomAlias(
+			roomAlias,
+			roomId,
+			[serverName],
+			req.userId as string,
+		);
 		return { status: 200, body: {} };
 	};
 }
@@ -64,7 +69,7 @@ export function deleteDirectoryRoom(
 	_serverName: string,
 ): Handler {
 	return async (req) => {
-		const roomAlias = req.params["roomAlias"]! as RoomAlias;
+		const roomAlias = req.params.roomAlias as RoomAlias;
 
 		const result = await storage.getRoomByAlias(roomAlias);
 		if (!result) throw notFound("Room alias not found");
@@ -74,7 +79,7 @@ export function deleteDirectoryRoom(
 		if (creator !== req.userId) {
 			const room = await storage.getRoom(result.room_id);
 			if (room) {
-				const userPl = getUserPowerLevel(req.userId!, room);
+				const userPl = getUserPowerLevel(req.userId as string, room);
 				const requiredPl = 50; // PL for m.room.canonical_alias
 				if (userPl < requiredPl) {
 					throw forbidden(
@@ -94,7 +99,7 @@ export function deleteDirectoryRoom(
 			const canonicalEvent = room.state_events.get("m.room.canonical_alias\0");
 			if (canonicalEvent) {
 				const content = canonicalEvent.content as Record<string, unknown>;
-				if (content["alias"] === roomAlias) {
+				if (content.alias === roomAlias) {
 					// Need to import buildEvent etc. to update state - but that creates
 					// a circular concern. Instead, we'll leave the stale canonical alias
 					// for now. A proper implementation would send a new state event.
@@ -112,7 +117,7 @@ export function deleteDirectoryRoom(
 
 export function getDirectoryListRoom(storage: Storage): Handler {
 	return async (req) => {
-		const roomId = req.params["roomId"]! as RoomId;
+		const roomId = req.params.roomId as RoomId;
 		const visibility = await storage.getRoomVisibility(roomId);
 		return { status: 200, body: { visibility } };
 	};
@@ -120,7 +125,7 @@ export function getDirectoryListRoom(storage: Storage): Handler {
 
 export function putDirectoryListRoom(storage: Storage): Handler {
 	return async (req) => {
-		const roomId = req.params["roomId"]! as RoomId;
+		const roomId = req.params.roomId as RoomId;
 		const body = req.body as { visibility?: string };
 		const visibility = body.visibility;
 		if (visibility !== "public" && visibility !== "private") {
@@ -130,9 +135,9 @@ export function putDirectoryListRoom(storage: Storage): Handler {
 		// Check user has permission (PL for m.room.canonical_alias)
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
-		const membership = getMembership(room, req.userId!);
+		const membership = getMembership(room, req.userId as string);
 		if (membership !== "join") throw forbidden("Must be in the room");
-		const userPl = getUserPowerLevel(req.userId!, room);
+		const userPl = getUserPowerLevel(req.userId as string, room);
 		if (userPl < 50) throw forbidden("Insufficient power level");
 
 		await storage.setRoomVisibility(roomId, visibility);
@@ -155,9 +160,7 @@ async function buildPublicRoomEntry(
 	let numJoined = 0;
 	for (const [key, event] of room.state_events) {
 		if (key.startsWith("m.room.member\0")) {
-			const membership = (event.content as Record<string, unknown>)[
-				"membership"
-			];
+			const membership = (event.content as Record<string, unknown>).membership;
 			if (membership === "join") numJoined++;
 		}
 	}
@@ -165,56 +168,56 @@ async function buildPublicRoomEntry(
 	// Get room metadata from state
 	const nameEvent = room.state_events.get("m.room.name\0");
 	const name = nameEvent
-		? ((nameEvent.content as Record<string, unknown>)["name"] as
+		? ((nameEvent.content as Record<string, unknown>).name as
 				| string
 				| undefined)
 		: undefined;
 
 	const topicEvent = room.state_events.get("m.room.topic\0");
 	const topic = topicEvent
-		? ((topicEvent.content as Record<string, unknown>)["topic"] as
+		? ((topicEvent.content as Record<string, unknown>).topic as
 				| string
 				| undefined)
 		: undefined;
 
 	const avatarEvent = room.state_events.get("m.room.avatar\0");
 	const avatarUrl = avatarEvent
-		? ((avatarEvent.content as Record<string, unknown>)["url"] as
+		? ((avatarEvent.content as Record<string, unknown>).url as
 				| string
 				| undefined)
 		: undefined;
 
 	const canonicalEvent = room.state_events.get("m.room.canonical_alias\0");
 	const canonicalAlias = canonicalEvent
-		? ((canonicalEvent.content as Record<string, unknown>)["alias"] as
+		? ((canonicalEvent.content as Record<string, unknown>).alias as
 				| string
 				| undefined)
 		: undefined;
 
 	const joinRulesEvent = room.state_events.get("m.room.join_rules\0");
 	const joinRule = joinRulesEvent
-		? ((joinRulesEvent.content as Record<string, unknown>)["join_rule"] as
+		? ((joinRulesEvent.content as Record<string, unknown>).join_rule as
 				| string
 				| undefined)
 		: undefined;
 
 	const historyEvent = room.state_events.get("m.room.history_visibility\0");
 	const historyVisibility = historyEvent
-		? ((historyEvent.content as Record<string, unknown>)[
-				"history_visibility"
-			] as string | undefined)
+		? ((historyEvent.content as Record<string, unknown>).history_visibility as
+				| string
+				| undefined)
 		: undefined;
 
 	const guestEvent = room.state_events.get("m.room.guest_access\0");
 	const guestAccess = guestEvent
-		? ((guestEvent.content as Record<string, unknown>)["guest_access"] as
+		? ((guestEvent.content as Record<string, unknown>).guest_access as
 				| string
 				| undefined)
 		: undefined;
 
 	const createEvent = room.state_events.get("m.room.create\0");
 	const roomType = createEvent
-		? ((createEvent.content as Record<string, unknown>)["type"] as
+		? ((createEvent.content as Record<string, unknown>).type as
 				| string
 				| undefined)
 		: undefined;

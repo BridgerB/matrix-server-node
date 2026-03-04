@@ -3,17 +3,17 @@
 // =============================================================================
 
 import type {
-	UserId,
-	RoomId,
-	EventId,
-	RoomAlias,
-	MxcUri,
-	ServerName,
-	KeyId,
 	Base64,
+	EventId,
+	KeyId,
+	MxcUri,
+	RoomAlias,
+	RoomId,
+	ServerName,
+	UserId,
 } from "./identifiers.ts";
-import type { RoomVersion } from "./room-versions.ts";
 import type { ImageInfo } from "./media-info.ts";
+import type { RoomVersion } from "./room-versions.ts";
 
 export interface RoomCreateContent {
 	creator?: UserId; // deprecated in v11, but still common

@@ -2,19 +2,19 @@
 // FEDERATION - SERVER-TO-SERVER API
 // =============================================================================
 
-import type {
-	UserId,
-	EventId,
-	DeviceId,
-	ServerName,
-	KeyId,
-	Base64,
-	Timestamp,
-	MxcUri,
-} from "./identifiers.ts";
-import type { PDU, EDU, StrippedStateEvent } from "./events.ts";
-import type { DeviceKeys, CrossSigningKey, OneTimeKey } from "./e2ee.ts";
 import type { PublicRoomsResponse } from "./directory.ts";
+import type { CrossSigningKey, DeviceKeys, OneTimeKey } from "./e2ee.ts";
+import type { EDU, PDU, StrippedStateEvent } from "./events.ts";
+import type {
+	Base64,
+	DeviceId,
+	EventId,
+	KeyId,
+	MxcUri,
+	ServerName,
+	Timestamp,
+	UserId,
+} from "./identifiers.ts";
 import type { RoomVersion } from "./room-versions.ts";
 
 /** Federation transaction sent between servers */

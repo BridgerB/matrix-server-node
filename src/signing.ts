@@ -1,14 +1,14 @@
 import {
-	generateKeyPairSync,
-	sign,
-	verify,
 	createPrivateKey,
 	createPublicKey,
+	generateKeyPairSync,
 	type KeyObject,
+	sign,
+	verify,
 } from "node:crypto";
-import { canonicalJson, redactEvent, computeContentHash } from "./events.ts";
+import { canonicalJson, computeContentHash, redactEvent } from "./events.ts";
 import type { PDU } from "./types/events.ts";
-import type { ServerName, KeyId } from "./types/index.ts";
+import type { KeyId, ServerName } from "./types/index.ts";
 
 // DER encoding prefixes for Ed25519 keys (fixed ASN.1 wrappers)
 const PKCS8_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex"); // 16 bytes
@@ -106,21 +106,22 @@ export function signJson(
 ): Record<string, unknown> {
 	// Remove signatures and unsigned before signing
 	const copy: Record<string, unknown> = { ...obj };
-	delete copy["signatures"];
-	delete copy["unsigned"];
+	delete copy.signatures;
+	delete copy.unsigned;
 
 	const canonical = canonicalJson(copy);
 	const sig = sign(null, Buffer.from(canonical), key.privateKey);
 
 	// Merge signature into existing signatures
-	const signatures = (obj["signatures"] ?? {}) as Record<
+	const signatures = (obj.signatures ?? {}) as Record<
 		string,
 		Record<string, string>
 	>;
 	if (!signatures[serverName]) signatures[serverName] = {};
-	signatures[serverName]![key.keyId] = unpaddedBase64(sig);
+	(signatures[serverName] as Record<string, string>)[key.keyId] =
+		unpaddedBase64(sig);
 
-	obj["signatures"] = signatures;
+	obj.signatures = signatures;
 	return obj;
 }
 
@@ -132,13 +133,13 @@ export function verifyJsonSignature(
 ): boolean {
 	// Remove signatures and unsigned before verifying
 	const copy: Record<string, unknown> = { ...obj };
-	delete copy["signatures"];
-	delete copy["unsigned"];
+	delete copy.signatures;
+	delete copy.unsigned;
 
 	const canonical = canonicalJson(copy);
 
 	// Get the signature
-	const signatures = (obj["signatures"] ?? {}) as Record<
+	const signatures = (obj.signatures ?? {}) as Record<
 		string,
 		Record<string, string>
 	>;
@@ -175,8 +176,8 @@ export function signEvent(
 	const forSigning: Record<string, unknown> = {
 		...redacted,
 	} as unknown as Record<string, unknown>;
-	delete forSigning["unsigned"];
-	delete forSigning["signatures"];
+	delete forSigning.unsigned;
+	delete forSigning.signatures;
 
 	const canonical = canonicalJson(forSigning);
 	const sig = sign(null, Buffer.from(canonical), key.privateKey);
@@ -203,8 +204,8 @@ export function verifyEventSignature(
 	const forVerifying: Record<string, unknown> = {
 		...redacted,
 	} as unknown as Record<string, unknown>;
-	delete forVerifying["unsigned"];
-	delete forVerifying["signatures"];
+	delete forVerifying.unsigned;
+	delete forVerifying.signatures;
 
 	const canonical = canonicalJson(forVerifying);
 

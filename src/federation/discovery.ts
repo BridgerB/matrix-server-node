@@ -1,5 +1,5 @@
-import { request as httpsRequest, type RequestOptions } from "node:https";
 import { resolveSrv } from "node:dns/promises";
+import { request as httpsRequest, type RequestOptions } from "node:https";
 
 export interface ResolvedServer {
 	host: string;
@@ -27,7 +27,7 @@ async function doResolve(serverName: string): Promise<ResolvedServer> {
 	if (colonIdx > 0 && !serverName.endsWith("]")) {
 		const host = serverName.slice(0, colonIdx);
 		const port = parseInt(serverName.slice(colonIdx + 1), 10);
-		if (!isNaN(port)) {
+		if (!Number.isNaN(port)) {
 			return { host, port, serverName };
 		}
 	}
@@ -59,7 +59,9 @@ async function doResolve(serverName: string): Promise<ResolvedServer> {
 	try {
 		const records = await resolveSrv(`_matrix-fed._tcp.${serverName}`);
 		if (records.length > 0) {
-			const best = records.sort((a, b) => a.priority - b.priority)[0]!;
+			const best = records.sort(
+				(a, b) => a.priority - b.priority,
+			)[0] as (typeof records)[number];
 			return { host: best.name, port: best.port, serverName };
 		}
 	} catch {
@@ -70,7 +72,9 @@ async function doResolve(serverName: string): Promise<ResolvedServer> {
 	try {
 		const records = await resolveSrv(`_matrix._tcp.${serverName}`);
 		if (records.length > 0) {
-			const best = records.sort((a, b) => a.priority - b.priority)[0]!;
+			const best = records.sort(
+				(a, b) => a.priority - b.priority,
+			)[0] as (typeof records)[number];
 			return { host: best.name, port: best.port, serverName };
 		}
 	} catch {

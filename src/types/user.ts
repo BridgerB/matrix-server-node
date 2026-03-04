@@ -2,7 +2,7 @@
 // USER PROFILE, ACCOUNT & DEVICES
 // =============================================================================
 
-import type { UserId, DeviceId, MxcUri, Timestamp } from "./identifiers.ts";
+import type { DeviceId, MxcUri, Timestamp, UserId } from "./identifiers.ts";
 
 export interface UserProfile {
 	displayname?: string;

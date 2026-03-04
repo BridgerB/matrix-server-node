@@ -1,10 +1,10 @@
+import { notFound } from "../errors.ts";
+import { getMembership } from "../events.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { RoomId } from "../types/index.ts";
 import type { SpaceHierarchyRoom } from "../types/directory.ts";
 import type { StrippedStateEvent } from "../types/events.ts";
-import { getMembership } from "../events.ts";
-import { notFound } from "../errors.ts";
+import type { RoomId } from "../types/index.ts";
 
 // =============================================================================
 // GET /_matrix/client/v3/rooms/:roomId/hierarchy
@@ -14,8 +14,8 @@ const MAX_ROOMS = 50;
 
 export function getSpaceHierarchy(storage: Storage): Handler {
 	return async (req) => {
-		const rootRoomId = req.params["roomId"]! as RoomId;
-		const userId = req.userId!;
+		const rootRoomId = req.params.roomId as RoomId;
+		const userId = req.userId as string;
 
 		const limitStr = req.query.get("limit");
 		const limit = Math.min(
@@ -42,7 +42,9 @@ export function getSpaceHierarchy(storage: Storage): Handler {
 		let skipping = from !== undefined;
 
 		while (queue.length > 0 && rooms.length < limit) {
-			const { roomId, depth } = queue.shift()!;
+			const item = queue.shift();
+			if (!item) continue;
+			const { roomId, depth } = item;
 			if (visited.has(roomId)) continue;
 			visited.add(roomId);
 
@@ -53,13 +55,11 @@ export function getSpaceHierarchy(storage: Storage): Handler {
 			const membership = getMembership(room, userId);
 			const historyEvent = room.state_events.get("m.room.history_visibility\0");
 			const historyVis = historyEvent
-				? (historyEvent.content as Record<string, unknown>)[
-						"history_visibility"
-					]
+				? (historyEvent.content as Record<string, unknown>).history_visibility
 				: "shared";
 			const joinRulesEvent = room.state_events.get("m.room.join_rules\0");
 			const joinRule = joinRulesEvent
-				? (joinRulesEvent.content as Record<string, unknown>)["join_rule"]
+				? (joinRulesEvent.content as Record<string, unknown>).join_rule
 				: "invite";
 
 			const canSee =
@@ -77,7 +77,7 @@ export function getSpaceHierarchy(storage: Storage): Handler {
 					const childRoomId = event.state_key as RoomId;
 					const content = event.content as Record<string, unknown>;
 					// Only include children with a "via" key (active children)
-					if (content["via"] && Array.isArray(content["via"])) {
+					if (content.via && Array.isArray(content.via)) {
 						childrenState.push({
 							content: event.content,
 							sender: event.sender,
@@ -117,7 +117,7 @@ export function getSpaceHierarchy(storage: Storage): Handler {
 		// Determine next_batch
 		const nextBatch =
 			queue.length > 0 && rooms.length === limit
-				? rooms[rooms.length - 1]!.room_id
+				? rooms[rooms.length - 1]?.room_id
 				: undefined;
 
 		return {
@@ -148,43 +148,42 @@ function buildHierarchyRoom(
 	let memberCount = 0;
 	for (const [key, event] of room.state_events) {
 		if (key.startsWith("m.room.member\0")) {
-			if ((event.content as Record<string, unknown>)["membership"] === "join") {
+			if ((event.content as Record<string, unknown>).membership === "join") {
 				memberCount++;
 			}
 		}
 	}
 
 	const histVis = histVisEvent
-		? (histVisEvent.content as Record<string, unknown>)["history_visibility"]
+		? (histVisEvent.content as Record<string, unknown>).history_visibility
 		: "shared";
 	const guestAccess = guestEvent
-		? (guestEvent.content as Record<string, unknown>)["guest_access"]
+		? (guestEvent.content as Record<string, unknown>).guest_access
 		: "forbidden";
 
 	return {
 		room_id: roomId,
 		name: nameEvent
-			? ((nameEvent.content as Record<string, unknown>)["name"] as string)
+			? ((nameEvent.content as Record<string, unknown>).name as string)
 			: undefined,
 		topic: topicEvent
-			? ((topicEvent.content as Record<string, unknown>)["topic"] as string)
+			? ((topicEvent.content as Record<string, unknown>).topic as string)
 			: undefined,
 		avatar_url: avatarEvent
-			? ((avatarEvent.content as Record<string, unknown>)["url"] as string)
+			? ((avatarEvent.content as Record<string, unknown>).url as string)
 			: undefined,
 		canonical_alias: aliasEvent
-			? ((aliasEvent.content as Record<string, unknown>)["alias"] as string)
+			? ((aliasEvent.content as Record<string, unknown>).alias as string)
 			: undefined,
 		num_joined_members: memberCount,
 		world_readable: histVis === "world_readable",
 		guest_can_join: guestAccess === "can_join",
 		join_rule: joinRulesEvent
-			? ((joinRulesEvent.content as Record<string, unknown>)[
-					"join_rule"
-				] as string)
+			? ((joinRulesEvent.content as Record<string, unknown>)
+					.join_rule as string)
 			: undefined,
 		room_type: createEvent
-			? ((createEvent.content as Record<string, unknown>)["type"] as string)
+			? ((createEvent.content as Record<string, unknown>).type as string)
 			: undefined,
 		children_state: childrenState,
 	};

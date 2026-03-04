@@ -1,9 +1,9 @@
+import { badJson, forbidden, notFound } from "../errors.ts";
+import type { PushRuleKind } from "../push-rules.ts";
+import { getOrInitRules, isValidKind, saveRules } from "../push-rules.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { PushRuleset, PushRule, PushAction } from "../types/push.ts";
-import { getOrInitRules, saveRules, isValidKind } from "../push-rules.ts";
-import type { PushRuleKind } from "../push-rules.ts";
-import { badJson, notFound, forbidden } from "../errors.ts";
+import type { PushAction, PushRule, PushRuleset } from "../types/push.ts";
 
 // =============================================================================
 // HELPERS
@@ -23,7 +23,7 @@ function findRule(rules: PushRule[], ruleId: string): PushRule | undefined {
 
 export function getAllPushRules(storage: Storage): Handler {
 	return async (req) => {
-		const userId = req.userId!;
+		const userId = req.userId as string;
 		const rules = await getOrInitRules(storage, userId);
 		return { status: 200, body: { global: rules.global } };
 	};
@@ -35,7 +35,7 @@ export function getAllPushRules(storage: Storage): Handler {
 
 export function getGlobalPushRules(storage: Storage): Handler {
 	return async (req) => {
-		const userId = req.userId!;
+		const userId = req.userId as string;
 		const rules = await getOrInitRules(storage, userId);
 		return { status: 200, body: rules.global };
 	};
@@ -47,8 +47,8 @@ export function getGlobalPushRules(storage: Storage): Handler {
 
 export function getPushRulesByKind(storage: Storage): Handler {
 	return async (req) => {
-		const userId = req.userId!;
-		const kind = req.params["kind"]!;
+		const userId = req.userId as string;
+		const kind = req.params.kind as string;
 		if (!isValidKind(kind)) throw notFound("Unknown rule kind");
 
 		const rules = await getOrInitRules(storage, userId);
@@ -62,9 +62,9 @@ export function getPushRulesByKind(storage: Storage): Handler {
 
 export function getPushRule(storage: Storage): Handler {
 	return async (req) => {
-		const userId = req.userId!;
-		const kind = req.params["kind"]!;
-		const ruleId = req.params["ruleId"]!;
+		const userId = req.userId as string;
+		const kind = req.params.kind as string;
+		const ruleId = req.params.ruleId as string;
 		if (!isValidKind(kind)) throw notFound("Unknown rule kind");
 
 		const rules = await getOrInitRules(storage, userId);
@@ -82,9 +82,9 @@ export function getPushRule(storage: Storage): Handler {
 
 export function putPushRule(storage: Storage): Handler {
 	return async (req) => {
-		const userId = req.userId!;
-		const kind = req.params["kind"]! as PushRuleKind;
-		const ruleId = req.params["ruleId"]!;
+		const userId = req.userId as string;
+		const kind = req.params.kind as PushRuleKind;
+		const ruleId = req.params.ruleId as string;
 		if (!isValidKind(kind)) throw notFound("Unknown rule kind");
 
 		// Cannot create rules with server-default prefix
@@ -162,9 +162,9 @@ export function putPushRule(storage: Storage): Handler {
 
 export function deletePushRule(storage: Storage): Handler {
 	return async (req) => {
-		const userId = req.userId!;
-		const kind = req.params["kind"]! as PushRuleKind;
-		const ruleId = req.params["ruleId"]!;
+		const userId = req.userId as string;
+		const kind = req.params.kind as PushRuleKind;
+		const ruleId = req.params.ruleId as string;
 		if (!isValidKind(kind)) throw notFound("Unknown rule kind");
 
 		const rules = await getOrInitRules(storage, userId);
@@ -172,7 +172,7 @@ export function deletePushRule(storage: Storage): Handler {
 		const idx = kindRules.findIndex((r) => r.rule_id === ruleId);
 		if (idx < 0) throw notFound("Rule not found");
 
-		if (kindRules[idx]!.default) {
+		if (kindRules[idx]?.default) {
 			throw forbidden("Cannot delete default rules");
 		}
 
@@ -189,9 +189,9 @@ export function deletePushRule(storage: Storage): Handler {
 
 export function getPushRuleEnabled(storage: Storage): Handler {
 	return async (req) => {
-		const userId = req.userId!;
-		const kind = req.params["kind"]!;
-		const ruleId = req.params["ruleId"]!;
+		const userId = req.userId as string;
+		const kind = req.params.kind as string;
+		const ruleId = req.params.ruleId as string;
 		if (!isValidKind(kind)) throw notFound("Unknown rule kind");
 
 		const rules = await getOrInitRules(storage, userId);
@@ -208,9 +208,9 @@ export function getPushRuleEnabled(storage: Storage): Handler {
 
 export function putPushRuleEnabled(storage: Storage): Handler {
 	return async (req) => {
-		const userId = req.userId!;
-		const kind = req.params["kind"]!;
-		const ruleId = req.params["ruleId"]!;
+		const userId = req.userId as string;
+		const kind = req.params.kind as string;
+		const ruleId = req.params.ruleId as string;
 		if (!isValidKind(kind)) throw notFound("Unknown rule kind");
 
 		const body = (req.body ?? {}) as { enabled?: boolean };
@@ -234,9 +234,9 @@ export function putPushRuleEnabled(storage: Storage): Handler {
 
 export function getPushRuleActions(storage: Storage): Handler {
 	return async (req) => {
-		const userId = req.userId!;
-		const kind = req.params["kind"]!;
-		const ruleId = req.params["ruleId"]!;
+		const userId = req.userId as string;
+		const kind = req.params.kind as string;
+		const ruleId = req.params.ruleId as string;
 		if (!isValidKind(kind)) throw notFound("Unknown rule kind");
 
 		const rules = await getOrInitRules(storage, userId);
@@ -253,9 +253,9 @@ export function getPushRuleActions(storage: Storage): Handler {
 
 export function putPushRuleActions(storage: Storage): Handler {
 	return async (req) => {
-		const userId = req.userId!;
-		const kind = req.params["kind"]!;
-		const ruleId = req.params["ruleId"]!;
+		const userId = req.userId as string;
+		const kind = req.params.kind as string;
+		const ruleId = req.params.ruleId as string;
 		if (!isValidKind(kind)) throw notFound("Unknown rule kind");
 
 		const body = (req.body ?? {}) as { actions?: PushAction[] };

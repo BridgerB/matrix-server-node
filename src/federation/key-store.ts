@@ -1,8 +1,8 @@
-import type { Storage } from "../storage/interface.ts";
-import type { ServerName, KeyId } from "../types/index.ts";
-import type { ServerKeys } from "../types/federation.ts";
-import type { FederationClient } from "./client.ts";
 import { verifyJsonSignature } from "../signing.ts";
+import type { Storage } from "../storage/interface.ts";
+import type { ServerKeys } from "../types/federation.ts";
+import type { KeyId, ServerName } from "../types/index.ts";
+import type { FederationClient } from "./client.ts";
 
 export class RemoteKeyStore {
 	storage: Storage;
@@ -39,7 +39,8 @@ export class RemoteKeyStore {
 			// Verify self-signature
 			const firstKeyId = Object.keys(keys.verify_keys)[0];
 			if (!firstKeyId) return undefined;
-			const firstKey = keys.verify_keys[firstKeyId as KeyId]!.key;
+			const firstKey = keys.verify_keys[firstKeyId as KeyId]?.key;
+			if (!firstKey) return undefined;
 
 			const valid = verifyJsonSignature(
 				keys as unknown as Record<string, unknown>,

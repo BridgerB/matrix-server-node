@@ -2,8 +2,8 @@
 // ROOM DIRECTORY, USER DIRECTORY & SPACE HIERARCHY
 // =============================================================================
 
-import type { RoomId, UserId, RoomAlias, MxcUri } from "./identifiers.ts";
 import type { StrippedStateEvent } from "./events.ts";
+import type { MxcUri, RoomAlias, RoomId, UserId } from "./identifiers.ts";
 
 export interface PublicRoomsRequest {
 	limit?: number;

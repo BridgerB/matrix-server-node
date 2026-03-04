@@ -2,7 +2,7 @@
 // FILTERS
 // =============================================================================
 
-import type { UserId, RoomId } from "./identifiers.ts";
+import type { RoomId, UserId } from "./identifiers.ts";
 
 export interface SyncFilter {
 	event_fields?: string[];

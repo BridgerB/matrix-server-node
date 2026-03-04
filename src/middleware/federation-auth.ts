@@ -1,9 +1,9 @@
-import type { Middleware } from "../router.ts";
-import type { ServerName, KeyId } from "../types/index.ts";
-import type { RemoteKeyStore } from "../federation/key-store.ts";
-import type { FederationClient } from "../federation/client.ts";
-import { verifyJsonSignature } from "../signing.ts";
 import { forbidden, serverNotTrusted } from "../errors.ts";
+import type { FederationClient } from "../federation/client.ts";
+import type { RemoteKeyStore } from "../federation/key-store.ts";
+import type { Middleware } from "../router.ts";
+import { verifyJsonSignature } from "../signing.ts";
+import type { KeyId, ServerName } from "../types/index.ts";
 
 // =============================================================================
 // X-Matrix Authorization Middleware
@@ -15,7 +15,7 @@ export function requireFederationAuth(
 	federationClient: FederationClient,
 ): Middleware {
 	return async (req, next) => {
-		const authHeader = req.headers["authorization"];
+		const authHeader = req.headers.authorization;
 		if (!authHeader || !authHeader.startsWith("X-Matrix ")) {
 			throw forbidden("Missing X-Matrix authorization");
 		}
@@ -45,7 +45,7 @@ export function requireFederationAuth(
 		// Reconstruct the signed object
 		const signedObj: Record<string, unknown> = {
 			method: req.method,
-			uri: req.path + (req.query.toString() ? "?" + req.query.toString() : ""),
+			uri: req.path + (req.query.toString() ? `?${req.query.toString()}` : ""),
 			origin: params.origin,
 			destination: params.destination,
 		};
@@ -55,11 +55,11 @@ export function requireFederationAuth(
 			typeof req.body === "object" &&
 			Object.keys(req.body as object).length > 0
 		) {
-			signedObj["content"] = req.body;
+			signedObj.content = req.body;
 		}
 
 		// Add the signature for verification
-		signedObj["signatures"] = {
+		signedObj.signatures = {
 			[params.origin]: { [params.key]: params.sig },
 		};
 
@@ -88,24 +88,20 @@ function parseXMatrixAuth(
 
 	// Parse key="value" pairs
 	const regex = /(\w+)="([^"]*?)"/g;
-	let match;
-	while ((match = regex.exec(content)) !== null) {
-		result[match[1]!] = match[2]!;
+	let match: RegExpExecArray | null = regex.exec(content);
+	while (match !== null) {
+		result[match[1] as string] = match[2] as string;
+		match = regex.exec(content);
 	}
 
-	if (
-		!result["origin"] ||
-		!result["destination"] ||
-		!result["key"] ||
-		!result["sig"]
-	) {
+	if (!result.origin || !result.destination || !result.key || !result.sig) {
 		return null;
 	}
 
 	return {
-		origin: result["origin"]!,
-		destination: result["destination"]!,
-		key: result["key"]!,
-		sig: result["sig"]!,
+		origin: result.origin as string,
+		destination: result.destination as string,
+		key: result.key as string,
+		sig: result.sig as string,
 	};
 }

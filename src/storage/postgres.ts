@@ -1,31 +1,33 @@
 import pg from "pg";
-import type {
-	UserId,
-	RoomId,
-	RoomAlias,
-	EventId,
-	DeviceId,
-	AccessToken,
-	RefreshToken,
-	Timestamp,
-	ServerName,
-	KeyId,
-} from "../types/index.ts";
-import type { UserAccount, RoomState, StoredMedia } from "../types/index.ts";
+import { computeEventId } from "../events.ts";
+import type { DeviceKeys, OneTimeKey } from "../types/e2ee.ts";
+import type { PresenceState } from "../types/ephemeral.ts";
 import type {
 	PDU,
 	StrippedStateEvent,
 	ToDeviceEvent,
 } from "../types/events.ts";
-import type { UserProfile, Device } from "../types/user.ts";
-import type { JsonObject } from "../types/json.ts";
-import type { PresenceState } from "../types/ephemeral.ts";
-import type { DeviceKeys, OneTimeKey } from "../types/e2ee.ts";
-import type { Pusher } from "../types/push.ts";
 import type { ServerKeys } from "../types/federation.ts";
+import type {
+	AccessToken,
+	DeviceId,
+	EventId,
+	KeyId,
+	RefreshToken,
+	RoomAlias,
+	RoomId,
+	RoomState,
+	ServerName,
+	StoredMedia,
+	Timestamp,
+	UserAccount,
+	UserId,
+} from "../types/index.ts";
+import type { JsonObject } from "../types/json.ts";
+import type { Pusher } from "../types/push.ts";
 import type { RoomVersion } from "../types/room-versions.ts";
+import type { Device, UserProfile } from "../types/user.ts";
 import type { Storage, StoredSession } from "./interface.ts";
-import { computeEventId } from "../events.ts";
 
 export class PostgresStorage implements Storage {
 	private pool: pg.Pool;
@@ -680,7 +682,7 @@ export class PostgresStorage implements Storage {
 
 		const cached = this.roomCache.get(roomId);
 		if (cached) {
-			const key = event.type + "\0" + (event.state_key ?? "");
+			const key = `${event.type}\0${event.state_key ?? ""}`;
 			cached.state_events.set(key, event);
 		}
 
@@ -1109,7 +1111,7 @@ export class PostgresStorage implements Storage {
 		if (typing) {
 			const ms = Math.min(timeout ?? 30000, 120000);
 			const timer = setTimeout(() => {
-				roomTyping!.delete(userId);
+				roomTyping?.delete(userId);
 				this.wakeWaiters();
 			}, ms);
 			roomTyping.set(userId, timer);
@@ -1175,9 +1177,7 @@ export class PostgresStorage implements Storage {
 		this.wakeWaiters();
 	}
 
-	async getPresence(
-		userId: UserId,
-	): Promise<
+	async getPresence(userId: UserId): Promise<
 		| {
 				presence: PresenceState;
 				status_msg?: string;
@@ -1314,7 +1314,7 @@ export class PostgresStorage implements Storage {
 		try {
 			await client.query("BEGIN");
 			for (const [keyId, key] of Object.entries(keys)) {
-				const algorithm = keyId.split(":")[0]!;
+				const algorithm = keyId.split(":")[0] as string;
 				await client.query(
 					"INSERT INTO one_time_keys (user_id, device_id, key_id, algorithm, key_json) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (user_id, device_id, key_id) DO UPDATE SET key_json = EXCLUDED.key_json",
 					[userId, deviceId, keyId, algorithm, JSON.stringify(key)],
@@ -1406,7 +1406,7 @@ export class PostgresStorage implements Storage {
 			[userId, deviceId],
 		);
 		const types = new Set<string>();
-		for (const r of rows) types.add(r.key_id.split(":")[0]!);
+		for (const r of rows) types.add(r.key_id.split(":")[0] as string);
 		return [...types];
 	}
 
@@ -1850,7 +1850,7 @@ export class PostgresStorage implements Storage {
 
 		const nextBatch =
 			results.length === limit && results.length > 0
-				? String(results[results.length - 1]!.streamPos)
+				? String(results[results.length - 1]?.streamPos)
 				: undefined;
 		return { events: results, nextBatch };
 	}
@@ -1903,7 +1903,7 @@ export class PostgresStorage implements Storage {
 		const queue = [...eventIds];
 
 		while (queue.length > 0) {
-			const id = queue.shift()!;
+			const id = queue.shift() as EventId;
 			if (visited.has(id)) continue;
 			visited.add(id);
 			const { rows } = await this.pool.query(

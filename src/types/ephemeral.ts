@@ -2,7 +2,7 @@
 // EVENT CONTENT TYPES - EPHEMERAL
 // =============================================================================
 
-import type { UserId, Timestamp } from "./identifiers.ts";
+import type { Timestamp, UserId } from "./identifiers.ts";
 
 export interface TypingContent {
 	user_ids: UserId[];

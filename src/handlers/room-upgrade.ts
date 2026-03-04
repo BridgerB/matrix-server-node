@@ -1,20 +1,20 @@
-import type { Handler } from "../router.ts";
-import type { Storage } from "../storage/interface.ts";
-import type { JsonObject } from "../types/json.ts";
-import type { RoomState } from "../types/internal.ts";
-import type { RoomPowerLevelsContent } from "../types/state-events.ts";
-import type { RoomId, EventId } from "../types/index.ts";
-import type { RoomVersion } from "../types/room-versions.ts";
 import { generateRoomId } from "../crypto.ts";
+import { badJson, forbidden, notJoined, roomNotFound } from "../errors.ts";
 import {
 	buildEvent,
-	selectAuthEvents,
 	checkEventAuth,
+	computeEventId,
 	getMembership,
 	getUserPowerLevel,
-	computeEventId,
+	selectAuthEvents,
 } from "../events.ts";
-import { forbidden, roomNotFound, notJoined, badJson } from "../errors.ts";
+import type { Handler } from "../router.ts";
+import type { Storage } from "../storage/interface.ts";
+import type { EventId, RoomId } from "../types/index.ts";
+import type { RoomState } from "../types/internal.ts";
+import type { JsonObject } from "../types/json.ts";
+import type { RoomVersion } from "../types/room-versions.ts";
+import type { RoomPowerLevelsContent } from "../types/state-events.ts";
 
 // State types to copy from old room to new room
 const STATE_TO_COPY = [
@@ -75,8 +75,8 @@ async function sendStateEvent(
 
 export function postRoomUpgrade(storage: Storage, serverName: string): Handler {
 	return async (req) => {
-		const oldRoomId = req.params["roomId"]! as RoomId;
-		const userId = req.userId!;
+		const oldRoomId = req.params.roomId as RoomId;
+		const userId = req.userId as string;
 		const body = (req.body ?? {}) as { new_version?: string };
 
 		if (!body.new_version) throw badJson("Missing new_version");
@@ -153,7 +153,7 @@ export function postRoomUpgrade(storage: Storage, serverName: string): Handler {
 
 		// 3. Copy state from old room
 		for (const stateType of STATE_TO_COPY) {
-			const oldEvent = oldRoom.state_events.get(stateType + "\0");
+			const oldEvent = oldRoom.state_events.get(`${stateType}\0`);
 			if (!oldEvent) continue;
 
 			await sendStateEvent(

@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
-import type { EventId, RoomId, UserId, ServerName } from "./types/index.ts";
-import type { PDU, ClientEvent, UnsignedData } from "./types/events.ts";
+import { forbidden } from "./errors.ts";
+import type { SigningKey } from "./signing.ts";
+import { signEvent } from "./signing.ts";
+import type { ClientEvent, PDU, UnsignedData } from "./types/events.ts";
+import type { EventId, RoomId, ServerName, UserId } from "./types/index.ts";
 import type { RoomState } from "./types/internal.ts";
 import type { JsonObject } from "./types/json.ts";
 import type { RoomPowerLevelsContent } from "./types/state-events.ts";
-import type { SigningKey } from "./signing.ts";
-import { signEvent } from "./signing.ts";
-import { forbidden } from "./errors.ts";
 
 // =============================================================================
 // CANONICAL JSON
@@ -18,7 +18,7 @@ export function canonicalJson(val: unknown): string {
 	if (typeof val === "number") return JSON.stringify(val);
 	if (typeof val === "string") return JSON.stringify(val);
 	if (Array.isArray(val)) {
-		return "[" + val.map((v) => canonicalJson(v)).join(",") + "]";
+		return `[${val.map((v) => canonicalJson(v)).join(",")}]`;
 	}
 	if (typeof val === "object") {
 		const keys = Object.keys(val as Record<string, unknown>).sort();
@@ -28,7 +28,7 @@ export function canonicalJson(val: unknown): string {
 				":" +
 				canonicalJson((val as Record<string, unknown>)[k]),
 		);
-		return "{" + entries.join(",") + "}";
+		return `{${entries.join(",")}}`;
 	}
 	return JSON.stringify(val);
 }
@@ -93,12 +93,12 @@ export function redactEvent(event: PDU): PDU {
 		const filteredContent: JsonObject = {};
 		for (const k of allowedKeys) {
 			if (k in event.content) {
-				filteredContent[k] = event.content[k]!;
+				filteredContent[k] = event.content[k] as JsonObject[string];
 			}
 		}
-		redacted["content"] = filteredContent;
+		redacted.content = filteredContent;
 	} else {
-		redacted["content"] = {};
+		redacted.content = {};
 	}
 
 	return redacted as unknown as PDU;
@@ -110,10 +110,10 @@ export function redactEvent(event: PDU): PDU {
 
 export function computeContentHash(event: PDU): string {
 	const copy: Record<string, unknown> = { ...event };
-	delete copy["unsigned"];
-	delete copy["signatures"];
-	delete copy["hashes"];
-	delete copy["event_id"];
+	delete copy.unsigned;
+	delete copy.signatures;
+	delete copy.hashes;
+	delete copy.event_id;
 	const hash = createHash("sha256")
 		.update(canonicalJson(copy))
 		.digest("base64url");
@@ -130,13 +130,13 @@ export function computeEventId(event: PDU): EventId {
 	// Redact, then remove signatures/unsigned
 	const redacted = redactEvent(withHash);
 	const forRef: Record<string, unknown> = { ...redacted };
-	delete forRef["unsigned"];
-	delete forRef["signatures"];
+	delete forRef.unsigned;
+	delete forRef.signatures;
 
 	const hash = createHash("sha256")
 		.update(canonicalJson(forRef))
 		.digest("base64url");
-	return "$" + hash;
+	return `$${hash}`;
 }
 
 // =============================================================================
@@ -204,7 +204,7 @@ function getStateEventId(
 	type: string,
 	stateKey: string,
 ): EventId | undefined {
-	const event = roomState.state_events.get(type + "\0" + stateKey);
+	const event = roomState.state_events.get(`${type}\0${stateKey}`);
 	if (!event) return undefined;
 	return computeEventId(event);
 }
@@ -276,7 +276,8 @@ function getEventPowerLevel(
 	roomState: RoomState,
 ): number {
 	const pl = getPowerLevels(roomState);
-	if (pl.events?.[eventType] !== undefined) return pl.events[eventType]!;
+	if (pl.events?.[eventType] !== undefined)
+		return pl.events[eventType] as number;
 	return isState ? (pl.state_default ?? 50) : (pl.events_default ?? 0);
 }
 
@@ -288,9 +289,9 @@ export function getMembership(
 	roomState: RoomState,
 	userId: UserId,
 ): string | undefined {
-	const memberEvent = roomState.state_events.get("m.room.member\0" + userId);
+	const memberEvent = roomState.state_events.get(`m.room.member\0${userId}`);
 	if (!memberEvent) return undefined;
-	return (memberEvent.content as Record<string, unknown>)["membership"] as
+	return (memberEvent.content as Record<string, unknown>).membership as
 		| string
 		| undefined;
 }
@@ -331,10 +332,9 @@ export function checkEventAuth(
 }
 
 function checkMembershipAuth(event: PDU, roomState: RoomState): void {
-	const targetUserId = event.state_key!;
-	const membership = (event.content as Record<string, unknown>)[
-		"membership"
-	] as string;
+	const targetUserId = event.state_key as string;
+	const membership = (event.content as Record<string, unknown>)
+		.membership as string;
 	const senderMembership = getMembership(roomState, event.sender);
 	const targetMembership = getMembership(roomState, targetUserId);
 	const pl = getPowerLevels(roomState);
@@ -364,9 +364,8 @@ function checkMembershipAuth(event: PDU, roomState: RoomState): void {
 			// Check join rules
 			const joinRulesEvent = roomState.state_events.get("m.room.join_rules\0");
 			const joinRule = joinRulesEvent
-				? ((joinRulesEvent.content as Record<string, unknown>)[
-						"join_rule"
-					] as string)
+				? ((joinRulesEvent.content as Record<string, unknown>)
+						.join_rule as string)
 				: "invite";
 
 			if (joinRule === "public") return;

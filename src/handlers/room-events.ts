@@ -1,24 +1,24 @@
+import {
+	badJson,
+	forbidden,
+	notFound,
+	notJoined,
+	roomNotFound,
+} from "../errors.ts";
+import {
+	buildEvent,
+	checkEventAuth,
+	getMembership,
+	getPowerLevels,
+	getUserPowerLevel,
+	pduToClientEvent,
+	redactEvent,
+	selectAuthEvents,
+} from "../events.ts";
+import { bundleAggregations, indexRelation } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { JsonObject } from "../types/json.ts";
-import {
-	buildEvent,
-	selectAuthEvents,
-	checkEventAuth,
-	pduToClientEvent,
-	getMembership,
-	getUserPowerLevel,
-	getPowerLevels,
-	redactEvent,
-} from "../events.ts";
-import {
-	forbidden,
-	notFound,
-	roomNotFound,
-	notJoined,
-	badJson,
-} from "../errors.ts";
-import { indexRelation, bundleAggregations } from "../relations.ts";
 
 // =============================================================================
 // HELPERS
@@ -34,11 +34,11 @@ function requireJoined(roomMembership: string | undefined): void {
 
 export function putSendEvent(storage: Storage, serverName: string): Handler {
 	return async (req) => {
-		const roomId = req.params["roomId"]!;
-		const eventType = req.params["eventType"]!;
-		const txnId = req.params["txnId"]!;
-		const userId = req.userId!;
-		const deviceId = req.deviceId!;
+		const roomId = req.params.roomId as string;
+		const eventType = req.params.eventType as string;
+		const txnId = req.params.txnId as string;
+		const userId = req.userId as string;
+		const deviceId = req.deviceId as string;
 
 		// Idempotency check
 		const existing = await storage.getTxnEventId(userId, deviceId, txnId);
@@ -78,10 +78,10 @@ export function putSendEvent(storage: Storage, serverName: string): Handler {
 
 export function putStateEvent(storage: Storage, serverName: string): Handler {
 	return async (req) => {
-		const roomId = req.params["roomId"]!;
-		const eventType = req.params["eventType"]!;
-		const stateKey = req.params["stateKey"] ?? "";
-		const userId = req.userId!;
+		const roomId = req.params.roomId as string;
+		const eventType = req.params.eventType as string;
+		const stateKey = req.params.stateKey ?? "";
+		const userId = req.userId as string;
 
 		const room = await storage.getRoom(roomId);
 		if (!room) throw roomNotFound();
@@ -116,10 +116,10 @@ export function putStateEvent(storage: Storage, serverName: string): Handler {
 
 export function getAllState(storage: Storage): Handler {
 	return async (req) => {
-		const roomId = req.params["roomId"]!;
+		const roomId = req.params.roomId as string;
 		const room = await storage.getRoom(roomId);
 		if (!room) throw roomNotFound();
-		requireJoined(getMembership(room, req.userId!));
+		requireJoined(getMembership(room, req.userId as string));
 
 		const stateEntries = await storage.getAllState(roomId);
 		const events = stateEntries.map((e) =>
@@ -135,13 +135,13 @@ export function getAllState(storage: Storage): Handler {
 
 export function getStateEvent(storage: Storage): Handler {
 	return async (req) => {
-		const roomId = req.params["roomId"]!;
-		const eventType = req.params["eventType"]!;
-		const stateKey = req.params["stateKey"] ?? "";
+		const roomId = req.params.roomId as string;
+		const eventType = req.params.eventType as string;
+		const stateKey = req.params.stateKey ?? "";
 
 		const room = await storage.getRoom(roomId);
 		if (!room) throw roomNotFound();
-		requireJoined(getMembership(room, req.userId!));
+		requireJoined(getMembership(room, req.userId as string));
 
 		const entry = await storage.getStateEvent(roomId, eventType, stateKey);
 		if (!entry) throw notFound("State event not found");
@@ -156,10 +156,10 @@ export function getStateEvent(storage: Storage): Handler {
 
 export function getMessages(storage: Storage): Handler {
 	return async (req) => {
-		const roomId = req.params["roomId"]!;
+		const roomId = req.params.roomId as string;
 		const room = await storage.getRoom(roomId);
 		if (!room) throw roomNotFound();
-		requireJoined(getMembership(room, req.userId!));
+		requireJoined(getMembership(room, req.userId as string));
 
 		const dir = (req.query.get("dir") ?? "f") as "b" | "f";
 		if (dir !== "b" && dir !== "f") throw badJson("dir must be 'b' or 'f'");
@@ -173,7 +173,7 @@ export function getMessages(storage: Storage): Handler {
 		const chunk = result.events.map((e) =>
 			pduToClientEvent(e.event, e.eventId),
 		);
-		await bundleAggregations(storage, chunk, req.userId!);
+		await bundleAggregations(storage, chunk, req.userId as string);
 
 		return {
 			status: 200,
@@ -192,10 +192,10 @@ export function getMessages(storage: Storage): Handler {
 
 export function getMembers(storage: Storage): Handler {
 	return async (req) => {
-		const roomId = req.params["roomId"]!;
+		const roomId = req.params.roomId as string;
 		const room = await storage.getRoom(roomId);
 		if (!room) throw roomNotFound();
-		requireJoined(getMembership(room, req.userId!));
+		requireJoined(getMembership(room, req.userId as string));
 
 		const membershipFilter = req.query.get("membership");
 		const notMembershipFilter = req.query.get("not_membership");
@@ -204,13 +204,13 @@ export function getMembers(storage: Storage): Handler {
 
 		if (membershipFilter) {
 			entries = entries.filter((e) => {
-				const m = (e.event.content as Record<string, unknown>)["membership"];
+				const m = (e.event.content as Record<string, unknown>).membership;
 				return m === membershipFilter;
 			});
 		}
 		if (notMembershipFilter) {
 			entries = entries.filter((e) => {
-				const m = (e.event.content as Record<string, unknown>)["membership"];
+				const m = (e.event.content as Record<string, unknown>).membership;
 				return m !== notMembershipFilter;
 			});
 		}
@@ -226,19 +226,19 @@ export function getMembers(storage: Storage): Handler {
 
 export function getEvent(storage: Storage): Handler {
 	return async (req) => {
-		const roomId = req.params["roomId"]!;
-		const eventId = req.params["eventId"]!;
+		const roomId = req.params.roomId as string;
+		const eventId = req.params.eventId as string;
 
 		const room = await storage.getRoom(roomId);
 		if (!room) throw roomNotFound();
-		requireJoined(getMembership(room, req.userId!));
+		requireJoined(getMembership(room, req.userId as string));
 
 		const entry = await storage.getEvent(eventId);
 		if (!entry || entry.event.room_id !== roomId)
 			throw notFound("Event not found");
 
 		const clientEvent = pduToClientEvent(entry.event, entry.eventId);
-		await bundleAggregations(storage, [clientEvent], req.userId!);
+		await bundleAggregations(storage, [clientEvent], req.userId as string);
 		return { status: 200, body: clientEvent };
 	};
 }
@@ -249,11 +249,11 @@ export function getEvent(storage: Storage): Handler {
 
 export function postRedact(storage: Storage, serverName: string): Handler {
 	return async (req) => {
-		const roomId = req.params["roomId"]!;
-		const targetEventId = req.params["eventId"]!;
-		const txnId = req.params["txnId"]!;
-		const userId = req.userId!;
-		const deviceId = req.deviceId!;
+		const roomId = req.params.roomId as string;
+		const targetEventId = req.params.eventId as string;
+		const txnId = req.params.txnId as string;
+		const userId = req.userId as string;
+		const deviceId = req.deviceId as string;
 
 		// Idempotency check
 		const existing = await storage.getTxnEventId(userId, deviceId, txnId);
@@ -279,7 +279,7 @@ export function postRedact(storage: Storage, serverName: string): Handler {
 
 		const body = (req.body ?? {}) as { reason?: string };
 		const content: JsonObject = {};
-		if (body.reason) content["reason"] = body.reason;
+		if (body.reason) content.reason = body.reason;
 
 		const authEvents = selectAuthEvents(
 			"m.room.redaction",
@@ -325,9 +325,9 @@ export function postRedact(storage: Storage, serverName: string): Handler {
 
 export function getContext(storage: Storage): Handler {
 	return async (req) => {
-		const roomId = req.params["roomId"]!;
-		const eventId = req.params["eventId"]!;
-		const userId = req.userId!;
+		const roomId = req.params.roomId as string;
+		const eventId = req.params.eventId as string;
+		const userId = req.userId as string;
 
 		const room = await storage.getRoom(roomId);
 		if (!room) throw roomNotFound();

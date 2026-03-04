@@ -1,152 +1,151 @@
-import type { Router } from "./router.ts";
-import type { Storage } from "./storage/interface.ts";
-import { requireAuth } from "./middleware/auth.ts";
-import {
-	versionsHandler,
-	wellKnownServerHandler,
-	wellKnownClientHandler,
-	getCapabilities,
-} from "./handlers/discovery.ts";
-import { getLoginFlows, postLogin } from "./handlers/login.ts";
-import { postRegister } from "./handlers/register.ts";
-import { postLogout, postLogoutAll } from "./handlers/logout.ts";
+import { FederationClient } from "./federation/client.ts";
+import { RemoteKeyStore } from "./federation/key-store.ts";
 import {
 	getWhoAmI,
 	postChangePassword,
 	postDeactivate,
 } from "./handlers/account.ts";
-import { postRefresh } from "./handlers/refresh.ts";
 import {
-	postCreateRoom,
-	getJoinedRooms,
-	postJoin,
-	postLeave,
-	postInvite,
-	postKick,
-	postBan,
-	postUnban,
-} from "./handlers/rooms.ts";
+	deleteTag,
+	getGlobalAccountData,
+	getRoomAccountData,
+	getTags,
+	putGlobalAccountData,
+	putRoomAccountData,
+	putTag,
+} from "./handlers/account-data.ts";
 import {
-	putSendEvent,
-	putStateEvent,
-	getAllState,
-	getStateEvent,
-	getMessages,
-	getMembers,
-	getEvent,
-	postRedact,
-	getContext,
-} from "./handlers/room-events.ts";
-import { postCreateFilter, getFilterById } from "./handlers/filters.ts";
-import { getSync } from "./handlers/sync.ts";
-import {
-	getProfile,
-	getDisplayName,
-	getAvatarUrl,
-	putDisplayName,
-	putAvatarUrl,
-} from "./handlers/profile.ts";
-import {
-	getDevices,
-	getDevice,
-	putDevice,
 	deleteDevice,
 	deleteDevices,
+	getDevice,
+	getDevices,
+	putDevice,
 } from "./handlers/devices.ts";
 import {
-	getDirectoryRoom,
-	putDirectoryRoom,
 	deleteDirectoryRoom,
 	getDirectoryListRoom,
-	putDirectoryListRoom,
+	getDirectoryRoom,
 	getPublicRooms,
 	postPublicRooms,
+	putDirectoryListRoom,
+	putDirectoryRoom,
 } from "./handlers/directory.ts";
 import {
-	getGlobalAccountData,
-	putGlobalAccountData,
-	getRoomAccountData,
-	putRoomAccountData,
-	getTags,
-	putTag,
-	deleteTag,
-} from "./handlers/account-data.ts";
-import { putTyping } from "./handlers/typing.ts";
-import { postReceipt } from "./handlers/receipts.ts";
-import { getPresence, putPresence } from "./handlers/presence.ts";
+	getCapabilities,
+	versionsHandler,
+	wellKnownClientHandler,
+	wellKnownServerHandler,
+} from "./handlers/discovery.ts";
 import {
-	postUpload,
-	getDownload,
-	getThumbnail,
-	getConfig,
-} from "./handlers/media.ts";
-import {
-	postKeysUpload,
-	postKeysQuery,
-	postKeysClaim,
-	putSendToDevice,
 	getKeysChanges,
+	postKeysClaim,
+	postKeysQuery,
+	postKeysUpload,
+	putSendToDevice,
 } from "./handlers/e2ee.ts";
 import {
+	postFederationKeysClaim,
+	postFederationKeysQuery,
+	postFederationUserDevices,
+} from "./handlers/federation/devices.ts";
+import {
+	getFederationEvent,
+	getFederationEventAuth,
+	getFederationRoomState,
+	getFederationRoomStateIds,
+	postFederationBackfill,
+	postFederationMissingEvents,
+} from "./handlers/federation/events.ts";
+import { getServerKeys } from "./handlers/federation/keys.ts";
+import {
+	getMakeJoin,
+	getMakeLeave,
+	putFederationInvite,
+	putSendJoin,
+	putSendLeave,
+} from "./handlers/federation/membership.ts";
+import {
+	getFederationPublicRooms,
+	getQueryDirectory,
+	getQueryProfile,
+} from "./handlers/federation/query.ts";
+import { putFederationSend } from "./handlers/federation/transactions.ts";
+import { getFilterById, postCreateFilter } from "./handlers/filters.ts";
+import { getLoginFlows, postLogin } from "./handlers/login.ts";
+import { postLogout, postLogoutAll } from "./handlers/logout.ts";
+import {
+	getConfig,
+	getDownload,
+	getThumbnail,
+	postUpload,
+} from "./handlers/media.ts";
+import { getNotifications } from "./handlers/notifications.ts";
+import { postOpenIdToken } from "./handlers/openid.ts";
+import { getPresence, putPresence } from "./handlers/presence.ts";
+import {
+	getAvatarUrl,
+	getDisplayName,
+	getProfile,
+	putAvatarUrl,
+	putDisplayName,
+} from "./handlers/profile.ts";
+import {
+	deletePushRule,
 	getAllPushRules,
 	getGlobalPushRules,
-	getPushRulesByKind,
 	getPushRule,
-	putPushRule,
-	deletePushRule,
-	getPushRuleEnabled,
-	putPushRuleEnabled,
 	getPushRuleActions,
+	getPushRuleEnabled,
+	getPushRulesByKind,
+	putPushRule,
 	putPushRuleActions,
+	putPushRuleEnabled,
 } from "./handlers/push-rules.ts";
 import { getPushers, postPushersSet } from "./handlers/pushers.ts";
+import { postReceipt } from "./handlers/receipts.ts";
+import { postRefresh } from "./handlers/refresh.ts";
+import { postRegister } from "./handlers/register.ts";
 import { getRelations } from "./handlers/relations.ts";
-import { getTurnServer } from "./handlers/voip.ts";
 import { postReportEvent } from "./handlers/report.ts";
-import { postOpenIdToken } from "./handlers/openid.ts";
+import {
+	getAllState,
+	getContext,
+	getEvent,
+	getMembers,
+	getMessages,
+	getStateEvent,
+	postRedact,
+	putSendEvent,
+	putStateEvent,
+} from "./handlers/room-events.ts";
+import { postRoomUpgrade } from "./handlers/room-upgrade.ts";
+import {
+	getJoinedRooms,
+	postBan,
+	postCreateRoom,
+	postInvite,
+	postJoin,
+	postKick,
+	postLeave,
+	postUnban,
+} from "./handlers/rooms.ts";
+import { postSearch } from "./handlers/search.ts";
+import { getSpaceHierarchy } from "./handlers/spaces.ts";
+import { getSync } from "./handlers/sync.ts";
+import { getThreads } from "./handlers/threads.ts";
 import {
 	getThreePids,
 	postAddThreePid,
 	postDeleteThreePid,
 } from "./handlers/threepid.ts";
+import { putTyping } from "./handlers/typing.ts";
 import { postUserDirectorySearch } from "./handlers/user-directory.ts";
-import { getThreads } from "./handlers/threads.ts";
-import { getNotifications } from "./handlers/notifications.ts";
-import { postSearch } from "./handlers/search.ts";
-import { getSpaceHierarchy } from "./handlers/spaces.ts";
-import { postRoomUpgrade } from "./handlers/room-upgrade.ts";
-
-import type { SigningKey } from "./signing.ts";
-import { getServerKeys } from "./handlers/federation/keys.ts";
-import {
-	getQueryProfile,
-	getQueryDirectory,
-	getFederationPublicRooms,
-} from "./handlers/federation/query.ts";
-import {
-	getFederationEvent,
-	getFederationRoomState,
-	getFederationRoomStateIds,
-	getFederationEventAuth,
-	postFederationBackfill,
-	postFederationMissingEvents,
-} from "./handlers/federation/events.ts";
-import {
-	postFederationUserDevices,
-	postFederationKeysQuery,
-	postFederationKeysClaim,
-} from "./handlers/federation/devices.ts";
-import { putFederationSend } from "./handlers/federation/transactions.ts";
-import {
-	getMakeJoin,
-	putSendJoin,
-	getMakeLeave,
-	putSendLeave,
-	putFederationInvite,
-} from "./handlers/federation/membership.ts";
+import { getTurnServer } from "./handlers/voip.ts";
+import { requireAuth } from "./middleware/auth.ts";
 import { requireFederationAuth } from "./middleware/federation-auth.ts";
-import { FederationClient } from "./federation/client.ts";
-import { RemoteKeyStore } from "./federation/key-store.ts";
+import type { Router } from "./router.ts";
+import type { SigningKey } from "./signing.ts";
+import type { Storage } from "./storage/interface.ts";
 import type { ServerName } from "./types/index.ts";
 
 export function registerRoutes(

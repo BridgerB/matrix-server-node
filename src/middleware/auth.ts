@@ -1,9 +1,9 @@
+import { missingToken, unknownToken } from "../errors.ts";
 import type { Middleware, RouterRequest } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import { missingToken, unknownToken } from "../errors.ts";
 
 export function extractAccessToken(req: RouterRequest): string {
-	const authHeader = req.headers["authorization"] ?? "";
+	const authHeader = req.headers.authorization ?? "";
 	const queryToken = req.query.get("access_token") ?? "";
 
 	if (authHeader && queryToken) {

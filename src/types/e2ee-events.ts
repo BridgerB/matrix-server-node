@@ -2,7 +2,7 @@
 // EVENT CONTENT TYPES - E2EE / KEYS
 // =============================================================================
 
-import type { RoomId, DeviceId } from "./identifiers.ts";
+import type { DeviceId, RoomId } from "./identifiers.ts";
 
 export interface RoomKeyContent {
 	algorithm: "m.megolm.v1.aes-sha2";

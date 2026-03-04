@@ -3,12 +3,12 @@
 // =============================================================================
 
 import type {
-	UserId,
+	Base64,
 	DeviceId,
 	KeyId,
-	Base64,
-	ServerName,
 	RoomId,
+	ServerName,
+	UserId,
 } from "./identifiers.ts";
 import type { JsonObject } from "./json.ts";
 

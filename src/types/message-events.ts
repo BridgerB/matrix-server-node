@@ -2,13 +2,13 @@
 // EVENT CONTENT TYPES - MESSAGES
 // =============================================================================
 
-import type { EventId, MxcUri, DeviceId } from "./identifiers.ts";
+import type { DeviceId, EventId, MxcUri } from "./identifiers.ts";
 import type {
+	AudioInfo,
+	EncryptedFile,
 	FileInfo,
 	ImageInfo,
-	AudioInfo,
 	VideoInfo,
-	EncryptedFile,
 } from "./media-info.ts";
 
 export type MsgType =

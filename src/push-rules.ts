@@ -1,13 +1,13 @@
-import type { UserId } from "./types/identifiers.ts";
+import type { Storage } from "./storage/interface.ts";
 import type { PDU } from "./types/events.ts";
+import type { UserId } from "./types/identifiers.ts";
+import type { JsonObject, JsonValue } from "./types/json.ts";
 import type {
-	PushRulesContent,
-	PushCondition,
 	PushAction,
+	PushCondition,
+	PushRulesContent,
 } from "./types/push.ts";
 import type { RoomPowerLevelsContent } from "./types/state-events.ts";
-import type { JsonValue, JsonObject } from "./types/json.ts";
-import type { Storage } from "./storage/interface.ts";
 
 // =============================================================================
 // TYPES
@@ -430,7 +430,7 @@ function matchMemberCount(actual: number, is: string): boolean {
 	const match = is.match(/^(==|<=|>=|<|>)?(\d+)$/);
 	if (!match) return false;
 	const op = match[1] || "==";
-	const target = parseInt(match[2]!, 10);
+	const target = parseInt(match[2] as string, 10);
 	switch (op) {
 		case "==":
 			return actual === target;

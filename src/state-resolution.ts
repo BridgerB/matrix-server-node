@@ -1,7 +1,7 @@
+import { checkEventAuth, computeEventId, getUserPowerLevel } from "./events.ts";
 import type { PDU } from "./types/events.ts";
 import type { EventId } from "./types/index.ts";
 import type { RoomState } from "./types/internal.ts";
-import { computeEventId, checkEventAuth, getUserPowerLevel } from "./events.ts";
 
 // =============================================================================
 // STATE RESOLUTION v2 (Room Versions 2+)
@@ -28,7 +28,8 @@ export function resolveState(
 	roomState: RoomState,
 ): Map<string, PDU> {
 	if (stateAtForks.length === 0) return new Map();
-	if (stateAtForks.length === 1) return new Map(stateAtForks[0]!);
+	if (stateAtForks.length === 1)
+		return new Map(stateAtForks[0] as Map<string, PDU>);
 
 	// 1. Find unconflicted and conflicted state
 	const allKeys = new Set<string>();
@@ -56,10 +57,10 @@ export function resolveState(
 		}
 
 		if (events.length === 1) {
-			unconflicted.set(key, events[0]!);
+			unconflicted.set(key, events[0] as PDU);
 		} else if (events.length > 1) {
 			// Partition into power events and other events
-			const eventType = key.split("\0")[0]!;
+			const eventType = key.split("\0")[0] as string;
 			if (POWER_EVENT_TYPES.has(eventType)) {
 				conflictedPower.push(...events);
 			} else {
@@ -78,7 +79,7 @@ export function resolveState(
 	// 3. Iteratively apply power events
 	const resolvedState = new Map(unconflicted);
 	for (const event of sortedPower) {
-		const key = event.type + "\0" + (event.state_key ?? "");
+		const key = `${event.type}\0${event.state_key ?? ""}`;
 		const testState: RoomState = {
 			...roomState,
 			state_events: new Map(resolvedState),
@@ -99,7 +100,7 @@ export function resolveState(
 		roomState,
 	);
 	for (const event of sortedOther) {
-		const key = event.type + "\0" + (event.state_key ?? "");
+		const key = `${event.type}\0${event.state_key ?? ""}`;
 		const testState: RoomState = {
 			...roomState,
 			state_events: new Map(resolvedState),

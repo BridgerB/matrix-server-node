@@ -1,8 +1,8 @@
-import type { Storage } from "./storage/interface.ts";
-import type { PDU, ClientEvent, UnsignedData } from "./types/events.ts";
-import type { UserId, EventId } from "./types/identifiers.ts";
-import type { JsonValue } from "./types/json.ts";
 import { pduToClientEvent } from "./events.ts";
+import type { Storage } from "./storage/interface.ts";
+import type { ClientEvent, PDU, UnsignedData } from "./types/events.ts";
+import type { EventId, UserId } from "./types/identifiers.ts";
+import type { JsonValue } from "./types/json.ts";
 
 // =============================================================================
 // RELATION INDEXING

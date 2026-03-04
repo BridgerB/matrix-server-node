@@ -1,14 +1,14 @@
+import { badJson } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { UserId, DeviceId } from "../types/index.ts";
 import type {
-	KeysUploadRequest,
-	KeysQueryRequest,
-	KeysClaimRequest,
 	DeviceKeys,
+	KeysClaimRequest,
+	KeysQueryRequest,
+	KeysUploadRequest,
 } from "../types/e2ee.ts";
+import type { DeviceId, UserId } from "../types/index.ts";
 import type { JsonObject } from "../types/json.ts";
-import { badJson } from "../errors.ts";
 
 // =============================================================================
 // POST /_matrix/client/v3/keys/upload
@@ -16,8 +16,8 @@ import { badJson } from "../errors.ts";
 
 export function postKeysUpload(storage: Storage): Handler {
 	return async (req) => {
-		const userId = req.userId!;
-		const deviceId = req.deviceId!;
+		const userId = req.userId as UserId;
+		const deviceId = req.deviceId as DeviceId;
 		const body = (req.body ?? {}) as KeysUploadRequest;
 
 		// Store device keys
@@ -116,15 +116,19 @@ export function postKeysClaim(storage: Storage): Handler {
 					if (!oneTimeKeys[targetUserId as UserId]) {
 						oneTimeKeys[targetUserId as UserId] = {};
 					}
-					if (
-						!oneTimeKeys[targetUserId as UserId]![targetDeviceId as DeviceId]
-					) {
-						oneTimeKeys[targetUserId as UserId]![targetDeviceId as DeviceId] =
-							{};
+					const userKeys = oneTimeKeys[targetUserId as UserId] as Record<
+						DeviceId,
+						Record<string, string | JsonObject>
+					>;
+					if (!userKeys[targetDeviceId as DeviceId]) {
+						userKeys[targetDeviceId as DeviceId] = {};
 					}
-					oneTimeKeys[targetUserId as UserId]![targetDeviceId as DeviceId]![
-						claimed.keyId
-					] = claimed.key as string | JsonObject;
+					(
+						userKeys[targetDeviceId as DeviceId] as Record<
+							string,
+							string | JsonObject
+						>
+					)[claimed.keyId] = claimed.key as string | JsonObject;
 				}
 			}
 		}
@@ -139,8 +143,8 @@ export function postKeysClaim(storage: Storage): Handler {
 
 export function putSendToDevice(storage: Storage): Handler {
 	return async (req) => {
-		const eventType = req.params["eventType"]!;
-		const userId = req.userId!;
+		const eventType = req.params.eventType as string;
+		const userId = req.userId as UserId;
 		const body = (req.body ?? {}) as {
 			messages?: Record<UserId, Record<DeviceId, JsonObject>>;
 		};

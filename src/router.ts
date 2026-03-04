@@ -1,11 +1,11 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type {
-	UserId,
-	DeviceId,
-	AccessToken,
-	ServerName,
-} from "./types/index.ts";
 import { MatrixError } from "./errors.ts";
+import type {
+	AccessToken,
+	DeviceId,
+	ServerName,
+	UserId,
+} from "./types/index.ts";
 
 export interface RouterRequest {
 	raw: IncomingMessage;
@@ -76,8 +76,8 @@ function matchRoute(
 
 	const params: Record<string, string> = {};
 	for (let i = 0; i < routeSegments.length; i++) {
-		const routeSeg = routeSegments[i]!;
-		const pathSeg = pathSegments[i]!;
+		const routeSeg = routeSegments[i] as string;
+		const pathSeg = pathSegments[i] as string;
 
 		if (routeSeg.startsWith(":")) {
 			params[routeSeg.slice(1)] = decodeURIComponent(pathSeg);
@@ -150,7 +150,7 @@ export class Router {
 		}
 
 		// Parse body
-		let body: unknown = undefined;
+		let body: unknown;
 		let rawBody: Buffer | undefined;
 		const isMedia = url.pathname.startsWith("/_matrix/media/");
 
@@ -236,7 +236,7 @@ export class Router {
 	private compose(middleware: Middleware[], handler: Handler): Handler {
 		let current: Handler = handler;
 		for (let i = middleware.length - 1; i >= 0; i--) {
-			const mw = middleware[i]!;
+			const mw = middleware[i] as Middleware;
 			const next = current;
 			current = (req) => mw(req, next);
 		}

@@ -1,8 +1,8 @@
+import { notFound, notJoined, roomNotFound } from "../errors.ts";
+import { getMembership, pduToClientEvent } from "../events.ts";
+import { bundleAggregations } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import { pduToClientEvent, getMembership } from "../events.ts";
-import { notFound, roomNotFound, notJoined } from "../errors.ts";
-import { bundleAggregations } from "../relations.ts";
 
 // =============================================================================
 // GET /rooms/:roomId/relations/:eventId(/:relType(/:eventType))
@@ -10,11 +10,11 @@ import { bundleAggregations } from "../relations.ts";
 
 export function getRelations(storage: Storage): Handler {
 	return async (req) => {
-		const roomId = req.params["roomId"]!;
-		const eventId = req.params["eventId"]!;
-		const relType = req.params["relType"];
-		const eventType = req.params["eventType"];
-		const userId = req.userId!;
+		const roomId = req.params.roomId as string;
+		const eventId = req.params.eventId as string;
+		const relType = req.params.relType;
+		const eventType = req.params.eventType;
+		const userId = req.userId as string;
 
 		const room = await storage.getRoom(roomId);
 		if (!room) throw roomNotFound();

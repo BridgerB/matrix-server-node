@@ -1,24 +1,24 @@
+import {
+	generateDeviceId,
+	generateSessionId,
+	generateToken,
+} from "../crypto.ts";
+import {
+	badJson,
+	forbidden,
+	invalidParam,
+	invalidUsername,
+	userInUse,
+	weakPassword,
+} from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type {
+	AuthType,
+	LoginResponse,
 	RegisterRequest,
 	UIAAResponse,
-	LoginResponse,
-	AuthType,
 } from "../types/index.ts";
-import {
-	badJson,
-	userInUse,
-	invalidUsername,
-	weakPassword,
-	forbidden,
-	invalidParam,
-} from "../errors.ts";
-import {
-	generateToken,
-	generateDeviceId,
-	generateSessionId,
-} from "../crypto.ts";
 
 const REGISTRATION_FLOWS: { stages: AuthType[] }[] = [
 	{ stages: ["m.login.dummy"] },

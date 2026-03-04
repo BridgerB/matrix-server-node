@@ -1,7 +1,7 @@
+import { notFound } from "../../errors.ts";
 import type { Handler } from "../../router.ts";
 import type { Storage } from "../../storage/interface.ts";
-import type { UserId, DeviceId, KeyId } from "../../types/index.ts";
-import { notFound } from "../../errors.ts";
+import type { DeviceId, KeyId, UserId } from "../../types/index.ts";
 
 // =============================================================================
 // POST /_matrix/federation/v1/user/devices/:userId
@@ -9,7 +9,7 @@ import { notFound } from "../../errors.ts";
 
 export function postFederationUserDevices(storage: Storage): Handler {
 	return async (req) => {
-		const userId = req.params["userId"]! as UserId;
+		const userId = req.params.userId as UserId;
 
 		const user = await storage.getUserById(userId);
 		if (!user) throw notFound("User not found");
@@ -65,7 +65,9 @@ export function postFederationKeysQuery(storage: Storage): Handler {
 					// All devices
 					const allKeys = await storage.getAllDeviceKeys(userId as UserId);
 					for (const [deviceId, keys] of Object.entries(allKeys)) {
-						deviceKeys[userId as UserId]![deviceId as DeviceId] = keys;
+						(deviceKeys[userId as UserId] as Record<DeviceId, unknown>)[
+							deviceId as DeviceId
+						] = keys;
 					}
 				} else {
 					for (const deviceId of deviceIds) {
@@ -74,7 +76,9 @@ export function postFederationKeysQuery(storage: Storage): Handler {
 							deviceId,
 						);
 						if (keys) {
-							deviceKeys[userId as UserId]![deviceId] = keys;
+							(deviceKeys[userId as UserId] as Record<DeviceId, unknown>)[
+								deviceId
+							] = keys;
 						}
 					}
 				}
@@ -113,7 +117,12 @@ export function postFederationKeysClaim(storage: Storage): Handler {
 						algorithm,
 					);
 					if (claimed) {
-						oneTimeKeys[userId as UserId]![deviceId as DeviceId] = {
+						(
+							oneTimeKeys[userId as UserId] as Record<
+								DeviceId,
+								Record<KeyId, unknown>
+							>
+						)[deviceId as DeviceId] = {
 							[claimed.keyId]: claimed.key,
 						} as Record<KeyId, unknown>;
 					}

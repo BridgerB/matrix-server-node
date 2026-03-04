@@ -1,8 +1,8 @@
+import { notFound, notJoined, roomNotFound } from "../errors.ts";
+import { getMembership } from "../events.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { RoomId, EventId } from "../types/index.ts";
-import { getMembership } from "../events.ts";
-import { roomNotFound, notJoined, notFound } from "../errors.ts";
+import type { EventId, RoomId } from "../types/index.ts";
 
 // =============================================================================
 // POST /_matrix/client/v3/rooms/:roomId/report/:eventId
@@ -10,9 +10,9 @@ import { roomNotFound, notJoined, notFound } from "../errors.ts";
 
 export function postReportEvent(storage: Storage): Handler {
 	return async (req) => {
-		const roomId = req.params["roomId"]! as RoomId;
-		const eventId = req.params["eventId"]! as EventId;
-		const userId = req.userId!;
+		const roomId = req.params.roomId as RoomId;
+		const eventId = req.params.eventId as EventId;
+		const userId = req.userId as string;
 
 		const room = await storage.getRoom(roomId);
 		if (!room) throw roomNotFound();

@@ -2,7 +2,7 @@
 // PUSH RULES
 // =============================================================================
 
-import type { EventId, RoomId, UserId, RoomAlias } from "./identifiers.ts";
+import type { EventId, RoomAlias, RoomId, UserId } from "./identifiers.ts";
 import type { JsonObject, JsonValue } from "./json.ts";
 
 export interface PushRulesContent {

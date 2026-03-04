@@ -2,12 +2,12 @@
 // ROOM OPERATIONS
 // =============================================================================
 
-import type { UserId, RoomId, MxcUri } from "./identifiers.ts";
-import type { RoomVersion } from "./room-versions.ts";
-import type { JsonObject } from "./json.ts";
 import type { ClientEvent } from "./events.ts";
-import type { RoomPowerLevelsContent } from "./state-events.ts";
 import type { RoomEventFilter } from "./filters.ts";
+import type { MxcUri, RoomId, UserId } from "./identifiers.ts";
+import type { JsonObject } from "./json.ts";
+import type { RoomVersion } from "./room-versions.ts";
+import type { RoomPowerLevelsContent } from "./state-events.ts";
 
 export interface CreateRoomRequest {
 	visibility?: "public" | "private";

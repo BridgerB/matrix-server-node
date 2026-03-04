@@ -1,25 +1,25 @@
-import type { Handler } from "../../router.ts";
-import type { Storage } from "../../storage/interface.ts";
-import type { SigningKey } from "../../signing.ts";
-import type { RemoteKeyStore } from "../../federation/key-store.ts";
+import { forbidden, notFound, unableToAuthoriseJoin } from "../../errors.ts";
+import {
+	checkEventAuth,
+	computeEventId,
+	getMembership,
+	selectAuthEvents,
+} from "../../events.ts";
+import { isServerAllowedByAcl } from "../../federation/acl.ts";
 import type { FederationClient } from "../../federation/client.ts";
+import type { RemoteKeyStore } from "../../federation/key-store.ts";
+import type { Handler } from "../../router.ts";
+import type { SigningKey } from "../../signing.ts";
+import { signEvent, verifyEventSignature } from "../../signing.ts";
+import type { Storage } from "../../storage/interface.ts";
 import type { PDU } from "../../types/events.ts";
 import type {
-	RoomId,
-	UserId,
 	EventId,
-	ServerName,
 	KeyId,
+	RoomId,
+	ServerName,
+	UserId,
 } from "../../types/index.ts";
-import {
-	computeEventId,
-	selectAuthEvents,
-	checkEventAuth,
-	getMembership,
-} from "../../events.ts";
-import { signEvent, verifyEventSignature } from "../../signing.ts";
-import { isServerAllowedByAcl } from "../../federation/acl.ts";
-import { forbidden, notFound, unableToAuthoriseJoin } from "../../errors.ts";
 
 // =============================================================================
 // GET /_matrix/federation/v1/make_join/:roomId/:userId
@@ -27,8 +27,8 @@ import { forbidden, notFound, unableToAuthoriseJoin } from "../../errors.ts";
 
 export function getMakeJoin(storage: Storage, _serverName: string): Handler {
 	return async (req) => {
-		const roomId = req.params["roomId"]! as RoomId;
-		const userId = req.params["userId"]! as UserId;
+		const roomId = req.params.roomId as RoomId;
+		const userId = req.params.userId as UserId;
 
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
@@ -36,23 +36,21 @@ export function getMakeJoin(storage: Storage, _serverName: string): Handler {
 		// Check if federation is allowed
 		const createEvent = room.state_events.get("m.room.create\0");
 		if (createEvent) {
-			const federate = (createEvent.content as Record<string, unknown>)[
-				"federate"
-			];
+			const federate = (createEvent.content as Record<string, unknown>)
+				.federate;
 			if (federate === false) throw forbidden("Room does not federate");
 		}
 
 		// Check ACL
-		if (!isServerAllowedByAcl(req.origin! as ServerName, room)) {
+		if (!isServerAllowedByAcl(req.origin as ServerName, room)) {
 			throw forbidden("Server is denied by ACL");
 		}
 
 		// Check join rules
 		const joinRulesEvent = room.state_events.get("m.room.join_rules\0");
 		const joinRule = joinRulesEvent
-			? ((joinRulesEvent.content as Record<string, unknown>)[
-					"join_rule"
-				] as string)
+			? ((joinRulesEvent.content as Record<string, unknown>)
+					.join_rule as string)
 			: "invite";
 
 		const currentMembership = getMembership(room, userId);
@@ -99,9 +97,9 @@ export function putSendJoin(
 	federationClient: FederationClient,
 ): Handler {
 	return async (req) => {
-		const roomId = req.params["roomId"]! as RoomId;
+		const roomId = req.params.roomId as RoomId;
 		const event = req.body as PDU;
-		const origin = req.origin!;
+		const origin = req.origin as string;
 
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
@@ -170,8 +168,8 @@ export function putSendJoin(
 
 export function getMakeLeave(storage: Storage, _serverName: string): Handler {
 	return async (req) => {
-		const roomId = req.params["roomId"]! as RoomId;
-		const userId = req.params["userId"]! as UserId;
+		const roomId = req.params.roomId as RoomId;
+		const userId = req.params.userId as UserId;
 
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
@@ -217,9 +215,9 @@ export function putSendLeave(
 	federationClient: FederationClient,
 ): Handler {
 	return async (req) => {
-		const roomId = req.params["roomId"]! as RoomId;
+		const roomId = req.params.roomId as RoomId;
 		const event = req.body as PDU;
-		const origin = req.origin!;
+		const origin = req.origin as string;
 
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
@@ -275,10 +273,10 @@ export function putFederationInvite(
 		};
 
 		const event = body.event;
-		const origin = req.origin!;
+		const origin = req.origin as string;
 
 		// Verify the invited user is local
-		const targetUserId = event.state_key!;
+		const targetUserId = event.state_key as string;
 		const targetServer = targetUserId.split(":").slice(1).join(":");
 		if (targetServer !== serverName) {
 			throw forbidden("Invited user is not on this server");

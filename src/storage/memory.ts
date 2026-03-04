@@ -1,30 +1,32 @@
-import type {
-	UserId,
-	RoomId,
-	RoomAlias,
-	EventId,
-	DeviceId,
-	AccessToken,
-	RefreshToken,
-	Timestamp,
-	ServerName,
-	KeyId,
-} from "../types/index.ts";
-import type { UserAccount, RoomState, StoredMedia } from "../types/index.ts";
+import { computeEventId } from "../events.ts";
+import type { DeviceKeys, OneTimeKey } from "../types/e2ee.ts";
+import type { PresenceState } from "../types/ephemeral.ts";
 import type {
 	PDU,
 	StrippedStateEvent,
 	ToDeviceEvent,
 } from "../types/events.ts";
-import type { UserProfile, Device } from "../types/user.ts";
-import type { JsonObject } from "../types/json.ts";
-import type { PresenceState } from "../types/ephemeral.ts";
-import type { DeviceKeys, OneTimeKey } from "../types/e2ee.ts";
-import type { Pusher } from "../types/push.ts";
 import type { ServerKeys } from "../types/federation.ts";
+import type {
+	AccessToken,
+	DeviceId,
+	EventId,
+	KeyId,
+	RefreshToken,
+	RoomAlias,
+	RoomId,
+	RoomState,
+	ServerName,
+	StoredMedia,
+	Timestamp,
+	UserAccount,
+	UserId,
+} from "../types/index.ts";
+import type { JsonObject } from "../types/json.ts";
+import type { Pusher } from "../types/push.ts";
 import type { RoomVersion } from "../types/room-versions.ts";
+import type { Device, UserProfile } from "../types/user.ts";
 import type { Storage, StoredSession } from "./interface.ts";
-import { computeEventId } from "../events.ts";
 
 export class MemoryStorage implements Storage {
 	private users = new Map<string, UserAccount>();
@@ -249,11 +251,10 @@ export class MemoryStorage implements Storage {
 	async getRoomsForUser(userId: UserId): Promise<RoomId[]> {
 		const result: RoomId[] = [];
 		for (const room of this.rooms.values()) {
-			const memberEvent = room.state_events.get("m.room.member\0" + userId);
+			const memberEvent = room.state_events.get(`m.room.member\0${userId}`);
 			if (memberEvent) {
-				const membership = (memberEvent.content as Record<string, unknown>)[
-					"membership"
-				];
+				const membership = (memberEvent.content as Record<string, unknown>)
+					.membership;
 				if (membership === "join") result.push(room.room_id);
 			}
 		}
@@ -301,7 +302,7 @@ export class MemoryStorage implements Storage {
 
 		const sliced = filtered.slice(0, limit);
 		const events = sliced.map((e) => ({
-			event: this.events.get(e.eventId)!,
+			event: this.events.get(e.eventId) as PDU,
 			eventId: e.eventId,
 		}));
 
@@ -323,7 +324,7 @@ export class MemoryStorage implements Storage {
 	): Promise<{ event: PDU; eventId: EventId } | undefined> {
 		const room = this.rooms.get(roomId);
 		if (!room) return undefined;
-		const event = room.state_events.get(eventType + "\0" + stateKey);
+		const event = room.state_events.get(`${eventType}\0${stateKey}`);
 		if (!event) return undefined;
 		return { event, eventId: computeEventId(event) };
 	}
@@ -347,7 +348,7 @@ export class MemoryStorage implements Storage {
 	): Promise<void> {
 		const room = this.rooms.get(roomId);
 		if (!room) return;
-		const key = event.type + "\0" + (event.state_key ?? "");
+		const key = `${event.type}\0${event.state_key ?? ""}`;
 		room.state_events.set(key, event);
 		await this.storeEvent(event, eventId);
 	}
@@ -394,11 +395,10 @@ export class MemoryStorage implements Storage {
 	): Promise<{ roomId: RoomId; membership: string }[]> {
 		const result: { roomId: RoomId; membership: string }[] = [];
 		for (const room of this.rooms.values()) {
-			const memberEvent = room.state_events.get("m.room.member\0" + userId);
+			const memberEvent = room.state_events.get(`m.room.member\0${userId}`);
 			if (memberEvent) {
-				const membership = (memberEvent.content as Record<string, unknown>)[
-					"membership"
-				] as string | undefined;
+				const membership = (memberEvent.content as Record<string, unknown>)
+					.membership as string | undefined;
 				if (membership) result.push({ roomId: room.room_id, membership });
 			}
 		}
@@ -419,7 +419,7 @@ export class MemoryStorage implements Storage {
 		// When limited, take the most recent events (tail)
 		const sliced = limited ? filtered.slice(filtered.length - limit) : filtered;
 		const events = sliced.map((e) => ({
-			event: this.events.get(e.eventId)!,
+			event: this.events.get(e.eventId) as PDU,
 			eventId: e.eventId,
 			streamPos: e.streamPos,
 		}));
@@ -439,7 +439,7 @@ export class MemoryStorage implements Storage {
 		]);
 		const result: StrippedStateEvent[] = [];
 		for (const [key, event] of room.state_events) {
-			const type = key.split("\0")[0]!;
+			const type = key.split("\0")[0] as string;
 			if (INVITE_STATE_TYPES.has(type) || type === "m.room.member") {
 				result.push({
 					content: event.content,
@@ -740,7 +740,7 @@ export class MemoryStorage implements Storage {
 		if (typing) {
 			const ms = Math.min(timeout ?? 30000, 120000);
 			const timer = setTimeout(() => {
-				roomTyping!.delete(userId);
+				roomTyping?.delete(userId);
 				this.wakeWaiters();
 			}, ms);
 			roomTyping.set(userId, timer);
@@ -814,9 +814,7 @@ export class MemoryStorage implements Storage {
 		this.wakeWaiters();
 	}
 
-	async getPresence(
-		userId: UserId,
-	): Promise<
+	async getPresence(userId: UserId): Promise<
 		| {
 				presence: PresenceState;
 				status_msg?: string;
@@ -919,7 +917,7 @@ export class MemoryStorage implements Storage {
 		const otks = this.oneTimeKeysMap.get(mapKey);
 		if (otks) {
 			for (const [keyId, key] of otks) {
-				if (keyId.startsWith(algorithm + ":")) {
+				if (keyId.startsWith(`${algorithm}:`)) {
 					otks.delete(keyId);
 					return { keyId, key };
 				}
@@ -929,7 +927,7 @@ export class MemoryStorage implements Storage {
 		const fallbacks = this.fallbackKeysMap.get(mapKey);
 		if (fallbacks) {
 			for (const [keyId, key] of fallbacks) {
-				if (keyId.startsWith(algorithm + ":")) {
+				if (keyId.startsWith(`${algorithm}:`)) {
 					return { keyId, key }; // Don't delete fallback keys
 				}
 			}
@@ -946,7 +944,7 @@ export class MemoryStorage implements Storage {
 		if (!otks) return {};
 		const counts: Record<string, number> = {};
 		for (const keyId of otks.keys()) {
-			const algorithm = keyId.split(":")[0]!;
+			const algorithm = keyId.split(":")[0] as string;
 			counts[algorithm] = (counts[algorithm] ?? 0) + 1;
 		}
 		return counts;
@@ -976,7 +974,7 @@ export class MemoryStorage implements Storage {
 		if (!fallbacks) return [];
 		const types = new Set<string>();
 		for (const keyId of fallbacks.keys()) {
-			types.add(keyId.split(":")[0]!);
+			types.add(keyId.split(":")[0] as string);
 		}
 		return [...types];
 	}
@@ -1135,7 +1133,7 @@ export class MemoryStorage implements Storage {
 
 		const nextBatch =
 			sliced.length === limit && sliced.length > 0
-				? String(sliced[sliced.length - 1]!.streamPos)
+				? String(sliced[sliced.length - 1]?.streamPos)
 				: undefined;
 
 		return { events, nextBatch };
@@ -1159,7 +1157,11 @@ export class MemoryStorage implements Storage {
 			if (existing) {
 				existing.count++;
 			} else {
-				counts.set(mapKey, { type: ann.eventType, key: ann.key!, count: 1 });
+				counts.set(mapKey, {
+					type: ann.eventType,
+					key: ann.key as string,
+					count: 1,
+				});
 			}
 		}
 		return [...counts.values()];
@@ -1175,7 +1177,7 @@ export class MemoryStorage implements Storage {
 			.sort((a, b) => b.streamPos - a.streamPos);
 
 		if (edits.length === 0) return undefined;
-		const latest = edits[0]!;
+		const latest = edits[0] as (typeof edits)[number];
 		const event = this.events.get(latest.eventId);
 		if (!event) return undefined;
 		return { event, eventId: latest.eventId };
@@ -1199,7 +1201,9 @@ export class MemoryStorage implements Storage {
 
 		if (threadReplies.length === 0) return undefined;
 
-		const latest = threadReplies[threadReplies.length - 1]!;
+		const latest = threadReplies[
+			threadReplies.length - 1
+		] as (typeof threadReplies)[number];
 		const latestEvent = this.events.get(latest.eventId);
 		if (!latestEvent) return undefined;
 
@@ -1382,7 +1386,7 @@ export class MemoryStorage implements Storage {
 
 		const nextBatch =
 			sliced.length === limit && sliced.length > 0
-				? String(sliced[sliced.length - 1]![1])
+				? String(sliced[sliced.length - 1]?.[1])
 				: undefined;
 
 		return { events, nextBatch };
@@ -1426,11 +1430,11 @@ export class MemoryStorage implements Storage {
 			for (const key of keys) {
 				const field =
 					key === "content.body"
-						? content["body"]
+						? content.body
 						: key === "content.name"
-							? content["name"]
+							? content.name
 							: key === "content.topic"
-								? content["topic"]
+								? content.topic
 								: undefined;
 				if (typeof field === "string" && field.toLowerCase().includes(term)) {
 					matched = true;
@@ -1449,7 +1453,7 @@ export class MemoryStorage implements Storage {
 
 		const nextBatch =
 			results.length === limit && results.length > 0
-				? String(results[results.length - 1]!.streamPos)
+				? String(results[results.length - 1]?.streamPos)
 				: undefined;
 
 		return { events: results, nextBatch };
@@ -1484,7 +1488,7 @@ export class MemoryStorage implements Storage {
 		const queue = [...eventIds];
 
 		while (queue.length > 0) {
-			const id = queue.shift()!;
+			const id = queue.shift() as EventId;
 			if (visited.has(id)) continue;
 			visited.add(id);
 
@@ -1509,10 +1513,8 @@ export class MemoryStorage implements Storage {
 		const servers = new Set<ServerName>();
 		for (const [key, event] of room.state_events) {
 			if (key.startsWith("m.room.member\0")) {
-				if (
-					(event.content as Record<string, unknown>)["membership"] === "join"
-				) {
-					const userId = event.state_key!;
+				if ((event.content as Record<string, unknown>).membership === "join") {
+					const userId = event.state_key as string;
 					const serverName = userId.split(":").slice(1).join(":") as ServerName;
 					servers.add(serverName);
 				}
@@ -1565,7 +1567,7 @@ export class MemoryStorage implements Storage {
 			const eventId = computeEventId(event);
 			this.events.set(eventId, event);
 
-			const key = event.type + "\0" + (event.state_key ?? "");
+			const key = `${event.type}\0${event.state_key ?? ""}`;
 			stateMap.set(key, event);
 
 			// Track timeline

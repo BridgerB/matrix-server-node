@@ -1,6 +1,6 @@
+import { badJson } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import { badJson } from "../errors.ts";
 
 // =============================================================================
 // POST /_matrix/client/v3/user_directory/search

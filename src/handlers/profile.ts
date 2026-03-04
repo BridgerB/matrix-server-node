@@ -1,16 +1,16 @@
+import { badJson, forbidden, notFound } from "../errors.ts";
+import { buildEvent, checkEventAuth, selectAuthEvents } from "../events.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { UserId } from "../types/index.ts";
 import type { JsonObject } from "../types/json.ts";
-import { notFound, forbidden, badJson } from "../errors.ts";
-import { buildEvent, selectAuthEvents, checkEventAuth } from "../events.ts";
 
 const MAX_DISPLAYNAME_BYTES = 256;
 const MAX_AVATAR_URL_BYTES = 1000;
 
 export function getProfile(storage: Storage): Handler {
 	return async (req) => {
-		const userId = req.params["userId"]! as UserId;
+		const userId = req.params.userId as UserId;
 		const profile = await storage.getProfile(userId);
 		if (!profile) throw notFound("User not found");
 		return { status: 200, body: profile };
@@ -19,7 +19,7 @@ export function getProfile(storage: Storage): Handler {
 
 export function getDisplayName(storage: Storage): Handler {
 	return async (req) => {
-		const userId = req.params["userId"]! as UserId;
+		const userId = req.params.userId as UserId;
 		const profile = await storage.getProfile(userId);
 		if (!profile) throw notFound("User not found");
 		return { status: 200, body: { displayname: profile.displayname ?? null } };
@@ -28,7 +28,7 @@ export function getDisplayName(storage: Storage): Handler {
 
 export function getAvatarUrl(storage: Storage): Handler {
 	return async (req) => {
-		const userId = req.params["userId"]! as UserId;
+		const userId = req.params.userId as UserId;
 		const profile = await storage.getProfile(userId);
 		if (!profile) throw notFound("User not found");
 		return { status: 200, body: { avatar_url: profile.avatar_url ?? null } };
@@ -37,13 +37,13 @@ export function getAvatarUrl(storage: Storage): Handler {
 
 export function putDisplayName(storage: Storage, serverName: string): Handler {
 	return async (req) => {
-		const targetUserId = req.params["userId"]! as UserId;
+		const targetUserId = req.params.userId as UserId;
 		if (req.userId !== targetUserId) {
 			throw forbidden("Cannot set displayname for another user");
 		}
 
 		const body = req.body as Record<string, unknown>;
-		const displayname = body["displayname"] as string | undefined;
+		const displayname = body.displayname as string | undefined;
 
 		if (displayname !== undefined && displayname !== null) {
 			if (Buffer.byteLength(displayname, "utf-8") > MAX_DISPLAYNAME_BYTES) {
@@ -63,13 +63,13 @@ export function putDisplayName(storage: Storage, serverName: string): Handler {
 
 export function putAvatarUrl(storage: Storage, serverName: string): Handler {
 	return async (req) => {
-		const targetUserId = req.params["userId"]! as UserId;
+		const targetUserId = req.params.userId as UserId;
 		if (req.userId !== targetUserId) {
 			throw forbidden("Cannot set avatar_url for another user");
 		}
 
 		const body = req.body as Record<string, unknown>;
-		const avatarUrl = body["avatar_url"] as string | undefined;
+		const avatarUrl = body.avatar_url as string | undefined;
 
 		if (avatarUrl !== undefined && avatarUrl !== null) {
 			if (Buffer.byteLength(avatarUrl, "utf-8") > MAX_AVATAR_URL_BYTES) {
@@ -99,18 +99,18 @@ async function propagateProfileToRooms(
 		const room = await storage.getRoom(roomId);
 		if (!room) continue;
 
-		const memberKey = "m.room.member\0" + userId;
+		const memberKey = `m.room.member\0${userId}`;
 		const currentMember = room.state_events.get(memberKey);
 		if (!currentMember) continue;
 
 		const currentContent = currentMember.content as Record<string, unknown>;
-		if (currentContent["membership"] !== "join") continue;
+		if (currentContent.membership !== "join") continue;
 
 		const newContent: JsonObject = {
 			membership: "join",
 		};
-		if (profile?.displayname) newContent["displayname"] = profile.displayname;
-		if (profile?.avatar_url) newContent["avatar_url"] = profile.avatar_url;
+		if (profile?.displayname) newContent.displayname = profile.displayname;
+		if (profile?.avatar_url) newContent.avatar_url = profile.avatar_url;
 
 		const authEvents = selectAuthEvents("m.room.member", userId, room, userId);
 

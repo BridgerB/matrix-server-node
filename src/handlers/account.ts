@@ -1,9 +1,9 @@
+import { generateSessionId } from "../crypto.ts";
+import { badJson, forbidden } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { WhoAmIResponse, AuthType } from "../types/index.ts";
 import type { UIAAResponse } from "../types/auth.ts";
-import { badJson, forbidden } from "../errors.ts";
-import { generateSessionId } from "../crypto.ts";
+import type { AuthType, WhoAmIResponse } from "../types/index.ts";
 
 const UIAA_FLOWS: { stages: AuthType[] }[] = [{ stages: ["m.login.dummy"] }];
 
@@ -13,7 +13,7 @@ async function requireUIAA(
 	storage: Storage,
 	body: Record<string, unknown>,
 ): Promise<boolean> {
-	const auth = body["auth"] as Record<string, unknown> | undefined;
+	const auth = body.auth as Record<string, unknown> | undefined;
 
 	if (!auth) {
 		const sessionId = generateSessionId();
@@ -26,16 +26,16 @@ async function requireUIAA(
 		throw Object.assign(new Error("UIAA"), { uiaaResponse: uiaa });
 	}
 
-	const sessionId = auth["session"] as string | undefined;
+	const sessionId = auth.session as string | undefined;
 	if (!sessionId) throw badJson("Missing auth session");
 
 	const uiaaSession = await storage.getUIAASession(sessionId);
 	if (!uiaaSession) throw forbidden("Unknown session");
 
-	if (auth["type"] === "m.login.dummy") {
+	if (auth.type === "m.login.dummy") {
 		await storage.addUIAACompleted(sessionId, "m.login.dummy");
 	} else {
-		throw badJson(`Unsupported auth type: ${auth["type"]}`);
+		throw badJson(`Unsupported auth type: ${auth.type}`);
 	}
 
 	const updated = await storage.getUIAASession(sessionId);
@@ -60,7 +60,7 @@ async function requireUIAA(
 export function getWhoAmI(): Handler {
 	return async (req) => {
 		const body: WhoAmIResponse = {
-			user_id: req.userId!,
+			user_id: req.userId as string,
 			device_id: req.deviceId,
 		};
 		return { status: 200, body };
@@ -83,7 +83,7 @@ export function postChangePassword(storage: Storage): Handler {
 			throw err;
 		}
 
-		const newPassword = body["new_password"] as string | undefined;
+		const newPassword = body.new_password as string | undefined;
 		if (!newPassword) throw badJson("Missing 'new_password' field");
 		if (newPassword.length < MIN_PASSWORD_LENGTH) {
 			throw badJson(
@@ -91,13 +91,13 @@ export function postChangePassword(storage: Storage): Handler {
 			);
 		}
 
-		await storage.updatePassword(req.userId!, newPassword); // TODO: hash with argon2
+		await storage.updatePassword(req.userId as string, newPassword); // TODO: hash with argon2
 
 		// logout_devices defaults to true
-		const logoutDevices = body["logout_devices"] !== false;
+		const logoutDevices = body.logout_devices !== false;
 		if (logoutDevices) {
-			const currentToken = req.accessToken!;
-			const sessions = await storage.getSessionsByUser(req.userId!);
+			const currentToken = req.accessToken as string;
+			const sessions = await storage.getSessionsByUser(req.userId as string);
 			for (const session of sessions) {
 				if (session.access_token !== currentToken) {
 					await storage.deleteSession(session.access_token);
@@ -125,7 +125,7 @@ export function postDeactivate(storage: Storage): Handler {
 			throw err;
 		}
 
-		await storage.deactivateUser(req.userId!);
+		await storage.deactivateUser(req.userId as string);
 
 		return { status: 200, body: { id_server_unbind_result: "no-support" } };
 	};

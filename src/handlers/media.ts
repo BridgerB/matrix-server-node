@@ -1,15 +1,15 @@
-import { randomBytes, createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { MatrixError, notFound } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { ServerName } from "../types/index.ts";
 import type { StoredMedia } from "../types/internal.ts";
-import { MatrixError, notFound } from "../errors.ts";
 
 const MAX_UPLOAD_SIZE = 52428800; // 50 MB
 
 export function postUpload(storage: Storage, serverName: string): Handler {
 	return async (req) => {
-		const userId = req.userId!;
+		const userId = req.userId as string;
 		const data = req.rawBody ?? Buffer.alloc(0);
 
 		if (data.length > MAX_UPLOAD_SIZE) {
@@ -50,8 +50,8 @@ export function postUpload(storage: Storage, serverName: string): Handler {
 
 export function getDownload(storage: Storage): Handler {
 	return async (req) => {
-		const serverName = req.params["serverName"]! as ServerName;
-		const mediaId = req.params["mediaId"]!;
+		const serverName = req.params.serverName as ServerName;
+		const mediaId = req.params.mediaId as string;
 
 		const result = await storage.getMedia(serverName, mediaId);
 		if (!result) throw notFound("Media not found");
@@ -63,7 +63,7 @@ export function getDownload(storage: Storage): Handler {
 		};
 
 		// Use filename from path param or original upload name
-		const fileName = req.params["fileName"] ?? metadata.upload_name;
+		const fileName = req.params.fileName ?? metadata.upload_name;
 		if (fileName) {
 			headers["Content-Disposition"] = `inline; filename="${fileName}"`;
 		}
@@ -74,8 +74,8 @@ export function getDownload(storage: Storage): Handler {
 
 export function getThumbnail(storage: Storage): Handler {
 	return async (req) => {
-		const serverName = req.params["serverName"]! as ServerName;
-		const mediaId = req.params["mediaId"]!;
+		const serverName = req.params.serverName as ServerName;
+		const mediaId = req.params.mediaId as string;
 
 		const result = await storage.getMedia(serverName, mediaId);
 		if (!result) throw notFound("Media not found");

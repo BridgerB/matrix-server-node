@@ -2,13 +2,13 @@
 // SYNC
 // =============================================================================
 
-import type { UserId, RoomId, EventId } from "./identifiers.ts";
+import type { PresenceState } from "./ephemeral.ts";
 import type {
 	ClientEvent,
 	StrippedStateEvent,
 	ToDeviceEvent,
 } from "./events.ts";
-import type { PresenceState } from "./ephemeral.ts";
+import type { EventId, RoomId, UserId } from "./identifiers.ts";
 
 export interface SyncRequest {
 	filter?: string | import("./filters.ts").SyncFilter;

@@ -1,8 +1,8 @@
+import { generateDeviceId, generateToken } from "../crypto.ts";
+import { badJson, forbidden, invalidParam } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { LoginRequest, LoginResponse, LoginFlow } from "../types/index.ts";
-import { forbidden, badJson, invalidParam } from "../errors.ts";
-import { generateToken, generateDeviceId } from "../crypto.ts";
+import type { LoginFlow, LoginRequest, LoginResponse } from "../types/index.ts";
 
 const SUPPORTED_FLOWS: LoginFlow[] = [{ type: "m.login.password" }];
 

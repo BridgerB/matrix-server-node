@@ -1,7 +1,7 @@
 import { request as httpsRequest, type RequestOptions } from "node:https";
 import type { SigningKey } from "../signing.ts";
-import type { ServerName } from "../types/index.ts";
 import { signJson } from "../signing.ts";
+import type { ServerName } from "../types/index.ts";
 import { resolveServer } from "./discovery.ts";
 
 export class FederationClient {
@@ -79,16 +79,16 @@ export class FederationClient {
 			destination,
 		};
 		if (content !== undefined) {
-			requestObj["content"] = content;
+			requestObj.content = content;
 		}
 
 		signJson(requestObj, this.serverName, this.signingKey);
 
-		const signatures = requestObj["signatures"] as Record<
+		const signatures = requestObj.signatures as Record<
 			string,
 			Record<string, string>
 		>;
-		const sig = signatures[this.serverName]![this.signingKey.keyId]!;
+		const sig = signatures[this.serverName]?.[this.signingKey.keyId] as string;
 
 		return `X-Matrix origin="${this.serverName}",destination="${destination}",key="${this.signingKey.keyId}",sig="${sig}"`;
 	}

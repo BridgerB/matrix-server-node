@@ -2,15 +2,15 @@
 // AUTHENTICATION
 // =============================================================================
 
+import type { WellKnown } from "./discovery.ts";
 import type {
-	UserId,
-	DeviceId,
 	AccessToken,
-	RefreshToken,
+	DeviceId,
 	MxcUri,
+	RefreshToken,
+	UserId,
 } from "./identifiers.ts";
 import type { JsonObject } from "./json.ts";
-import type { WellKnown } from "./discovery.ts";
 
 export type LoginType =
 	| "m.login.password"

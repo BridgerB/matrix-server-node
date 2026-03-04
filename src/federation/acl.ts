@@ -9,9 +9,9 @@ export function isServerAllowedByAcl(
 	if (!aclEvent) return true; // No ACL = all allowed
 
 	const content = aclEvent.content as Record<string, unknown>;
-	const allow = (content["allow"] ?? []) as string[];
-	const deny = (content["deny"] ?? []) as string[];
-	const allowIpLiterals = content["allow_ip_literals"] !== false;
+	const allow = (content.allow ?? []) as string[];
+	const deny = (content.deny ?? []) as string[];
+	const allowIpLiterals = content.allow_ip_literals !== false;
 
 	// Check IP literal restriction
 	if (!allowIpLiterals) {

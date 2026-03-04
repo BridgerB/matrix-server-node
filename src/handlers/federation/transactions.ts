@@ -1,23 +1,23 @@
-import type { Handler } from "../../router.ts";
-import type { Storage } from "../../storage/interface.ts";
-import type { SigningKey } from "../../signing.ts";
-import type { RemoteKeyStore } from "../../federation/key-store.ts";
+import {
+	checkEventAuth,
+	computeContentHash,
+	computeEventId,
+} from "../../events.ts";
+import { isServerAllowedByAcl } from "../../federation/acl.ts";
 import type { FederationClient } from "../../federation/client.ts";
-import type { PDU, EDU } from "../../types/events.ts";
+import type { RemoteKeyStore } from "../../federation/key-store.ts";
+import type { Handler } from "../../router.ts";
+import type { SigningKey } from "../../signing.ts";
+import { verifyEventSignature } from "../../signing.ts";
+import type { Storage } from "../../storage/interface.ts";
+import type { EDU, PDU } from "../../types/events.ts";
 import type {
-	ServerName,
 	EventId,
 	KeyId,
-	UserId,
 	RoomId,
+	ServerName,
+	UserId,
 } from "../../types/index.ts";
-import {
-	computeEventId,
-	computeContentHash,
-	checkEventAuth,
-} from "../../events.ts";
-import { verifyEventSignature } from "../../signing.ts";
-import { isServerAllowedByAcl } from "../../federation/acl.ts";
 
 // =============================================================================
 // PUT /_matrix/federation/v1/send/:txnId
@@ -31,8 +31,8 @@ export function putFederationSend(
 	federationClient: FederationClient,
 ): Handler {
 	return async (req) => {
-		const txnId = req.params["txnId"]!;
-		const origin = req.origin!;
+		const txnId = req.params.txnId as string;
+		const origin = req.origin as string;
 
 		// Transaction dedup
 		const alreadySeen = await storage.getFederationTxn(origin, txnId);
@@ -158,29 +158,29 @@ async function processEdu(
 
 	switch (edu.edu_type) {
 		case "m.typing": {
-			const roomId = content["room_id"] as RoomId;
-			const userId = content["user_id"] as UserId;
-			const typing = content["typing"] as boolean;
+			const roomId = content.room_id as RoomId;
+			const userId = content.user_id as UserId;
+			const typing = content.typing as boolean;
 			if (roomId && userId) {
 				await storage.setTyping(roomId, userId, typing, 30000);
 			}
 			break;
 		}
 		case "m.presence": {
-			const userId = content["user_id"] as UserId;
-			const presence = content["presence"] as string;
+			const userId = content.user_id as UserId;
+			const presence = content.presence as string;
 			if (userId && presence) {
 				await storage.setPresence(
 					userId,
 					presence as "online" | "offline" | "unavailable",
-					content["status_msg"] as string | undefined,
+					content.status_msg as string | undefined,
 				);
 			}
 			break;
 		}
 		case "m.receipt": {
-			const roomId = content["room_id"] as RoomId;
-			const receipts = content["receipts"] as
+			const roomId = content.room_id as RoomId;
+			const receipts = content.receipts as
 				| Record<string, Record<string, Record<string, unknown>>>
 				| undefined;
 			if (roomId && receipts) {

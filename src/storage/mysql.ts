@@ -1,31 +1,33 @@
 import * as mariadb from "mariadb";
-import type {
-	UserId,
-	RoomId,
-	RoomAlias,
-	EventId,
-	DeviceId,
-	AccessToken,
-	RefreshToken,
-	Timestamp,
-	ServerName,
-	KeyId,
-} from "../types/index.ts";
-import type { UserAccount, RoomState, StoredMedia } from "../types/index.ts";
+import { computeEventId } from "../events.ts";
+import type { DeviceKeys, OneTimeKey } from "../types/e2ee.ts";
+import type { PresenceState } from "../types/ephemeral.ts";
 import type {
 	PDU,
 	StrippedStateEvent,
 	ToDeviceEvent,
 } from "../types/events.ts";
-import type { UserProfile, Device } from "../types/user.ts";
-import type { JsonObject } from "../types/json.ts";
-import type { PresenceState } from "../types/ephemeral.ts";
-import type { DeviceKeys, OneTimeKey } from "../types/e2ee.ts";
-import type { Pusher } from "../types/push.ts";
 import type { ServerKeys } from "../types/federation.ts";
+import type {
+	AccessToken,
+	DeviceId,
+	EventId,
+	KeyId,
+	RefreshToken,
+	RoomAlias,
+	RoomId,
+	RoomState,
+	ServerName,
+	StoredMedia,
+	Timestamp,
+	UserAccount,
+	UserId,
+} from "../types/index.ts";
+import type { JsonObject } from "../types/json.ts";
+import type { Pusher } from "../types/push.ts";
 import type { RoomVersion } from "../types/room-versions.ts";
+import type { Device, UserProfile } from "../types/user.ts";
 import type { Storage, StoredSession } from "./interface.ts";
-import { computeEventId } from "../events.ts";
 
 export class MysqlStorage implements Storage {
 	private pool: mariadb.Pool;
@@ -48,7 +50,7 @@ export class MysqlStorage implements Storage {
 
 	static async create(connectionString: string): Promise<MysqlStorage> {
 		const uri = connectionString.replace(/^mysql:\/\//, "mariadb://");
-		const pool = mariadb.createPool(uri + "?connectionLimit=20");
+		const pool = mariadb.createPool(`${uri}?connectionLimit=20`);
 		const storage = new MysqlStorage(pool);
 		await storage.init();
 		return storage;
@@ -746,7 +748,7 @@ export class MysqlStorage implements Storage {
 
 		const cached = this.roomCache.get(roomId);
 		if (cached) {
-			const key = event.type + "\0" + (event.state_key ?? "");
+			const key = `${event.type}\0${event.state_key ?? ""}`;
 			cached.state_events.set(key, event);
 		}
 
@@ -829,7 +831,7 @@ export class MysqlStorage implements Storage {
 			"SELECT COUNT(*) AS cnt FROM events WHERE room_id = ? AND stream_pos > ?",
 			[roomId, since],
 		)) as Record<string, unknown>[];
-		const total = Number(countRow!.cnt);
+		const total = Number(countRow?.cnt);
 		const limited = total > limit;
 
 		let rows: Record<string, unknown>[];
@@ -1191,7 +1193,7 @@ export class MysqlStorage implements Storage {
 		if (typing) {
 			const ms = Math.min(timeout ?? 30000, 120000);
 			const timer = setTimeout(() => {
-				roomTyping!.delete(userId);
+				roomTyping?.delete(userId);
 				this.wakeWaiters();
 			}, ms);
 			roomTyping.set(userId, timer);
@@ -1257,9 +1259,7 @@ export class MysqlStorage implements Storage {
 		this.wakeWaiters();
 	}
 
-	async getPresence(
-		userId: UserId,
-	): Promise<
+	async getPresence(userId: UserId): Promise<
 		| {
 				presence: PresenceState;
 				status_msg?: string;
@@ -1403,7 +1403,7 @@ export class MysqlStorage implements Storage {
 		try {
 			await conn.beginTransaction();
 			for (const [keyId, key] of Object.entries(keys)) {
-				const algorithm = keyId.split(":")[0]!;
+				const algorithm = keyId.split(":")[0] as string;
 				await conn.query(
 					"INSERT INTO one_time_keys (user_id, device_id, key_id, algorithm, key_json) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE key_json = VALUES(key_json)",
 					[userId, deviceId, keyId, algorithm, this.json(key)],
@@ -1514,7 +1514,8 @@ export class MysqlStorage implements Storage {
 			[userId, deviceId],
 		)) as Record<string, unknown>[];
 		const types = new Set<string>();
-		for (const r of rows) types.add((r.key_id as string).split(":")[0]!);
+		for (const r of rows)
+			types.add((r.key_id as string).split(":")[0] as string);
 		return [...types];
 	}
 
@@ -1670,7 +1671,7 @@ export class MysqlStorage implements Storage {
 		}));
 		const nextBatch =
 			rows.length === limit && rows.length > 0
-				? String(rows[rows.length - 1]!.stream_pos)
+				? String(rows[rows.length - 1]?.stream_pos)
 				: undefined;
 		return { events, nextBatch };
 	}
@@ -1719,7 +1720,7 @@ export class MysqlStorage implements Storage {
 			"SELECT COUNT(*) AS cnt FROM relations WHERE target_event_id = ? AND rel_type = 'm.thread'",
 			[eventId],
 		)) as Record<string, unknown>[];
-		if (Number(countRow!.cnt) === 0) return undefined;
+		if (Number(countRow?.cnt) === 0) return undefined;
 
 		const [latestRow] = (await this.query(
 			"SELECT r.event_id, e.event_json FROM relations r JOIN events e ON r.event_id = e.event_id WHERE r.target_event_id = ? AND r.rel_type = 'm.thread' ORDER BY r.stream_pos DESC LIMIT 1",
@@ -1737,7 +1738,7 @@ export class MysqlStorage implements Storage {
 				event: this.parseJson(latestRow.event_json) as PDU,
 				eventId: latestRow.event_id as EventId,
 			},
-			count: Number(countRow!.cnt),
+			count: Number(countRow?.cnt),
 			currentUserParticipated: participated.length > 0,
 		};
 	}
@@ -1892,7 +1893,7 @@ export class MysqlStorage implements Storage {
 		}));
 		const nextBatch =
 			rows.length === limit && rows.length > 0
-				? String(rows[rows.length - 1]!.latest_pos)
+				? String(rows[rows.length - 1]?.latest_pos)
 				: undefined;
 		return { events, nextBatch };
 	}
@@ -1956,7 +1957,7 @@ export class MysqlStorage implements Storage {
 
 		const nextBatch =
 			results.length === limit && results.length > 0
-				? String(results[results.length - 1]!.streamPos)
+				? String(results[results.length - 1]?.streamPos)
 				: undefined;
 		return { events: results, nextBatch };
 	}
@@ -2012,7 +2013,7 @@ export class MysqlStorage implements Storage {
 		const queue = [...eventIds];
 
 		while (queue.length > 0) {
-			const id = queue.shift()!;
+			const id = queue.shift() as EventId;
 			if (visited.has(id)) continue;
 			visited.add(id);
 			const rows = (await this.query(

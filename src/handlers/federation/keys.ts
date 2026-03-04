@@ -1,8 +1,8 @@
 import type { Handler } from "../../router.ts";
 import type { SigningKey } from "../../signing.ts";
-import type { ServerKeys } from "../../types/federation.ts";
-import type { ServerName, KeyId } from "../../types/index.ts";
 import { signJson } from "../../signing.ts";
+import type { ServerKeys } from "../../types/federation.ts";
+import type { KeyId, ServerName } from "../../types/index.ts";
 
 // =============================================================================
 // GET /_matrix/key/v2/server

@@ -1,6 +1,6 @@
+import { badJson } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import { badJson } from "../errors.ts";
 
 // =============================================================================
 // GET /_matrix/client/v3/account/3pid
@@ -8,7 +8,7 @@ import { badJson } from "../errors.ts";
 
 export function getThreePids(storage: Storage): Handler {
 	return async (req) => {
-		const threepids = await storage.getThreePids(req.userId!);
+		const threepids = await storage.getThreePids(req.userId as string);
 		return { status: 200, body: { threepids } };
 	};
 }
@@ -23,7 +23,7 @@ export function postAddThreePid(storage: Storage): Handler {
 		if (!body.medium || !body.address)
 			throw badJson("Missing medium or address");
 
-		await storage.addThreePid(req.userId!, body.medium, body.address);
+		await storage.addThreePid(req.userId as string, body.medium, body.address);
 		return { status: 200, body: {} };
 	};
 }
@@ -38,7 +38,11 @@ export function postDeleteThreePid(storage: Storage): Handler {
 		if (!body.medium || !body.address)
 			throw badJson("Missing medium or address");
 
-		await storage.deleteThreePid(req.userId!, body.medium, body.address);
+		await storage.deleteThreePid(
+			req.userId as string,
+			body.medium,
+			body.address,
+		);
 		return { status: 200, body: { id_server_unbind_result: "no-support" } };
 	};
 }

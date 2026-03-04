@@ -2,7 +2,7 @@
 // MEDIA INFO TYPES
 // =============================================================================
 
-import type { MxcUri, Base64 } from "./identifiers.ts";
+import type { Base64, MxcUri } from "./identifiers.ts";
 
 export interface ThumbnailInfo {
 	h?: number;

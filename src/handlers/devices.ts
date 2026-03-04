@@ -1,9 +1,9 @@
+import { generateSessionId } from "../crypto.ts";
+import { badJson, forbidden, notFound } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { DeviceId, AuthType } from "../types/index.ts";
 import type { UIAAResponse } from "../types/auth.ts";
-import { notFound, badJson, forbidden } from "../errors.ts";
-import { generateSessionId } from "../crypto.ts";
+import type { AuthType, DeviceId } from "../types/index.ts";
 
 const UIAA_FLOWS: { stages: AuthType[] }[] = [{ stages: ["m.login.dummy"] }];
 
@@ -11,7 +11,7 @@ async function requireUIAA(
 	storage: Storage,
 	body: Record<string, unknown>,
 ): Promise<boolean> {
-	const auth = body["auth"] as Record<string, unknown> | undefined;
+	const auth = body.auth as Record<string, unknown> | undefined;
 
 	if (!auth) {
 		const sessionId = generateSessionId();
@@ -24,16 +24,16 @@ async function requireUIAA(
 		throw Object.assign(new Error("UIAA"), { uiaaResponse: uiaa });
 	}
 
-	const sessionId = auth["session"] as string | undefined;
+	const sessionId = auth.session as string | undefined;
 	if (!sessionId) throw badJson("Missing auth session");
 
 	const uiaaSession = await storage.getUIAASession(sessionId);
 	if (!uiaaSession) throw forbidden("Unknown session");
 
-	if (auth["type"] === "m.login.dummy") {
+	if (auth.type === "m.login.dummy") {
 		await storage.addUIAACompleted(sessionId, "m.login.dummy");
 	} else {
-		throw badJson(`Unsupported auth type: ${auth["type"]}`);
+		throw badJson(`Unsupported auth type: ${auth.type}`);
 	}
 
 	const updated = await storage.getUIAASession(sessionId);
@@ -57,15 +57,15 @@ async function requireUIAA(
 
 export function getDevices(storage: Storage): Handler {
 	return async (req) => {
-		const devices = await storage.getAllDevices(req.userId!);
+		const devices = await storage.getAllDevices(req.userId as string);
 		return { status: 200, body: { devices } };
 	};
 }
 
 export function getDevice(storage: Storage): Handler {
 	return async (req) => {
-		const deviceId = req.params["deviceId"]! as DeviceId;
-		const device = await storage.getDevice(req.userId!, deviceId);
+		const deviceId = req.params.deviceId as DeviceId;
+		const device = await storage.getDevice(req.userId as string, deviceId);
 		if (!device) throw notFound("Device not found");
 		return { status: 200, body: device };
 	};
@@ -73,15 +73,19 @@ export function getDevice(storage: Storage): Handler {
 
 export function putDevice(storage: Storage): Handler {
 	return async (req) => {
-		const deviceId = req.params["deviceId"]! as DeviceId;
+		const deviceId = req.params.deviceId as DeviceId;
 		const body = req.body as Record<string, unknown>;
 
-		const device = await storage.getDevice(req.userId!, deviceId);
+		const device = await storage.getDevice(req.userId as string, deviceId);
 		if (!device) throw notFound("Device not found");
 
-		const displayName = body["display_name"] as string | undefined;
+		const displayName = body.display_name as string | undefined;
 		if (displayName !== undefined) {
-			await storage.updateDeviceDisplayName(req.userId!, deviceId, displayName);
+			await storage.updateDeviceDisplayName(
+				req.userId as string,
+				deviceId,
+				displayName,
+			);
 		}
 
 		return { status: 200, body: {} };
@@ -90,10 +94,10 @@ export function putDevice(storage: Storage): Handler {
 
 export function deleteDevice(storage: Storage): Handler {
 	return async (req) => {
-		const deviceId = req.params["deviceId"]! as DeviceId;
+		const deviceId = req.params.deviceId as DeviceId;
 		const body = req.body as Record<string, unknown>;
 
-		const device = await storage.getDevice(req.userId!, deviceId);
+		const device = await storage.getDevice(req.userId as string, deviceId);
 		if (!device) throw notFound("Device not found");
 
 		try {
@@ -108,7 +112,7 @@ export function deleteDevice(storage: Storage): Handler {
 			throw err;
 		}
 
-		await storage.deleteDeviceSession(req.userId!, deviceId);
+		await storage.deleteDeviceSession(req.userId as string, deviceId);
 		return { status: 200, body: {} };
 	};
 }
@@ -116,7 +120,7 @@ export function deleteDevice(storage: Storage): Handler {
 export function deleteDevices(storage: Storage): Handler {
 	return async (req) => {
 		const body = req.body as Record<string, unknown>;
-		const deviceIds = body["devices"] as string[] | undefined;
+		const deviceIds = body.devices as string[] | undefined;
 		if (!deviceIds || !Array.isArray(deviceIds)) {
 			throw badJson("Missing 'devices' array");
 		}
@@ -134,7 +138,10 @@ export function deleteDevices(storage: Storage): Handler {
 		}
 
 		for (const deviceId of deviceIds) {
-			await storage.deleteDeviceSession(req.userId!, deviceId as DeviceId);
+			await storage.deleteDeviceSession(
+				req.userId as string,
+				deviceId as DeviceId,
+			);
 		}
 		return { status: 200, body: {} };
 	};

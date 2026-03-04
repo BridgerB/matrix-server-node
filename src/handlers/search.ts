@@ -1,11 +1,11 @@
+import { badJson } from "../errors.ts";
+import { pduToClientEvent } from "../events.ts";
+import { bundleAggregations } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
+import type { ClientEvent } from "../types/events.ts";
 import type { RoomId, UserId } from "../types/index.ts";
 import type { SearchRequest, SearchResult } from "../types/room-operations.ts";
-import type { ClientEvent } from "../types/events.ts";
-import { pduToClientEvent } from "../events.ts";
-import { badJson } from "../errors.ts";
-import { bundleAggregations } from "../relations.ts";
 
 // =============================================================================
 // POST /_matrix/client/v3/search
@@ -13,7 +13,7 @@ import { bundleAggregations } from "../relations.ts";
 
 export function postSearch(storage: Storage): Handler {
 	return async (req) => {
-		const userId = req.userId!;
+		const userId = req.userId as string;
 		const body = (req.body ?? {}) as SearchRequest;
 
 		const roomEvents = body.search_categories?.room_events;
@@ -141,16 +141,16 @@ export function postSearch(storage: Storage): Handler {
 					{};
 
 				for (let i = 0; i < results.length; i++) {
-					const result = results[i]!;
+					const result = results[i] as SearchResult;
 					const key =
 						groupKey === "room_id"
-							? result.result.room_id!
+							? (result.result.room_id as string)
 							: result.result.sender;
 
 					if (!groupMap[key]) {
 						groupMap[key] = { results: [], order: i };
 					}
-					groupMap[key]!.results.push(result.result.event_id);
+					groupMap[key]?.results.push(result.result.event_id);
 				}
 
 				groups[groupKey] = groupMap;

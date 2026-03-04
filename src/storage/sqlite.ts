@@ -1,33 +1,35 @@
-import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type {
-	UserId,
-	RoomId,
-	RoomAlias,
-	EventId,
-	DeviceId,
-	AccessToken,
-	RefreshToken,
-	Timestamp,
-	ServerName,
-	KeyId,
-} from "../types/index.ts";
-import type { UserAccount, RoomState, StoredMedia } from "../types/index.ts";
+import Database from "better-sqlite3";
+import { computeEventId } from "../events.ts";
+import type { DeviceKeys, OneTimeKey } from "../types/e2ee.ts";
+import type { PresenceState } from "../types/ephemeral.ts";
 import type {
 	PDU,
 	StrippedStateEvent,
 	ToDeviceEvent,
 } from "../types/events.ts";
-import type { UserProfile, Device } from "../types/user.ts";
-import type { JsonObject } from "../types/json.ts";
-import type { PresenceState } from "../types/ephemeral.ts";
-import type { DeviceKeys, OneTimeKey } from "../types/e2ee.ts";
-import type { Pusher } from "../types/push.ts";
 import type { ServerKeys } from "../types/federation.ts";
+import type {
+	AccessToken,
+	DeviceId,
+	EventId,
+	KeyId,
+	RefreshToken,
+	RoomAlias,
+	RoomId,
+	RoomState,
+	ServerName,
+	StoredMedia,
+	Timestamp,
+	UserAccount,
+	UserId,
+} from "../types/index.ts";
+import type { JsonObject } from "../types/json.ts";
+import type { Pusher } from "../types/push.ts";
 import type { RoomVersion } from "../types/room-versions.ts";
+import type { Device, UserProfile } from "../types/user.ts";
 import type { Storage, StoredSession } from "./interface.ts";
-import { computeEventId } from "../events.ts";
 
 export class SqliteStorage implements Storage {
 	private db: Database.Database;
@@ -725,7 +727,7 @@ export class SqliteStorage implements Storage {
 		// Update cached room state in-place (handler relies on reference sharing)
 		const cached = this.roomCache.get(roomId);
 		if (cached) {
-			const key = event.type + "\0" + (event.state_key ?? "");
+			const key = `${event.type}\0${event.state_key ?? ""}`;
 			cached.state_events.set(key, event);
 		}
 
@@ -1166,7 +1168,7 @@ export class SqliteStorage implements Storage {
 		if (typing) {
 			const ms = Math.min(timeout ?? 30000, 120000);
 			const timer = setTimeout(() => {
-				roomTyping!.delete(userId);
+				roomTyping?.delete(userId);
 				this.wakeWaiters();
 			}, ms);
 			roomTyping.set(userId, timer);
@@ -1377,7 +1379,7 @@ export class SqliteStorage implements Storage {
 		);
 		const insertAll = this.db.transaction(() => {
 			for (const [keyId, key] of Object.entries(keys)) {
-				const algorithm = keyId.split(":")[0]!;
+				const algorithm = keyId.split(":")[0] as string;
 				stmt.run(userId, deviceId, keyId, algorithm, JSON.stringify(key));
 			}
 		});
@@ -1475,7 +1477,7 @@ export class SqliteStorage implements Storage {
 			.all(userId, deviceId) as { key_id: string }[];
 		const types = new Set<string>();
 		for (const r of rows) {
-			types.add(r.key_id.split(":")[0]!);
+			types.add(r.key_id.split(":")[0] as string);
 		}
 		return [...types];
 	}
@@ -1647,7 +1649,7 @@ export class SqliteStorage implements Storage {
 
 		const nextBatch =
 			rows.length === limit && rows.length > 0
-				? String(rows[rows.length - 1]!.stream_pos)
+				? String(rows[rows.length - 1]?.stream_pos)
 				: undefined;
 
 		return { events, nextBatch };
@@ -1881,7 +1883,7 @@ export class SqliteStorage implements Storage {
 
 		const nextBatch =
 			rows.length === limit && rows.length > 0
-				? String(rows[rows.length - 1]!.latest_pos)
+				? String(rows[rows.length - 1]?.latest_pos)
 				: undefined;
 
 		return { events, nextBatch };
@@ -1953,7 +1955,7 @@ export class SqliteStorage implements Storage {
 
 		const nextBatch =
 			results.length === limit && results.length > 0
-				? String(results[results.length - 1]!.streamPos)
+				? String(results[results.length - 1]?.streamPos)
 				: undefined;
 
 		return { events: results, nextBatch };
@@ -2002,7 +2004,7 @@ export class SqliteStorage implements Storage {
 		const queue = [...eventIds];
 
 		while (queue.length > 0) {
-			const id = queue.shift()!;
+			const id = queue.shift() as EventId;
 			if (visited.has(id)) continue;
 			visited.add(id);
 

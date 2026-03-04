@@ -1,13 +1,13 @@
 import { createServer } from "node:http";
-import { Router } from "./router.ts";
-import { MemoryStorage } from "./storage/memory.ts";
-import { SqliteStorage } from "./storage/sqlite.ts";
-import { PostgresStorage } from "./storage/postgres.ts";
-import { MysqlStorage } from "./storage/mysql.ts";
 import { cors } from "./middleware/cors.ts";
+import { Router } from "./router.ts";
 import { registerRoutes } from "./routes.ts";
 import { generateSigningKey, importSigningKey } from "./signing.ts";
 import type { Storage } from "./storage/interface.ts";
+import { MemoryStorage } from "./storage/memory.ts";
+import { MysqlStorage } from "./storage/mysql.ts";
+import { PostgresStorage } from "./storage/postgres.ts";
+import { SqliteStorage } from "./storage/sqlite.ts";
 
 const PORT = parseInt(process.env.PORT ?? "8008", 10);
 const SERVER_NAME = process.env.SERVER_NAME ?? "localhost";

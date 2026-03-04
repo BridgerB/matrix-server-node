@@ -1,9 +1,9 @@
+import { notJoined, roomNotFound } from "../errors.ts";
+import { getMembership, pduToClientEvent } from "../events.ts";
+import { bundleAggregations } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { RoomId } from "../types/index.ts";
-import { pduToClientEvent, getMembership } from "../events.ts";
-import { roomNotFound, notJoined } from "../errors.ts";
-import { bundleAggregations } from "../relations.ts";
 
 // =============================================================================
 // GET /_matrix/client/v3/rooms/:roomId/threads
@@ -11,8 +11,8 @@ import { bundleAggregations } from "../relations.ts";
 
 export function getThreads(storage: Storage): Handler {
 	return async (req) => {
-		const roomId = req.params["roomId"]! as RoomId;
-		const userId = req.userId!;
+		const roomId = req.params.roomId as RoomId;
+		const userId = req.userId as string;
 
 		const room = await storage.getRoom(roomId);
 		if (!room) throw roomNotFound();
