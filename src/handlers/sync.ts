@@ -7,6 +7,7 @@ import type { ClientEvent, PDU } from "../types/events.ts";
 import type { DeviceId, RoomId, UserId } from "../types/index.ts";
 import type { PushRulesContent } from "../types/push.ts";
 import type { RoomPowerLevelsContent } from "../types/state-events.ts";
+import type { IgnoredUserListContent } from "../types/account-data.ts";
 import type {
 	InvitedRoom,
 	JoinedRoom,
@@ -17,6 +18,17 @@ import type {
 
 const TIMELINE_LIMIT = 20;
 const MAX_TIMEOUT = 30000;
+
+const getIgnoredUsers = async (
+	storage: Storage,
+	userId: UserId,
+): Promise<Set<UserId>> => {
+	const data = await storage.getGlobalAccountData(userId, "m.ignored_user_list");
+	if (!data) return new Set();
+	const content = data as unknown as IgnoredUserListContent;
+	if (!content.ignored_users) return new Set();
+	return new Set(Object.keys(content.ignored_users) as UserId[]);
+};
 const collectJoinedUsers = async (
 	storage: Storage,
 	roomId: RoomId,
@@ -161,6 +173,7 @@ const buildInitialSync = async (
 	const join: Record<RoomId, JoinedRoom> = {};
 	const invite: Record<RoomId, InvitedRoom> = {};
 	const userRules = await getOrInitRules(storage, userId);
+	const ignoredUsers = await getIgnoredUsers(storage, userId);
 
 	for (const { roomId, membership } of userRooms) {
 		if (membership === "join") {
@@ -178,9 +191,18 @@ const buildInitialSync = async (
 				.filter((e) => !timelineEventIds.has(e.eventId))
 				.map((e) => pduToClientEvent(e.event, e.eventId));
 
-			const timelineClientEvents = timelineEvents.map((e) =>
+			let timelineClientEvents = timelineEvents.map((e) =>
 				pduToClientEvent(e.event, e.eventId),
 			);
+
+			if (ignoredUsers.size > 0) {
+				timelineClientEvents = timelineClientEvents.filter(
+					(e) =>
+						e.state_key !== undefined ||
+						!ignoredUsers.has(e.sender as UserId),
+				);
+			}
+
 			await bundleAggregations(storage, timelineClientEvents, userId);
 
 			const totalEvents = await storage.getEventsByRoom(
@@ -211,6 +233,14 @@ const buildInitialSync = async (
 			};
 		} else if (membership === "invite") {
 			const stripped = await storage.getStrippedState(roomId);
+			const inviterEvent = stripped.find(
+				(e) =>
+					e.type === "m.room.member" &&
+					e.state_key === userId &&
+					(e.content as Record<string, unknown>).membership === "invite",
+			);
+			const inviter = inviterEvent?.sender as UserId | undefined;
+			if (inviter && ignoredUsers.has(inviter)) continue;
 			invite[roomId] = { invite_state: { events: stripped } };
 		}
 	}
@@ -279,6 +309,7 @@ const buildIncrementalSync = async (
 	const leave: Record<RoomId, LeftRoom> = {};
 	const seenUsers = new Set<UserId>();
 	const userRules = await getOrInitRules(storage, userId);
+	const ignoredUsers = await getIgnoredUsers(storage, userId);
 
 	for (const { roomId, membership } of userRooms) {
 		if (membership === "join") {
@@ -288,9 +319,18 @@ const buildIncrementalSync = async (
 				TIMELINE_LIMIT,
 			);
 
-			const timelineClientEvents = newEvents.map((e) =>
+			let timelineClientEvents = newEvents.map((e) =>
 				pduToClientEvent(e.event, e.eventId),
 			);
+
+			if (ignoredUsers.size > 0) {
+				timelineClientEvents = timelineClientEvents.filter(
+					(e) =>
+						e.state_key !== undefined ||
+						!ignoredUsers.has(e.sender as UserId),
+				);
+			}
+
 			await bundleAggregations(storage, timelineClientEvents, userId);
 
 			let stateClientEvents: ClientEvent[] = [];
@@ -356,6 +396,14 @@ const buildIncrementalSync = async (
 			);
 			if (membershipChanged) {
 				const stripped = await storage.getStrippedState(roomId);
+				const inviterEvent = stripped.find(
+					(e) =>
+						e.type === "m.room.member" &&
+						e.state_key === userId &&
+						(e.content as Record<string, unknown>).membership === "invite",
+				);
+				const inviter = inviterEvent?.sender as UserId | undefined;
+				if (inviter && ignoredUsers.has(inviter)) continue;
 				invite[roomId] = { invite_state: { events: stripped } };
 			}
 		} else if (membership === "leave" || membership === "ban") {
