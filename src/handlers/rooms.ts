@@ -2,6 +2,7 @@ import { generateRoomId } from "../crypto.ts";
 import {
 	badJson,
 	forbidden,
+	MatrixError,
 	missingParam,
 	notFound,
 	roomNotFound,
@@ -33,7 +34,7 @@ export const postCreateRoom =
 	async (req) => {
 		const body = (req.body ?? {}) as CreateRoomRequest;
 		const userId = req.userId as string;
-		const roomVersion = body.room_version ?? "11";
+		const roomVersion = body.room_version ?? "10";
 		const v12Plus = isRoomVersion12Plus(roomVersion);
 
 		let roomId: string;
@@ -46,6 +47,12 @@ export const postCreateRoom =
 			room_version: roomVersion,
 			...body.creation_content,
 		};
+
+		// Room versions before 11 require "creator" in create event content
+		const roomVersionNum = parseInt(roomVersion, 10);
+		if (!isNaN(roomVersionNum) && roomVersionNum < 11) {
+			createContent.creator = userId;
+		}
 
 		if (v12Plus) {
 			// Validate additional_creators
@@ -274,6 +281,9 @@ export const postCreateRoom =
 				"",
 				{
 					topic: body.topic,
+					"m.topic": {
+						"m.text": [{ body: body.topic }],
+					},
 				},
 			);
 		}
@@ -432,6 +442,10 @@ export const postJoin =
 				);
 				return result;
 			} catch (err) {
+				console.error(
+					`Federation join to ${remoteServer} failed:`,
+					(err as Error).message,
+				);
 				lastError = err;
 			}
 		}
@@ -651,7 +665,11 @@ export const postForget =
 
 		const membership = getMembership(room, userId);
 		if (membership !== "leave" && membership !== "ban") {
-			throw forbidden("User must have left the room before forgetting it");
+			throw new MatrixError(
+				"M_UNKNOWN",
+				"User must have left the room before forgetting it",
+				400,
+			);
 		}
 
 		return { status: 200, body: {} };

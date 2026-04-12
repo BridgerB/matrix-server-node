@@ -50,7 +50,7 @@ export const deleteDevice =
 		const device = await storage.getDevice(req.userId as string, deviceId);
 		if (!device) throw notFound("Device not found");
 
-		const uiaaResponse = await withUIAA(storage, body);
+		const uiaaResponse = await withUIAA(storage, body, req.userId as string);
 		if (uiaaResponse) return uiaaResponse;
 
 		await storage.deleteDeviceSession(req.userId as string, deviceId);
@@ -65,7 +65,7 @@ export const deleteDevices =
 		if (!deviceIds || !Array.isArray(deviceIds))
 			throw badJson("Missing 'devices' array");
 
-		const uiaaResponse = await withUIAA(storage, body);
+		const uiaaResponse = await withUIAA(storage, body, req.userId as string);
 		if (uiaaResponse) return uiaaResponse;
 
 		for (const deviceId of deviceIds) {
