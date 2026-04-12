@@ -1,5 +1,6 @@
-import { request as httpsRequest, type RequestOptions } from "node:https";
+import { randomBytes } from "node:crypto";
 import { request as httpRequest } from "node:http";
+import { request as httpsRequest, type RequestOptions } from "node:https";
 import { generateToken } from "../crypto.ts";
 import { forbidden, missingParam } from "../errors.ts";
 import type { Handler } from "../router.ts";
@@ -237,7 +238,7 @@ export const getSsoCallback =
 					user_id: userId,
 					localpart,
 					server_name: serverName,
-					password_hash: "", // SSO users have no password
+					password_hash: randomBytes(32).toString("base64url"), // SSO users can't login with password
 					account_type: "user",
 					is_deactivated: false,
 					created_at: Date.now(),
