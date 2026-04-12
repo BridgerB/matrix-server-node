@@ -1,6 +1,6 @@
 import pg from "pg";
 import { computeEventId } from "../events.ts";
-import type { DeviceKeys, OneTimeKey } from "../types/e2ee.ts";
+import type { CrossSigningKey, DeviceKeys, KeyBackupData, OneTimeKey } from "../types/e2ee.ts";
 import type {
 	PDU,
 	StrippedStateEvent,
@@ -262,6 +262,31 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				origin TEXT NOT NULL,
 				txn_id TEXT NOT NULL,
 				PRIMARY KEY (origin, txn_id)
+			);
+
+			CREATE TABLE IF NOT EXISTS cross_signing_keys (
+				user_id TEXT NOT NULL,
+				key_type TEXT NOT NULL,
+				key_json TEXT NOT NULL,
+				PRIMARY KEY (user_id, key_type)
+			);
+
+			CREATE TABLE IF NOT EXISTS key_backup_versions (
+				id SERIAL PRIMARY KEY,
+				user_id TEXT NOT NULL,
+				version TEXT NOT NULL,
+				algorithm TEXT NOT NULL,
+				auth_data TEXT NOT NULL,
+				UNIQUE(user_id, version)
+			);
+
+			CREATE TABLE IF NOT EXISTS key_backup_data (
+				user_id TEXT NOT NULL,
+				version TEXT NOT NULL,
+				room_id TEXT NOT NULL,
+				session_id TEXT NOT NULL,
+				key_json TEXT NOT NULL,
+				PRIMARY KEY (user_id, version, room_id, session_id)
 			);
 		`);
 
@@ -1186,6 +1211,455 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		const types = new Set<string>();
 		for (const r of rows) types.add(r.key_id.split(":")[0] as string);
 		return [...types];
+	}
+
+	async setCrossSigningKeys(
+		userId: UserId,
+		keys: {
+			master_key?: CrossSigningKey;
+			self_signing_key?: CrossSigningKey;
+			user_signing_key?: CrossSigningKey;
+		},
+	): Promise<void> {
+		const entries: [string, CrossSigningKey][] = [];
+		if (keys.master_key) entries.push(["master_key", keys.master_key]);
+		if (keys.self_signing_key)
+			entries.push(["self_signing_key", keys.self_signing_key]);
+		if (keys.user_signing_key)
+			entries.push(["user_signing_key", keys.user_signing_key]);
+
+		for (const [keyType, key] of entries) {
+			await this.pool.query(
+				"INSERT INTO cross_signing_keys (user_id, key_type, key_json) VALUES ($1, $2, $3) ON CONFLICT (user_id, key_type) DO UPDATE SET key_json = EXCLUDED.key_json",
+				[userId, keyType, JSON.stringify(key)],
+			);
+		}
+	}
+
+	async getCrossSigningKeys(userId: UserId): Promise<{
+		master_key?: CrossSigningKey;
+		self_signing_key?: CrossSigningKey;
+		user_signing_key?: CrossSigningKey;
+	}> {
+		const { rows } = await this.pool.query(
+			"SELECT key_type, key_json FROM cross_signing_keys WHERE user_id = $1",
+			[userId],
+		);
+		const result: {
+			master_key?: CrossSigningKey;
+			self_signing_key?: CrossSigningKey;
+			user_signing_key?: CrossSigningKey;
+		} = {};
+		for (const r of rows) {
+			const key = typeof r.key_json === "string" ? JSON.parse(r.key_json) : r.key_json;
+			if (r.key_type === "master_key") result.master_key = key;
+			else if (r.key_type === "self_signing_key") result.self_signing_key = key;
+			else if (r.key_type === "user_signing_key") result.user_signing_key = key;
+		}
+		return result;
+	}
+
+	async storeCrossSigningSignatures(
+		_userId: UserId,
+		signatures: Record<string, Record<string, JsonObject>>,
+	): Promise<
+		Record<string, Record<string, { errcode: string; error: string }>>
+	> {
+		const failures: Record<
+			string,
+			Record<string, { errcode: string; error: string }>
+		> = {};
+		for (const [targetUserId, keyMap] of Object.entries(signatures)) {
+			for (const [keyId, signedObject] of Object.entries(keyMap)) {
+				const signedSigs = (
+					signedObject as Record<string, unknown>
+				).signatures as Record<string, Record<string, string>> | undefined;
+				if (!signedSigs) {
+					failures[targetUserId] ??= {};
+					(
+						failures[targetUserId] as Record<
+							string,
+							{ errcode: string; error: string }
+						>
+					)[keyId] = {
+						errcode: "M_INVALID_SIGNATURE",
+						error: "Missing signatures field",
+					};
+					continue;
+				}
+
+				// Try updating device keys
+				const deviceKeys = await this.getDeviceKeys(
+					targetUserId as UserId,
+					keyId as DeviceId,
+				);
+				if (deviceKeys) {
+					if (!deviceKeys.signatures) deviceKeys.signatures = {};
+					for (const [signer, sigs] of Object.entries(signedSigs)) {
+						deviceKeys.signatures[signer] ??= {};
+						Object.assign(
+							deviceKeys.signatures[signer] as Record<string, string>,
+							sigs,
+						);
+					}
+					await this.setDeviceKeys(
+						targetUserId as UserId,
+						keyId as DeviceId,
+						deviceKeys,
+					);
+					continue;
+				}
+
+				// Try updating cross-signing keys
+				const crossKeys = await this.getCrossSigningKeys(
+					targetUserId as UserId,
+				);
+				let matched = false;
+				for (const [crossKeyType, key] of Object.entries(crossKeys) as [
+					string,
+					CrossSigningKey,
+				][]) {
+					if (!key) continue;
+					if (
+						Object.keys(key.keys).some(
+							(k) => k === keyId || k.endsWith(`:${keyId}`),
+						)
+					) {
+						if (!key.signatures) key.signatures = {};
+						for (const [signer, sigs] of Object.entries(signedSigs)) {
+							key.signatures[signer] ??= {};
+							Object.assign(
+								key.signatures[signer] as Record<string, string>,
+								sigs,
+							);
+						}
+						await this.pool.query(
+							"UPDATE cross_signing_keys SET key_json = $1 WHERE user_id = $2 AND key_type = $3",
+							[
+								JSON.stringify(key),
+								targetUserId,
+								crossKeyType,
+							],
+						);
+						matched = true;
+						break;
+					}
+				}
+				if (matched) continue;
+
+				failures[targetUserId] ??= {};
+				(
+					failures[targetUserId] as Record<
+						string,
+						{ errcode: string; error: string }
+					>
+				)[keyId] = {
+					errcode: "M_NOT_FOUND",
+					error: "Key not found",
+				};
+			}
+		}
+		return failures;
+	}
+
+	async createKeyBackupVersion(
+		userId: UserId,
+		algorithm: string,
+		authData: JsonObject,
+	): Promise<string> {
+		const { rows } = await this.pool.query<{ m: string | null }>(
+			"SELECT MAX(version::int) AS m FROM key_backup_versions WHERE user_id = $1",
+			[userId],
+		);
+		const nextVersion = String((rows[0]?.m ? parseInt(rows[0].m, 10) : 0) + 1);
+		await this.pool.query(
+			"INSERT INTO key_backup_versions (user_id, version, algorithm, auth_data) VALUES ($1, $2, $3, $4)",
+			[userId, nextVersion, algorithm, JSON.stringify(authData)],
+		);
+		return nextVersion;
+	}
+
+	async getKeyBackupVersion(
+		userId: UserId,
+		version?: string,
+	): Promise<
+		| {
+				version: string;
+				algorithm: string;
+				auth_data: JsonObject;
+				count: number;
+				etag: string;
+		  }
+		| undefined
+	> {
+		let rows: { version: string; algorithm: string; auth_data: string }[];
+		if (version) {
+			({ rows } = await this.pool.query(
+				"SELECT version, algorithm, auth_data FROM key_backup_versions WHERE user_id = $1 AND version = $2",
+				[userId, version],
+			));
+		} else {
+			({ rows } = await this.pool.query(
+				"SELECT version, algorithm, auth_data FROM key_backup_versions WHERE user_id = $1 ORDER BY version::int DESC LIMIT 1",
+				[userId],
+			));
+		}
+		if (!rows[0]) return undefined;
+		const v = rows[0];
+
+		const {
+			rows: [countRow],
+		} = await this.pool.query<{ cnt: string }>(
+			"SELECT COUNT(*)::int AS cnt FROM key_backup_data WHERE user_id = $1 AND version = $2",
+			[userId, v.version],
+		);
+		const count = parseInt(countRow!.cnt, 10);
+
+		const authData =
+			typeof v.auth_data === "string"
+				? JSON.parse(v.auth_data)
+				: v.auth_data;
+
+		return {
+			version: v.version,
+			algorithm: v.algorithm,
+			auth_data: authData,
+			count,
+			etag: await this.computeBackupEtagPg(userId, v.version),
+		};
+	}
+
+	private async computeBackupEtagPg(
+		userId: string,
+		version: string,
+	): Promise<string> {
+		const { rows } = await this.pool.query(
+			"SELECT room_id, session_id FROM key_backup_data WHERE user_id = $1 AND version = $2",
+			[userId, version],
+		);
+		if (rows.length === 0) return "0";
+		let hash = 0;
+		for (const r of rows) {
+			for (const c of `${r.room_id}${r.session_id}`) {
+				hash = ((hash << 5) - hash + c.charCodeAt(0)) | 0;
+			}
+		}
+		return String(Math.abs(hash));
+	}
+
+	async updateKeyBackupVersion(
+		userId: UserId,
+		version: string,
+		authData: JsonObject,
+	): Promise<boolean> {
+		const result = await this.pool.query(
+			"UPDATE key_backup_versions SET auth_data = $1 WHERE user_id = $2 AND version = $3",
+			[JSON.stringify(authData), userId, version],
+		);
+		return (result.rowCount ?? 0) > 0;
+	}
+
+	async deleteKeyBackupVersion(
+		userId: UserId,
+		version: string,
+	): Promise<boolean> {
+		await this.pool.query(
+			"DELETE FROM key_backup_data WHERE user_id = $1 AND version = $2",
+			[userId, version],
+		);
+		const result = await this.pool.query(
+			"DELETE FROM key_backup_versions WHERE user_id = $1 AND version = $2",
+			[userId, version],
+		);
+		return (result.rowCount ?? 0) > 0;
+	}
+
+	async putKeyBackupKeys(
+		userId: UserId,
+		version: string,
+		roomId: RoomId | undefined,
+		sessionId: string | undefined,
+		keys:
+			| KeyBackupData
+			| { sessions: Record<string, KeyBackupData> }
+			| {
+					rooms: Record<
+						RoomId,
+						{ sessions: Record<string, KeyBackupData> }
+					>;
+			  },
+	): Promise<{ count: number; etag: string } | undefined> {
+		// Verify version exists and is latest
+		const { rows: versionRows } = await this.pool.query(
+			"SELECT version FROM key_backup_versions WHERE user_id = $1 ORDER BY version::int DESC LIMIT 1",
+			[userId],
+		);
+		if (!versionRows[0] || versionRows[0].version !== version) return undefined;
+
+		const entries: [RoomId, string, KeyBackupData][] = [];
+		if (roomId && sessionId) {
+			entries.push([roomId, sessionId, keys as KeyBackupData]);
+		} else if (roomId) {
+			const roomKeys = keys as { sessions: Record<string, KeyBackupData> };
+			for (const [sid, data] of Object.entries(roomKeys.sessions)) {
+				entries.push([roomId, sid, data]);
+			}
+		} else {
+			const allKeys = keys as {
+				rooms: Record<
+					RoomId,
+					{ sessions: Record<string, KeyBackupData> }
+				>;
+			};
+			for (const [rid, roomData] of Object.entries(allKeys.rooms)) {
+				for (const [sid, data] of Object.entries(roomData.sessions)) {
+					entries.push([rid as RoomId, sid, data]);
+				}
+			}
+		}
+
+		for (const [rid, sid, data] of entries) {
+			await this.mergeBackupKeyPg(userId, version, rid, sid, data);
+		}
+
+		const {
+			rows: [countRow],
+		} = await this.pool.query<{ cnt: string }>(
+			"SELECT COUNT(*)::int AS cnt FROM key_backup_data WHERE user_id = $1 AND version = $2",
+			[userId, version],
+		);
+		const count = parseInt(countRow!.cnt, 10);
+		return { count, etag: await this.computeBackupEtagPg(userId, version) };
+	}
+
+	private async mergeBackupKeyPg(
+		userId: string,
+		version: string,
+		roomId: RoomId,
+		sessionId: string,
+		newData: KeyBackupData,
+	): Promise<void> {
+		const { rows } = await this.pool.query(
+			"SELECT key_json FROM key_backup_data WHERE user_id = $1 AND version = $2 AND room_id = $3 AND session_id = $4",
+			[userId, version, roomId, sessionId],
+		);
+		if (rows[0]) {
+			const existing =
+				typeof rows[0].key_json === "string"
+					? (JSON.parse(rows[0].key_json) as KeyBackupData)
+					: (rows[0].key_json as KeyBackupData);
+			const shouldReplace =
+				(newData.is_verified && !existing.is_verified) ||
+				(newData.is_verified === existing.is_verified &&
+					newData.first_message_index < existing.first_message_index) ||
+				(newData.is_verified === existing.is_verified &&
+					newData.first_message_index === existing.first_message_index &&
+					newData.forwarded_count < existing.forwarded_count);
+			if (!shouldReplace) return;
+		}
+		await this.pool.query(
+			"INSERT INTO key_backup_data (user_id, version, room_id, session_id, key_json) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (user_id, version, room_id, session_id) DO UPDATE SET key_json = EXCLUDED.key_json",
+			[userId, version, roomId, sessionId, JSON.stringify(newData)],
+		);
+	}
+
+	async getKeyBackupKeys(
+		userId: UserId,
+		version: string,
+		roomId?: RoomId,
+		sessionId?: string,
+	): Promise<
+		| KeyBackupData
+		| { sessions: Record<string, KeyBackupData> }
+		| {
+				rooms: Record<
+					RoomId,
+					{ sessions: Record<string, KeyBackupData> }
+				>;
+		  }
+		| undefined
+	> {
+		if (roomId && sessionId) {
+			const { rows } = await this.pool.query(
+				"SELECT key_json FROM key_backup_data WHERE user_id = $1 AND version = $2 AND room_id = $3 AND session_id = $4",
+				[userId, version, roomId, sessionId],
+			);
+			if (!rows[0]) return undefined;
+			return typeof rows[0].key_json === "string"
+				? JSON.parse(rows[0].key_json)
+				: rows[0].key_json;
+		} else if (roomId) {
+			const { rows } = await this.pool.query(
+				"SELECT session_id, key_json FROM key_backup_data WHERE user_id = $1 AND version = $2 AND room_id = $3",
+				[userId, version, roomId],
+			);
+			const sessions: Record<string, KeyBackupData> = {};
+			for (const r of rows) {
+				sessions[r.session_id] =
+					typeof r.key_json === "string"
+						? JSON.parse(r.key_json)
+						: r.key_json;
+			}
+			return { sessions };
+		} else {
+			const { rows } = await this.pool.query(
+				"SELECT room_id, session_id, key_json FROM key_backup_data WHERE user_id = $1 AND version = $2",
+				[userId, version],
+			);
+			const result: Record<
+				RoomId,
+				{ sessions: Record<string, KeyBackupData> }
+			> = {};
+			for (const r of rows) {
+				const rid = r.room_id as RoomId;
+				if (!result[rid]) result[rid] = { sessions: {} };
+				result[rid]!.sessions[r.session_id] =
+					typeof r.key_json === "string"
+						? JSON.parse(r.key_json)
+						: r.key_json;
+			}
+			return { rooms: result };
+		}
+	}
+
+	async deleteKeyBackupKeys(
+		userId: UserId,
+		version: string,
+		roomId?: RoomId,
+		sessionId?: string,
+	): Promise<{ count: number; etag: string } | undefined> {
+		// Verify version exists
+		const { rows: versionRows } = await this.pool.query(
+			"SELECT version FROM key_backup_versions WHERE user_id = $1 AND version = $2",
+			[userId, version],
+		);
+		if (!versionRows[0]) return undefined;
+
+		if (roomId && sessionId) {
+			await this.pool.query(
+				"DELETE FROM key_backup_data WHERE user_id = $1 AND version = $2 AND room_id = $3 AND session_id = $4",
+				[userId, version, roomId, sessionId],
+			);
+		} else if (roomId) {
+			await this.pool.query(
+				"DELETE FROM key_backup_data WHERE user_id = $1 AND version = $2 AND room_id = $3",
+				[userId, version, roomId],
+			);
+		} else {
+			await this.pool.query(
+				"DELETE FROM key_backup_data WHERE user_id = $1 AND version = $2",
+				[userId, version],
+			);
+		}
+
+		const {
+			rows: [countRow],
+		} = await this.pool.query<{ cnt: string }>(
+			"SELECT COUNT(*)::int AS cnt FROM key_backup_data WHERE user_id = $1 AND version = $2",
+			[userId, version],
+		);
+		const count = parseInt(countRow!.cnt, 10);
+		return { count, etag: await this.computeBackupEtagPg(userId, version) };
 	}
 
 	async sendToDevice(
