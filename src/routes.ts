@@ -108,6 +108,12 @@ import {
 	putKeyBackupVersion,
 } from "./handlers/key-backup.ts";
 import { getLoginFlows, postLogin } from "./handlers/login.ts";
+import {
+	getSsoCallback,
+	getSsoConfig,
+	getSsoFallback,
+	getSsoRedirect,
+} from "./handlers/sso.ts";
 import { postLogout, postLogoutAll } from "./handlers/logout.ts";
 import {
 	getConfig,
@@ -225,6 +231,27 @@ export const registerRoutes = (
 		registerRL,
 	);
 	router.post("/_matrix/client/v3/refresh", postRefresh(storage));
+
+	// SSO routes (only registered when SSO is configured)
+	const ssoConfig = getSsoConfig();
+	if (ssoConfig) {
+		router.get(
+			"/_matrix/client/v3/login/sso/redirect/:idpId",
+			getSsoRedirect(ssoConfig),
+		);
+		router.get(
+			"/_matrix/client/v3/login/sso/redirect",
+			getSsoRedirect(ssoConfig),
+		);
+		router.get(
+			"/_matrix/client/v3/login/sso/callback",
+			getSsoCallback(storage, serverName, ssoConfig),
+		);
+		router.get(
+			"/_matrix/client/v3/auth/m.login.sso/fallback/web",
+			getSsoFallback(ssoConfig),
+		);
+	}
 
 	router.post("/_matrix/client/v3/logout", postLogout(storage), auth);
 	router.post("/_matrix/client/v3/logout/all", postLogoutAll(storage), auth);
