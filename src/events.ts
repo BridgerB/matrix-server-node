@@ -519,6 +519,29 @@ export const requireJoinedRoom = async (
 	return room;
 };
 
+export const isWorldReadable = (roomState: RoomState): boolean => {
+	const hvEvent = roomState.state_events.get(
+		"m.room.history_visibility\0",
+	);
+	if (!hvEvent) return false;
+	return (
+		(hvEvent.content as Record<string, unknown>).history_visibility ===
+		"world_readable"
+	);
+};
+
+export const requireJoinedOrWorldReadable = async (
+	storage: Storage,
+	roomId: string,
+	userId: string | undefined,
+): Promise<RoomState> => {
+	const room = await storage.getRoom(roomId);
+	if (!room) throw roomNotFound();
+	if (userId && getMembership(room, userId) === "join") return room;
+	if (isWorldReadable(room)) return room;
+	throw notJoined();
+};
+
 export const countJoinedMembers = (
 	stateEvents: Map<string, { content: unknown }>,
 ): number =>
