@@ -4,7 +4,7 @@ import { isServerAllowedByAcl } from "../../federation/acl.ts";
 import type { Handler } from "../../router.ts";
 import type { Storage } from "../../storage/interface.ts";
 import type { PDU } from "../../types/events.ts";
-import type { EventId, RoomId, ServerName } from "../../types/index.ts";
+import type { EventId, RoomId, ServerName, Timestamp } from "../../types/index.ts";
 
 export const getFederationEvent =
 	(storage: Storage, serverName: string): Handler =>
@@ -169,5 +169,55 @@ export const postFederationMissingEvents =
 		return {
 			status: 200,
 			body: { events: result },
+		};
+	};
+
+export const getFederationTimestampToEvent =
+	(storage: Storage): Handler =>
+	async (req) => {
+		const roomId = req.params.roomId as RoomId;
+		const tsStr = req.query.get("ts");
+		const dir = req.query.get("dir") ?? "f";
+
+		if (!tsStr) throw notFound("Missing ts parameter");
+		const ts = parseInt(tsStr, 10) as Timestamp;
+
+		const room = await storage.getRoom(roomId);
+		if (!room) throw notFound("Room not found");
+
+		if (!isServerAllowedByAcl(req.origin as ServerName, room))
+			throw forbidden("Server is denied by ACL");
+
+		// Events are stored in forward chronological order
+		const result = await storage.getEventsByRoom(roomId, 10000, undefined, "f");
+		const events = result.events;
+
+		let closest: { event: PDU; eventId: EventId } | undefined;
+
+		if (dir === "f") {
+			for (const entry of events) {
+				if (entry.event.origin_server_ts >= ts) {
+					closest = entry;
+					break;
+				}
+			}
+		} else {
+			for (const entry of events) {
+				if (entry.event.origin_server_ts <= ts) {
+					closest = entry;
+				} else {
+					break;
+				}
+			}
+		}
+
+		if (!closest) throw notFound("No event found");
+
+		return {
+			status: 200,
+			body: {
+				event_id: closest.eventId,
+				origin_server_ts: closest.event.origin_server_ts,
+			},
 		};
 	};

@@ -6,7 +6,11 @@ import {
 	notFound,
 	roomNotFound,
 } from "../errors.ts";
-import { type EventContext, getMembership, sendStateEvent } from "../events.ts";
+import {
+	type EventContext,
+	getMembership,
+	sendStateEvent,
+} from "../events.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { RoomState } from "../types/internal.ts";
@@ -315,6 +319,23 @@ export const postInvite =
 		return { status: 200, body: {} };
 	};
 
+export const postKnock =
+	(storage: Storage, serverName: string): Handler =>
+	async (req) => {
+		const roomId = req.params.roomId as string;
+		const body = (req.body ?? {}) as { reason?: string };
+		await sendMembershipEvent(
+			storage,
+			serverName,
+			roomId,
+			req.userId as string,
+			req.userId as string,
+			"knock",
+			body.reason,
+		);
+		return { status: 200, body: {} };
+	};
+
 export const postKick =
 	(storage: Storage, serverName: string): Handler =>
 	async (req) => {
@@ -372,5 +393,22 @@ export const postUnban =
 			"leave",
 			body.reason,
 		);
+		return { status: 200, body: {} };
+	};
+
+export const postForget =
+	(storage: Storage): Handler =>
+	async (req) => {
+		const roomId = req.params.roomId as string;
+		const userId = req.userId as string;
+
+		const room = await storage.getRoom(roomId);
+		if (!room) throw roomNotFound();
+
+		const membership = getMembership(room, userId);
+		if (membership !== "leave" && membership !== "ban") {
+			throw forbidden("User must have left the room before forgetting it");
+		}
+
 		return { status: 200, body: {} };
 	};
