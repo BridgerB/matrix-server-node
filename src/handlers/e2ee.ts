@@ -196,7 +196,45 @@ export const putSendToDevice =
 		return { status: 200, body: {} };
 	};
 
-export const getKeysChanges = (): Handler => async () => ({
-	status: 200,
-	body: { changed: [], left: [] },
-});
+export const getKeysChanges =
+	(storage: Storage): Handler =>
+	async (req) => {
+		const userId = req.userId as UserId;
+
+		// Get all rooms the requesting user is in
+		const roomMemberships =
+			await storage.getRoomsForUserWithMembership(userId);
+		const joinedRoomIds = roomMemberships
+			.filter((r) => r.membership === "join")
+			.map((r) => r.roomId);
+
+		// Collect all users in those rooms who have device keys
+		const changedUsers = new Set<UserId>();
+		for (const roomId of joinedRoomIds) {
+			const members = await storage.getMemberEvents(roomId);
+			for (const { event } of members) {
+				const memberUserId = event.state_key as UserId | undefined;
+				const membership = (
+					event.content as { membership?: string } | undefined
+				)?.membership;
+				if (
+					memberUserId &&
+					membership === "join" &&
+					memberUserId !== userId
+				) {
+					const keys = await storage.getAllDeviceKeys(memberUserId);
+					if (Object.keys(keys).length > 0) {
+						changedUsers.add(memberUserId);
+					}
+				}
+			}
+		}
+
+		return {
+			status: 200,
+			body: {
+				changed: [...changedUsers],
+				left: [],
+			},
+		};
+	};
