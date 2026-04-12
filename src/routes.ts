@@ -162,6 +162,7 @@ import { postUserDirectorySearch } from "./handlers/user-directory.ts";
 import { getTurnServer } from "./handlers/voip.ts";
 import { requireAuth } from "./middleware/auth.ts";
 import { requireFederationAuth } from "./middleware/federation-auth.ts";
+import { rateLimit } from "./middleware/rate-limit.ts";
 import type { Router } from "./router.ts";
 import type { SigningKey } from "./signing.ts";
 import type { Storage } from "./storage/interface.ts";
@@ -174,6 +175,9 @@ export const registerRoutes = (
 	signingKey?: SigningKey,
 ): void => {
 	const auth = requireAuth(storage);
+	const loginRL = rateLimit("login");
+	const registerRL = rateLimit("register");
+	const defaultRL = rateLimit("default");
 
 	router.get("/_matrix/client/versions", versionsHandler(serverName));
 	router.get("/.well-known/matrix/server", wellKnownServerHandler(serverName));
@@ -181,8 +185,16 @@ export const registerRoutes = (
 	router.get("/_matrix/client/v3/capabilities", getCapabilities(), auth);
 
 	router.get("/_matrix/client/v3/login", getLoginFlows());
-	router.post("/_matrix/client/v3/login", postLogin(storage, serverName));
-	router.post("/_matrix/client/v3/register", postRegister(storage, serverName));
+	router.post(
+		"/_matrix/client/v3/login",
+		postLogin(storage, serverName),
+		loginRL,
+	);
+	router.post(
+		"/_matrix/client/v3/register",
+		postRegister(storage, serverName),
+		registerRL,
+	);
 	router.post("/_matrix/client/v3/refresh", postRefresh(storage));
 
 	router.post("/_matrix/client/v3/logout", postLogout(storage), auth);
@@ -193,11 +205,13 @@ export const registerRoutes = (
 		"/_matrix/client/v3/account/password",
 		postChangePassword(storage),
 		auth,
+		defaultRL,
 	);
 	router.post(
 		"/_matrix/client/v3/account/deactivate",
 		postDeactivate(storage),
 		auth,
+		defaultRL,
 	);
 
 	router.get("/_matrix/client/v3/profile/:userId", getProfile(storage));

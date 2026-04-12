@@ -1,3 +1,4 @@
+import { verifyPassword } from "../crypto-utils.ts";
 import { badJson, forbidden, invalidParam } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
@@ -35,8 +36,11 @@ export const postLogin =
 		if (account.is_deactivated)
 			throw forbidden("This account has been deactivated");
 
-		// TODO: replace with argon2 verification
-		if (body.password !== account.password_hash) {
+		const passwordValid = await verifyPassword(
+			body.password ?? "",
+			account.password_hash,
+		);
+		if (!passwordValid) {
 			throw forbidden("Invalid username or password");
 		}
 
