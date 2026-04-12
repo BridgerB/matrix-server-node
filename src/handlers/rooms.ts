@@ -8,19 +8,25 @@ import {
 } from "../errors.ts";
 import {
 	buildEvent,
+	computeEventId,
 	computeRoomIdV12,
 	type EventContext,
 	getMembership,
 	isRoomVersion12Plus,
 	sendStateEvent,
 } from "../events.ts";
+import type { FederationClient } from "../federation/client.ts";
 
 import type { Handler } from "../router.ts";
+import type { SigningKey } from "../signing.ts";
+import { signEvent } from "../signing.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { RoomId } from "../types/index.ts";
+import type { PDU } from "../types/events.ts";
+import type { EventId, RoomId, ServerName } from "../types/index.ts";
 import type { RoomState } from "../types/internal.ts";
 import type { JsonObject } from "../types/json.ts";
 import type { CreateRoomRequest } from "../types/room-operations.ts";
+import type { RoomVersion } from "../types/room-versions.ts";
 import type { RoomPowerLevelsContent } from "../types/state-events.ts";
 export const postCreateRoom =
 	(storage: Storage, serverName: string): Handler =>
@@ -351,7 +357,12 @@ const sendMembershipEvent = async (
 };
 
 export const postJoin =
-	(storage: Storage, serverName: string): Handler =>
+	(
+		storage: Storage,
+		serverName: string,
+		signingKey?: SigningKey,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const roomIdOrAlias = req.params.roomIdOrAlias ?? req.params.roomId;
 		if (!roomIdOrAlias) throw badJson("Missing room ID or alias");
@@ -365,16 +376,157 @@ export const postJoin =
 			roomId = roomIdOrAlias;
 		}
 
-		await sendMembershipEvent(
-			storage,
-			serverName,
-			roomId,
-			req.userId as string,
-			req.userId as string,
-			"join",
-		);
-		return { status: 200, body: { room_id: roomId } };
+		const userId = req.userId as string;
+
+		// Check if room exists locally
+		const room = await storage.getRoom(roomId);
+		if (room) {
+			// Local join
+			await sendMembershipEvent(
+				storage,
+				serverName,
+				roomId,
+				userId,
+				userId,
+				"join",
+			);
+			return { status: 200, body: { room_id: roomId } };
+		}
+
+		// Room not found locally — attempt federation join if we have federation capabilities
+		if (!signingKey || !federationClient) {
+			throw roomNotFound();
+		}
+
+		// Determine the remote server to contact
+		// 1. Check server_name query parameter (Complement passes this)
+		// 2. Extract from room ID
+		const serverNameParams = req.query.getAll("server_name");
+		const roomServer = roomId.includes(":")
+			? roomId.split(":").slice(1).join(":")
+			: undefined;
+
+		const serversToTry: string[] = [];
+		if (serverNameParams.length > 0) {
+			serversToTry.push(...serverNameParams);
+		}
+		if (roomServer && !serversToTry.includes(roomServer)) {
+			serversToTry.push(roomServer);
+		}
+
+		if (serversToTry.length === 0) {
+			throw roomNotFound();
+		}
+
+		let lastError: unknown;
+		for (const remoteServer of serversToTry) {
+			try {
+				const result = await performFederationJoin(
+					storage,
+					serverName,
+					signingKey,
+					federationClient,
+					remoteServer as ServerName,
+					roomId as RoomId,
+					userId,
+				);
+				return result;
+			} catch (err) {
+				lastError = err;
+			}
+		}
+
+		// All servers failed
+		if (lastError instanceof Error) throw lastError;
+		throw roomNotFound();
 	};
+
+const performFederationJoin = async (
+	storage: Storage,
+	serverName: string,
+	signingKey: SigningKey,
+	federationClient: FederationClient,
+	remoteServer: ServerName,
+	roomId: RoomId,
+	userId: string,
+): Promise<{ status: number; body: { room_id: string } }> => {
+	// 1. make_join — get a join event template from the remote server
+	const makeJoinResp = await federationClient.request(
+		remoteServer,
+		"GET",
+		`/_matrix/federation/v1/make_join/${encodeURIComponent(roomId)}/${encodeURIComponent(userId)}`,
+	);
+
+	if (makeJoinResp.status !== 200) {
+		const respBody = makeJoinResp.body as Record<string, unknown> | undefined;
+		throw new Error(
+			`make_join failed: ${respBody?.error ?? respBody?.errcode ?? `status ${makeJoinResp.status}`}`,
+		);
+	}
+
+	const makeJoinBody = makeJoinResp.body as {
+		room_version?: string;
+		event?: PDU;
+	};
+	const template = makeJoinBody.event;
+	if (!template) throw new Error("make_join response missing event template");
+
+	const roomVersion = (makeJoinBody.room_version ?? "10") as RoomVersion;
+
+	// 2. Fill in the template and sign it
+	template.origin_server_ts = Date.now();
+
+	// Sign the event (this computes content hash and signs)
+	const signedEvent = signEvent(
+		template,
+		serverName as ServerName,
+		signingKey,
+	);
+	const eventId = computeEventId(signedEvent);
+
+	// 3. send_join — send the signed event to the remote server
+	const sendJoinResp = await federationClient.request(
+		remoteServer,
+		"PUT",
+		`/_matrix/federation/v2/send_join/${encodeURIComponent(roomId)}/${encodeURIComponent(eventId)}`,
+		signedEvent,
+	);
+
+	if (sendJoinResp.status !== 200) {
+		const respBody = sendJoinResp.body as Record<string, unknown> | undefined;
+		throw new Error(
+			`send_join failed: ${respBody?.error ?? respBody?.errcode ?? `status ${sendJoinResp.status}`}`,
+		);
+	}
+
+	const sendJoinBody = sendJoinResp.body as {
+		state?: PDU[];
+		auth_chain?: PDU[];
+		event?: PDU;
+	};
+
+	const stateEvents = sendJoinBody.state ?? [];
+	const authChain = sendJoinBody.auth_chain ?? [];
+
+	// 4. Import the room state
+	// Include our join event in the state
+	const allState = [...stateEvents, sendJoinBody.event ?? signedEvent];
+	await storage.importRoomState(
+		roomId,
+		roomVersion,
+		allState,
+		authChain,
+	);
+
+	// Update the room's forward extremities and depth to include our join
+	const room = await storage.getRoom(roomId);
+	if (room) {
+		room.forward_extremities = [eventId as EventId];
+		room.depth = Math.max(room.depth, signedEvent.depth + 1);
+	}
+
+	return { status: 200, body: { room_id: roomId } };
+};
 
 export const postLeave =
 	(storage: Storage, serverName: string): Handler =>
