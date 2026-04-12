@@ -1033,6 +1033,28 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		};
 	}
 
+	async reserveMedia(media: StoredMedia): Promise<void> {
+		await this.storeMedia(media, Buffer.alloc(0));
+	}
+
+	async updateMediaContent(
+		serverName: ServerName,
+		mediaId: string,
+		contentType: string,
+		fileName: string | undefined,
+		data: Buffer,
+	): Promise<boolean> {
+		const existing = await this.getMedia(serverName, mediaId);
+		if (!existing) return false;
+		const { createHash } = await import("node:crypto");
+		const hash = createHash("sha256").update(data).digest("base64");
+		await this.pool.query(
+			"UPDATE media SET content_type = $1, upload_name = $2, file_size = $3, content_hash = $4, data = $5 WHERE origin = $6 AND media_id = $7",
+			[contentType, fileName ?? null, data.length, hash, data, serverName, mediaId],
+		);
+		return true;
+	}
+
 	async createFilter(userId: UserId, filter: JsonObject): Promise<string> {
 		const filterId = String(++this.filterCounter);
 		await this.pool.query(

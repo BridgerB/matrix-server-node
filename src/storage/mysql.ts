@@ -1115,6 +1115,28 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 		};
 	}
 
+	async reserveMedia(media: StoredMedia): Promise<void> {
+		await this.storeMedia(media, Buffer.alloc(0));
+	}
+
+	async updateMediaContent(
+		serverName: ServerName,
+		mediaId: string,
+		contentType: string,
+		fileName: string | undefined,
+		data: Buffer,
+	): Promise<boolean> {
+		const existing = await this.getMedia(serverName, mediaId);
+		if (!existing) return false;
+		const { createHash } = await import("node:crypto");
+		const hash = createHash("sha256").update(data).digest("base64");
+		await this.exec(
+			"UPDATE media SET content_type = ?, upload_name = ?, file_size = ?, content_hash = ?, data = ? WHERE origin = ? AND media_id = ?",
+			[contentType, fileName ?? null, data.length, hash, data, serverName, mediaId],
+		);
+		return true;
+	}
+
 	async createFilter(userId: UserId, filter: JsonObject): Promise<string> {
 		const filterId = String(++this.filterCounter);
 		await this.exec(

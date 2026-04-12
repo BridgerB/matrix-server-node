@@ -68,6 +68,10 @@ import {
 	getQueryDirectory,
 	getQueryProfile,
 } from "./handlers/federation/query.ts";
+import {
+	getFederationMediaDownload,
+	getFederationMediaThumbnail,
+} from "./handlers/federation/media.ts";
 import { putFederationSend } from "./handlers/federation/transactions.ts";
 import { getFilterById, postCreateFilter } from "./handlers/filters.ts";
 import { getLoginFlows, postLogin } from "./handlers/login.ts";
@@ -76,7 +80,9 @@ import {
 	getConfig,
 	getDownload,
 	getThumbnail,
+	postCreateMedia,
 	postUpload,
+	putAsyncUpload,
 } from "./handlers/media.ts";
 import { getNotifications } from "./handlers/notifications.ts";
 import { postOpenIdToken } from "./handlers/openid.ts";
@@ -429,6 +435,16 @@ export const registerRoutes = (
 	);
 
 	router.post(
+		"/_matrix/media/v1/create",
+		postCreateMedia(storage, serverName),
+		auth,
+	);
+	router.put(
+		"/_matrix/media/v3/upload/:serverName/:mediaId",
+		putAsyncUpload(storage, serverName),
+		auth,
+	);
+	router.post(
 		"/_matrix/media/v3/upload",
 		postUpload(storage, serverName),
 		auth,
@@ -677,6 +693,17 @@ export const registerRoutes = (
 		router.put(
 			"/_matrix/federation/v2/invite/:roomId/:eventId",
 			putFederationInvite(storage, serverName, signingKey, federationClient),
+			fedAuth,
+		);
+
+		router.get(
+			"/_matrix/federation/v1/media/download/:mediaId",
+			getFederationMediaDownload(storage, serverName),
+			fedAuth,
+		);
+		router.get(
+			"/_matrix/federation/v1/media/thumbnail/:mediaId",
+			getFederationMediaThumbnail(storage, serverName),
 			fedAuth,
 		);
 	}
