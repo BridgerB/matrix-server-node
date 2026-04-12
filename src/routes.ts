@@ -130,6 +130,7 @@ import {
 } from "./handlers/rooms.ts";
 import { postSearch } from "./handlers/search.ts";
 import { getSpaceHierarchy } from "./handlers/spaces.ts";
+import { slidingSync } from "./handlers/sliding-sync.ts";
 import { getSync } from "./handlers/sync.ts";
 import { getThreads } from "./handlers/threads.ts";
 import {
@@ -567,6 +568,17 @@ export const registerRoutes = (
 	);
 
 	router.get("/_matrix/client/v3/sync", getSync(storage, serverName), auth);
+
+	router.post(
+		"/_matrix/client/unstable/org.matrix.simplified_msc3575/sync",
+		slidingSync(storage, serverName),
+		auth,
+	);
+	router.post(
+		"/_matrix/client/v4/sync",
+		slidingSync(storage, serverName),
+		auth,
+	);
 
 	if (signingKey) {
 		const federationClient = new FederationClient(
