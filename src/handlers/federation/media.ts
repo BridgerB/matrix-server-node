@@ -32,7 +32,7 @@ const buildMultipartResponse = (
 	return { body: Buffer.concat(parts), boundary };
 };
 
-export const getFederationMediaDownload =
+const serveFederationMedia =
 	(storage: Storage, serverName: string): Handler =>
 	async (req) => {
 		const mediaId = req.params.mediaId!;
@@ -62,33 +62,5 @@ export const getFederationMediaDownload =
 		};
 	};
 
-export const getFederationMediaThumbnail =
-	(storage: Storage, serverName: string): Handler =>
-	async (req) => {
-		const mediaId = req.params.mediaId!;
-
-		const result = await storage.getMedia(serverName as ServerName, mediaId);
-		if (!result) throw notFound("Media not found");
-
-		const { metadata, data } = result;
-
-		if (metadata.file_size === 0) {
-			throw notFound("Media not yet uploaded");
-		}
-
-		// No real thumbnailing — serve the full image
-		const { body, boundary } = buildMultipartResponse(
-			metadata.content_type,
-			metadata.upload_name,
-			data,
-		);
-
-		return {
-			status: 200,
-			body,
-			headers: {
-				"Content-Type": `multipart/mixed; boundary=${boundary}`,
-				"Content-Length": String(body.length),
-			},
-		};
-	};
+export const getFederationMediaDownload = serveFederationMedia;
+export const getFederationMediaThumbnail = serveFederationMedia;

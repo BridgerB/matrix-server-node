@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { computeEventId } from "../events.ts";
 import type { DeviceKeys, OneTimeKey } from "../types/e2ee.ts";
 import type {
@@ -661,7 +662,6 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		const key = `${serverName}/${mediaId}`;
 		const existing = this.mediaStore.get(key);
 		if (!existing) return false;
-		const { createHash } = await import("node:crypto");
 		const hash = createHash("sha256").update(data).digest("base64");
 		existing.metadata.content_type = contentType;
 		existing.metadata.upload_name = fileName;
