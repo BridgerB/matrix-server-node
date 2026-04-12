@@ -187,6 +187,21 @@ import {
 	postAddThreePid,
 	postDeleteThreePid,
 } from "./handlers/threepid.ts";
+import {
+	getAdminWhois,
+	getRegisterAvailable,
+	getRegistrationTokenValidity,
+	postAccount3pidEmailRequestToken,
+	postAccount3pidMsisdnRequestToken,
+	postKnock as postKnockByAlias,
+	postLoginGetToken,
+	postPasswordEmailRequestToken,
+	postPasswordMsisdnRequestToken,
+	postRegisterEmailRequestToken,
+	postRegisterMsisdnRequestToken,
+	postThreePidBind,
+	postThreePidUnbind,
+} from "./handlers/threepid-verify.ts";
 import { putTyping } from "./handlers/typing.ts";
 import { postUserDirectorySearch } from "./handlers/user-directory.ts";
 import { getUrlPreview } from "./handlers/url-preview.ts";
@@ -230,7 +245,28 @@ export const registerRoutes = (
 		postRegister(storage, serverName),
 		registerRL,
 	);
+	router.get(
+		"/_matrix/client/v3/register/available",
+		getRegisterAvailable(storage),
+	);
+	router.post(
+		"/_matrix/client/v3/register/email/requestToken",
+		postRegisterEmailRequestToken(storage, serverName),
+	);
+	router.post(
+		"/_matrix/client/v3/register/msisdn/requestToken",
+		postRegisterMsisdnRequestToken(),
+	);
+	router.get(
+		"/_matrix/client/v3/register/m.login.registration_token/validity",
+		getRegistrationTokenValidity(),
+	);
 	router.post("/_matrix/client/v3/refresh", postRefresh(storage));
+	router.post(
+		"/_matrix/client/v1/login/get_token",
+		postLoginGetToken(storage),
+		auth,
+	);
 
 	// SSO routes (only registered when SSO is configured)
 	const ssoConfig = getSsoConfig();
@@ -264,10 +300,24 @@ export const registerRoutes = (
 		defaultRL,
 	);
 	router.post(
+		"/_matrix/client/v3/account/password/email/requestToken",
+		postPasswordEmailRequestToken(storage, serverName),
+	);
+	router.post(
+		"/_matrix/client/v3/account/password/msisdn/requestToken",
+		postPasswordMsisdnRequestToken(),
+	);
+	router.post(
 		"/_matrix/client/v3/account/deactivate",
 		postDeactivate(storage),
 		auth,
 		defaultRL,
+	);
+
+	router.get(
+		"/_matrix/client/v3/admin/whois/:userId",
+		getAdminWhois(storage),
+		auth,
 	);
 
 	router.get("/_matrix/client/v3/profile/:userId", getProfile(storage));
@@ -360,6 +410,11 @@ export const registerRoutes = (
 	router.post(
 		"/_matrix/client/v3/rooms/:roomId/knock",
 		postKnock(storage, serverName),
+		auth,
+	);
+	router.post(
+		"/_matrix/client/v3/knock/:roomIdOrAlias",
+		postKnockByAlias(storage, serverName),
 		auth,
 	);
 	router.post(
@@ -776,6 +831,24 @@ export const registerRoutes = (
 	router.post(
 		"/_matrix/client/v3/account/3pid/delete",
 		postDeleteThreePid(storage),
+		auth,
+	);
+	router.post(
+		"/_matrix/client/v3/account/3pid/email/requestToken",
+		postAccount3pidEmailRequestToken(storage, serverName),
+	);
+	router.post(
+		"/_matrix/client/v3/account/3pid/msisdn/requestToken",
+		postAccount3pidMsisdnRequestToken(),
+	);
+	router.post(
+		"/_matrix/client/v3/account/3pid/bind",
+		postThreePidBind(),
+		auth,
+	);
+	router.post(
+		"/_matrix/client/v3/account/3pid/unbind",
+		postThreePidUnbind(),
 		auth,
 	);
 

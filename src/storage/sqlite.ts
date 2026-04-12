@@ -2329,6 +2329,85 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			.run(origin, txnId);
 	}
 
+	// 3PID verification — in-memory for simplicity (not persisted across restarts)
+	private verificationSessions = new Map<
+		string,
+		{
+			medium: string;
+			address: string;
+			clientSecret: string;
+			sendAttempt: number;
+			token: string;
+			validated: boolean;
+			userId?: string;
+		}
+	>();
+	private loginTokens = new Map<
+		string,
+		{ userId: UserId; expiresAt: number }
+	>();
+
+	async storeVerificationToken(
+		sessionId: string,
+		data: {
+			medium: string;
+			address: string;
+			clientSecret: string;
+			sendAttempt: number;
+			token: string;
+			validated: boolean;
+			userId?: string;
+		},
+	): Promise<void> {
+		this.verificationSessions.set(sessionId, { ...data });
+	}
+
+	async getVerificationSession(
+		sessionId: string,
+	): Promise<
+		| {
+				medium: string;
+				address: string;
+				clientSecret: string;
+				sendAttempt: number;
+				token: string;
+				validated: boolean;
+				userId?: string;
+		  }
+		| undefined
+	> {
+		return this.verificationSessions.get(sessionId);
+	}
+
+	async validateVerificationToken(
+		sessionId: string,
+		token: string,
+	): Promise<boolean> {
+		const session = this.verificationSessions.get(sessionId);
+		if (!session) return false;
+		if (session.token !== token) return false;
+		session.validated = true;
+		return true;
+	}
+
+	async storeLoginToken(
+		token: string,
+		userId: UserId,
+		expiresAt: number,
+	): Promise<void> {
+		this.loginTokens.set(token, { userId, expiresAt });
+	}
+
+	async getLoginToken(
+		token: string,
+	): Promise<{ userId: UserId; expiresAt: number } | undefined> {
+		return this.loginTokens.get(token);
+	}
+
+	async deleteLoginToken(token: string): Promise<void> {
+		this.loginTokens.delete(token);
+	}
+
 	async importRoomState(
 		roomId: RoomId,
 		roomVersion: RoomVersion,
