@@ -200,6 +200,7 @@ import {
 } from "./handlers/rooms.ts";
 import { postSearch } from "./handlers/search.ts";
 import { getSpaceHierarchy } from "./handlers/spaces.ts";
+import { slidingSync } from "./handlers/sliding-sync.ts";
 import { getSync } from "./handlers/sync.ts";
 import { getThreads } from "./handlers/threads.ts";
 import {
@@ -255,6 +256,11 @@ export const registerRoutes = (
 	const loginRL = rateLimit("login");
 	const registerRL = rateLimit("register");
 	const defaultRL = rateLimit("default");
+
+	// Create federation client early so client-server handlers can use it for federation joins
+	const federationClient = signingKey
+		? new FederationClient(serverName as ServerName, signingKey)
+		: undefined;
 
 	router.get("/_matrix/client/versions", versionsHandler(serverName));
 	router.get("/.well-known/matrix/server", wellKnownServerHandler(serverName));
@@ -456,12 +462,12 @@ export const registerRoutes = (
 
 	router.post(
 		"/_matrix/client/v3/join/:roomIdOrAlias",
-		postJoin(storage, serverName),
+		postJoin(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.post(
 		"/_matrix/client/v3/rooms/:roomId/join",
-		postJoin(storage, serverName),
+		postJoin(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.post(
@@ -572,7 +578,7 @@ export const registerRoutes = (
 		auth,
 	);
 
-	router.post(
+	router.put(
 		"/_matrix/client/v3/rooms/:roomId/redact/:eventId/:txnId",
 		postRedact(storage, serverName),
 		auth,
@@ -1055,6 +1061,18 @@ export const registerRoutes = (
 
 	router.get("/_matrix/client/v3/sync", getSync(storage, serverName), auth);
 
+	// Sliding sync (MSC3575 / v4)
+	router.post(
+		"/_matrix/client/unstable/org.matrix.simplified_msc3575/sync",
+		slidingSync(storage, serverName),
+		auth,
+	);
+	router.post(
+		"/_matrix/client/v4/sync",
+		slidingSync(storage, serverName),
+		auth,
+	);
+
 	// Appservice endpoints
 	router.post(
 		"/_matrix/client/v1/appservice/:appserviceId/ping",
@@ -1066,11 +1084,7 @@ export const registerRoutes = (
 		asAuth,
 	);
 
-	if (signingKey) {
-		const federationClient = new FederationClient(
-			serverName as ServerName,
-			signingKey,
-		);
+	if (signingKey && federationClient) {
 		const fedAuth = requireFederationAuth(
 			serverName,
 			storage,
@@ -1259,6 +1273,183 @@ export const registerRoutes = (
 			fedAuth,
 		);
 	}
+
+	// r0 route aliases for older clients / Complement
+	router.post(
+		"/_matrix/client/r0/register",
+		postRegister(storage, serverName),
+		registerRL,
+	);
+	router.get("/_matrix/client/r0/login", getLoginFlows(registrations));
+	router.post(
+		"/_matrix/client/r0/login",
+		postLogin(storage, serverName, registrations),
+		loginRL,
+	);
+	router.post(
+		"/_matrix/client/r0/createRoom",
+		postCreateRoom(storage, serverName),
+		auth,
+	);
+	router.get("/_matrix/client/r0/sync", getSync(storage, serverName), auth);
+	router.post(
+		"/_matrix/client/r0/join/:roomIdOrAlias",
+		postJoin(storage, serverName, signingKey, federationClient),
+		auth,
+	);
+	router.get("/_matrix/client/r0/joined_rooms", getJoinedRooms(storage), auth);
+	router.put(
+		"/_matrix/client/r0/rooms/:roomId/send/:eventType/:txnId",
+		putSendEvent(storage, serverName),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/r0/rooms/:roomId/messages",
+		getMessages(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/r0/rooms/:roomId/state",
+		getAllState(storage),
+		auth,
+	);
+	router.put(
+		"/_matrix/client/r0/rooms/:roomId/state/:eventType/:stateKey",
+		putStateEvent(storage, serverName),
+		auth,
+	);
+	router.put(
+		"/_matrix/client/r0/rooms/:roomId/state/:eventType",
+		putStateEvent(storage, serverName),
+		auth,
+	);
+	router.get("/_matrix/client/r0/profile/:userId", getProfile(storage));
+	router.get(
+		"/_matrix/client/r0/account/whoami",
+		getWhoAmI(),
+		auth,
+	);
+	router.post(
+		"/_matrix/client/r0/rooms/:roomId/leave",
+		postLeave(storage, serverName),
+		auth,
+	);
+	router.post(
+		"/_matrix/client/r0/rooms/:roomId/invite",
+		postInvite(storage, serverName),
+		auth,
+	);
+	router.post(
+		"/_matrix/client/r0/rooms/:roomId/join",
+		postJoin(storage, serverName, signingKey, federationClient),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/r0/rooms/:roomId/state/:eventType/:stateKey",
+		getStateEvent(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/r0/rooms/:roomId/state/:eventType",
+		getStateEvent(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/r0/rooms/:roomId/members",
+		getMembers(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/r0/rooms/:roomId/event/:eventId",
+		getEvent(storage),
+		auth,
+	);
+	router.get("/_matrix/client/r0/capabilities", getCapabilities(), auth);
+	router.post("/_matrix/client/r0/logout", postLogout(storage), auth);
+	router.post("/_matrix/client/r0/logout/all", postLogoutAll(storage), auth);
+	router.post("/_matrix/client/r0/keys/upload", postKeysUpload(storage), auth);
+	router.post("/_matrix/client/r0/keys/query", postKeysQuery(storage), auth);
+	router.post("/_matrix/client/r0/keys/claim", postKeysClaim(storage), auth);
+	router.put(
+		"/_matrix/client/r0/sendToDevice/:eventType/:txnId",
+		putSendToDevice(storage),
+		auth,
+	);
+	router.put(
+		"/_matrix/client/r0/rooms/:roomId/redact/:eventId/:txnId",
+		postRedact(storage, serverName),
+		auth,
+	);
+	router.get("/_matrix/client/r0/pushrules", getAllPushRules(storage), auth);
+	router.get(
+		"/_matrix/client/r0/user/:userId/account_data/:type",
+		getGlobalAccountData(storage),
+		auth,
+	);
+	router.put(
+		"/_matrix/client/r0/user/:userId/account_data/:type",
+		putGlobalAccountData(storage),
+		auth,
+	);
+	router.put(
+		"/_matrix/client/r0/rooms/:roomId/typing/:userId",
+		putTyping(storage),
+		auth,
+	);
+	router.post(
+		"/_matrix/client/r0/rooms/:roomId/receipt/:receiptType/:eventId",
+		postReceipt(storage),
+		auth,
+	);
+	router.get("/_matrix/client/r0/voip/turnServer", getTurnServer(), auth);
+	router.get("/_matrix/client/r0/devices", getDevices(storage), auth);
+	router.post(
+		"/_matrix/client/r0/user/:userId/filter",
+		postCreateFilter(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/r0/user/:userId/filter/:filterId",
+		getFilterById(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/r0/rooms/:roomId/context/:eventId",
+		getContext(storage),
+		auth,
+	);
+	router.get("/_matrix/client/r0/publicRooms", getPublicRooms(storage));
+	router.post("/_matrix/client/r0/publicRooms", postPublicRooms(storage), auth);
+	router.get(
+		"/_matrix/client/r0/directory/room/:roomAlias",
+		getDirectoryRoom(storage),
+	);
+	router.put(
+		"/_matrix/client/r0/directory/room/:roomAlias",
+		putDirectoryRoom(storage, serverName),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/r0/presence/:userId/status",
+		getPresence(storage),
+		auth,
+	);
+	router.put(
+		"/_matrix/client/r0/presence/:userId/status",
+		putPresence(storage),
+		auth,
+	);
+	router.post(
+		"/_matrix/client/r0/account/password",
+		postChangePassword(storage),
+		auth,
+		defaultRL,
+	);
+	router.get(
+		"/_matrix/client/r0/register/available",
+		getRegisterAvailable(storage),
+	);
+	router.get("/_matrix/client/r0/account/3pid", getThreePids(storage), auth);
 
 	// Policy server endpoint — we are not a policy server, return 404
 	router.post("/_matrix/policy/v1/sign", (_req) => ({

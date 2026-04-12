@@ -25,8 +25,12 @@ export const requireUIAA = async (
 		throw Object.assign(new Error("UIAA"), { uiaaResponse: uiaa });
 	}
 
-	const sessionId = auth.session as string | undefined;
-	if (!sessionId) throw badJson("Missing auth session");
+	let sessionId = auth.session as string | undefined;
+	if (!sessionId) {
+		// Allow single-step auth: create a session on the fly
+		sessionId = generateSessionId();
+		await storage.createUIAASession(sessionId);
+	}
 
 	const uiaaSession = await storage.getUIAASession(sessionId);
 	if (!uiaaSession) throw forbidden("Unknown session");
