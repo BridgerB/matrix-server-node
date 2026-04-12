@@ -2,6 +2,7 @@ import { badJson } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type {
+	CrossSigningKey,
 	DeviceKeys,
 	KeysClaimRequest,
 	KeysQueryRequest,
@@ -66,12 +67,47 @@ export const queryDeviceKeys = async (
 export const postKeysQuery =
 	(storage: Storage): Handler =>
 	async (req) => {
+		const userId = req.userId as UserId;
 		const body = (req.body ?? {}) as KeysQueryRequest;
 		if (!body.device_keys) throw badJson("Missing device_keys field");
 
 		const deviceKeys = await queryDeviceKeys(storage, body.device_keys);
 
-		return { status: 200, body: { device_keys: deviceKeys } };
+		const masterKeys: Record<UserId, CrossSigningKey> = {};
+		const selfSigningKeys: Record<UserId, CrossSigningKey> = {};
+		const userSigningKeys: Record<UserId, CrossSigningKey> = {};
+
+		for (const targetUserId of Object.keys(body.device_keys)) {
+			const crossKeys = await storage.getCrossSigningKeys(
+				targetUserId as UserId,
+			);
+			if (crossKeys.master_key)
+				masterKeys[targetUserId as UserId] = crossKeys.master_key;
+			if (crossKeys.self_signing_key)
+				selfSigningKeys[targetUserId as UserId] =
+					crossKeys.self_signing_key;
+			// user_signing_key is only returned for the requesting user
+			if (targetUserId === userId && crossKeys.user_signing_key)
+				userSigningKeys[targetUserId as UserId] =
+					crossKeys.user_signing_key;
+		}
+
+		return {
+			status: 200,
+			body: {
+				device_keys: deviceKeys,
+				master_keys:
+					Object.keys(masterKeys).length > 0 ? masterKeys : undefined,
+				self_signing_keys:
+					Object.keys(selfSigningKeys).length > 0
+						? selfSigningKeys
+						: undefined,
+				user_signing_keys:
+					Object.keys(userSigningKeys).length > 0
+						? userSigningKeys
+						: undefined,
+			},
+		};
 	};
 
 export const postKeysClaim =
@@ -160,7 +196,45 @@ export const putSendToDevice =
 		return { status: 200, body: {} };
 	};
 
-export const getKeysChanges = (): Handler => async () => ({
-	status: 200,
-	body: { changed: [], left: [] },
-});
+export const getKeysChanges =
+	(storage: Storage): Handler =>
+	async (req) => {
+		const userId = req.userId as UserId;
+
+		// Get all rooms the requesting user is in
+		const roomMemberships =
+			await storage.getRoomsForUserWithMembership(userId);
+		const joinedRoomIds = roomMemberships
+			.filter((r) => r.membership === "join")
+			.map((r) => r.roomId);
+
+		// Collect all users in those rooms who have device keys
+		const changedUsers = new Set<UserId>();
+		for (const roomId of joinedRoomIds) {
+			const members = await storage.getMemberEvents(roomId);
+			for (const { event } of members) {
+				const memberUserId = event.state_key as UserId | undefined;
+				const membership = (
+					event.content as { membership?: string } | undefined
+				)?.membership;
+				if (
+					memberUserId &&
+					membership === "join" &&
+					memberUserId !== userId
+				) {
+					const keys = await storage.getAllDeviceKeys(memberUserId);
+					if (Object.keys(keys).length > 0) {
+						changedUsers.add(memberUserId);
+					}
+				}
+			}
+		}
+
+		return {
+			status: 200,
+			body: {
+				changed: [...changedUsers],
+				left: [],
+			},
+		};
+	};
