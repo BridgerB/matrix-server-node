@@ -1,9 +1,11 @@
 import { pduToClientEvent } from "../events.ts";
+import { evaluatePushRules, getOrInitRules } from "../push-rules.ts";
 import { bundleAggregations } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { ClientEvent } from "../types/events.ts";
 import type { DeviceId, RoomId, UserId } from "../types/index.ts";
+import type { RoomPowerLevelsContent } from "../types/state-events.ts";
 
 const MAX_TIMEOUT = 30000;
 const DEFAULT_TIMELINE_LIMIT = 20;
@@ -156,23 +158,24 @@ const getRoomLatestTimestamp = async (
 };
 
 /**
- * Check if a room is a DM by looking at user's m.direct account data.
+ * Build a set of DM room IDs from m.direct account data.
  */
-const isDmRoom = async (
+const getDmRoomIds = async (
 	storage: Storage,
 	userId: UserId,
-	roomId: RoomId,
-): Promise<boolean> => {
+): Promise<Set<RoomId>> => {
 	const directData = await storage.getGlobalAccountData(userId, "m.direct");
-	if (!directData) return false;
+	if (!directData) return new Set();
 
-	// m.direct is { userId: [roomId, ...], ... }
+	const dmRooms = new Set<RoomId>();
 	for (const roomIds of Object.values(directData)) {
-		if (Array.isArray(roomIds) && roomIds.includes(roomId)) {
-			return true;
+		if (Array.isArray(roomIds)) {
+			for (const rid of roomIds) {
+				if (typeof rid === "string") dmRooms.add(rid as RoomId);
+			}
 		}
 	}
-	return false;
+	return dmRooms;
 };
 
 /**
@@ -194,9 +197,10 @@ const getRoomType = async (
  */
 const filterRooms = async (
 	storage: Storage,
-	userId: UserId,
+	_userId: UserId,
 	roomIds: RoomId[],
 	filters: SlidingSyncListFilter | undefined,
+	dmRoomIds: Set<RoomId>,
 ): Promise<RoomId[]> => {
 	if (!filters) return roomIds;
 
@@ -204,7 +208,7 @@ const filterRooms = async (
 	for (const roomId of roomIds) {
 		// is_dm filter
 		if (filters.is_dm !== undefined) {
-			const dm = await isDmRoom(storage, userId, roomId);
+			const dm = dmRoomIds.has(roomId);
 			if (filters.is_dm !== dm) continue;
 		}
 
@@ -288,6 +292,59 @@ const buildRequiredState = async (
 };
 
 /**
+ * Compute notification counts for a room using push rules.
+ */
+const computeSlidingSyncNotifications = async (
+	storage: Storage,
+	roomId: RoomId,
+	userId: UserId,
+): Promise<{ notification_count: number; highlight_count: number }> => {
+	const userRules = await getOrInitRules(storage, userId);
+	const profile = await storage.getProfile(userId);
+	const displayName = profile?.displayname ?? undefined;
+	const memberEvents = await storage.getMemberEvents(roomId);
+	const memberCount = memberEvents.filter(
+		(m) => (m.event.content as Record<string, unknown>).membership === "join",
+	).length;
+	const plEvent = await storage.getStateEvent(
+		roomId,
+		"m.room.power_levels",
+		"",
+	);
+	const powerLevels = plEvent
+		? (plEvent.event.content as unknown as RoomPowerLevelsContent)
+		: undefined;
+
+	const recentResult = await storage.getEventsByRoom(
+		roomId,
+		20,
+		undefined,
+		"b",
+	);
+	let notification_count = 0;
+	let highlight_count = 0;
+
+	for (const { event } of recentResult.events) {
+		if (event.sender === userId) continue;
+		const senderPl = powerLevels?.users?.[event.sender] ?? powerLevels?.users_default ?? 0;
+		const result = evaluatePushRules(userRules, {
+			event,
+			userId,
+			displayName,
+			memberCount,
+			powerLevels,
+			senderPowerLevel: senderPl,
+		});
+		if (result.notify) {
+			notification_count++;
+			if (result.highlight) highlight_count++;
+		}
+	}
+
+	return { notification_count, highlight_count };
+};
+
+/**
  * Build room data for a sliding sync response.
  */
 const buildRoomData = async (
@@ -297,6 +354,7 @@ const buildRoomData = async (
 	requiredState: [string, string][] | undefined,
 	timelineLimit: number,
 	isInitial: boolean,
+	since: number | undefined,
 ): Promise<SlidingSyncRoomResponse> => {
 	const roomData: SlidingSyncRoomResponse = {};
 
@@ -319,33 +377,53 @@ const buildRoomData = async (
 		roomData.initial = true;
 	}
 
-	// Required state
-	roomData.required_state = await buildRequiredState(
-		storage,
-		roomId,
-		requiredState,
-	);
+	// Required state (only on initial or full state)
+	if (isInitial) {
+		roomData.required_state = await buildRequiredState(
+			storage,
+			roomId,
+			requiredState,
+		);
+	}
 
-	// Timeline
+	// Timeline — incremental if we have a since token
 	const limit = Math.min(timelineLimit, 50);
-	const result = await storage.getEventsByRoom(roomId, limit, undefined, "b");
-	const timelineEvents = result.events.reverse();
-	const timelineClientEvents = timelineEvents.map((e) =>
-		pduToClientEvent(e.event, e.eventId),
-	);
-	await bundleAggregations(storage, timelineClientEvents, userId);
-	roomData.timeline = timelineClientEvents;
+	if (since !== undefined && !isInitial) {
+		const { events: newEvents } = await storage.getEventsByRoomSince(
+			roomId,
+			since,
+			limit,
+		);
+		if (newEvents.length === 0) return roomData;
+		const timelineClientEvents = newEvents.map((e) =>
+			pduToClientEvent(e.event, e.eventId),
+		);
+		await bundleAggregations(storage, timelineClientEvents, userId);
+		roomData.timeline = timelineClientEvents;
+	} else {
+		const result = await storage.getEventsByRoom(
+			roomId,
+			limit,
+			undefined,
+			"b",
+		);
+		const timelineEvents = result.events.reverse();
+		const timelineClientEvents = timelineEvents.map((e) =>
+			pduToClientEvent(e.event, e.eventId),
+		);
+		await bundleAggregations(storage, timelineClientEvents, userId);
+		roomData.timeline = timelineClientEvents;
 
-	// prev_batch for pagination
-	const totalResult = await storage.getEventsByRoom(
-		roomId,
-		limit + 1,
-		undefined,
-		"b",
-	);
-	const limited = totalResult.events.length > limit;
-	if (limited && result.end !== undefined) {
-		roomData.prev_batch = String(result.end);
+		const totalResult = await storage.getEventsByRoom(
+			roomId,
+			limit + 1,
+			undefined,
+			"b",
+		);
+		const limited = totalResult.events.length > limit;
+		if (limited && result.end !== undefined) {
+			roomData.prev_batch = String(result.end);
+		}
 	}
 
 	// Member counts
@@ -359,9 +437,11 @@ const buildRoomData = async (
 			(m.event.content as Record<string, unknown>).membership === "invite",
 	).length;
 
-	// Notification counts (simple: just set to 0)
-	roomData.notification_count = 0;
-	roomData.highlight_count = 0;
+	// Notification counts
+	const { notification_count, highlight_count } =
+		await computeSlidingSyncNotifications(storage, roomId, userId);
+	roomData.notification_count = notification_count;
+	roomData.highlight_count = highlight_count;
 
 	return roomData;
 };
@@ -393,6 +473,9 @@ export const slidingSync =
 			.filter((r) => r.membership === "join")
 			.map((r) => r.roomId);
 
+		// Pre-compute DM rooms once for all lists
+		const dmRoomIds = await getDmRoomIds(storage, userId);
+
 		const response: SlidingSyncResponse = {
 			pos: String(nextBatch),
 		};
@@ -414,6 +497,7 @@ export const slidingSync =
 					userId,
 					joinedRoomIds,
 					list.filters,
+					dmRoomIds,
 				);
 
 				// Sort rooms (default: by_recency)
@@ -515,6 +599,7 @@ export const slidingSync =
 					opts.requiredState,
 					opts.timelineLimit,
 					isInitial,
+					pos,
 				);
 			}
 		}
