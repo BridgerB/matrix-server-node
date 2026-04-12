@@ -1,6 +1,6 @@
 import * as mariadb from "mariadb";
 import { computeEventId } from "../events.ts";
-import type { DeviceKeys, OneTimeKey } from "../types/e2ee.ts";
+import type { CrossSigningKey, DeviceKeys, KeyBackupData, OneTimeKey } from "../types/e2ee.ts";
 import type {
 	PDU,
 	StrippedStateEvent,
@@ -325,6 +325,37 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 					origin VARCHAR(255) NOT NULL,
 					txn_id VARCHAR(255) NOT NULL,
 					PRIMARY KEY (origin, txn_id)
+				)
+			`);
+
+			await conn.query(`
+				CREATE TABLE IF NOT EXISTS cross_signing_keys (
+					user_id VARCHAR(255) NOT NULL,
+					key_type VARCHAR(64) NOT NULL,
+					key_json TEXT NOT NULL,
+					PRIMARY KEY (user_id, key_type)
+				)
+			`);
+
+			await conn.query(`
+				CREATE TABLE IF NOT EXISTS key_backup_versions (
+					id INT AUTO_INCREMENT PRIMARY KEY,
+					user_id VARCHAR(255) NOT NULL,
+					version VARCHAR(64) NOT NULL,
+					algorithm VARCHAR(255) NOT NULL,
+					auth_data TEXT NOT NULL,
+					UNIQUE KEY (user_id, version)
+				)
+			`);
+
+			await conn.query(`
+				CREATE TABLE IF NOT EXISTS key_backup_data (
+					user_id VARCHAR(255) NOT NULL,
+					version VARCHAR(64) NOT NULL,
+					room_id VARCHAR(255) NOT NULL,
+					session_id VARCHAR(255) NOT NULL,
+					key_json TEXT NOT NULL,
+					PRIMARY KEY (user_id, version, room_id, session_id)
 				)
 			`);
 		} finally {
@@ -1317,6 +1348,429 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 		for (const r of rows)
 			types.add((r.key_id as string).split(":")[0] as string);
 		return [...types];
+	}
+
+	async setCrossSigningKeys(
+		userId: UserId,
+		keys: {
+			master_key?: CrossSigningKey;
+			self_signing_key?: CrossSigningKey;
+			user_signing_key?: CrossSigningKey;
+		},
+	): Promise<void> {
+		const entries: [string, CrossSigningKey][] = [];
+		if (keys.master_key) entries.push(["master_key", keys.master_key]);
+		if (keys.self_signing_key)
+			entries.push(["self_signing_key", keys.self_signing_key]);
+		if (keys.user_signing_key)
+			entries.push(["user_signing_key", keys.user_signing_key]);
+		for (const [keyType, key] of entries) {
+			await this.exec(
+				"INSERT INTO cross_signing_keys (user_id, key_type, key_json) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE key_json = VALUES(key_json)",
+				[userId, keyType, this.json(key)],
+			);
+		}
+	}
+
+	async getCrossSigningKeys(userId: UserId): Promise<{
+		master_key?: CrossSigningKey;
+		self_signing_key?: CrossSigningKey;
+		user_signing_key?: CrossSigningKey;
+	}> {
+		const rows = (await this.query(
+			"SELECT key_type, key_json FROM cross_signing_keys WHERE user_id = ?",
+			[userId],
+		)) as Record<string, unknown>[];
+		const result: {
+			master_key?: CrossSigningKey;
+			self_signing_key?: CrossSigningKey;
+			user_signing_key?: CrossSigningKey;
+		} = {};
+		for (const r of rows) {
+			const keyType = r.key_type as string;
+			const key = this.parseJson(r.key_json) as CrossSigningKey;
+			if (keyType === "master_key") result.master_key = key;
+			else if (keyType === "self_signing_key") result.self_signing_key = key;
+			else if (keyType === "user_signing_key") result.user_signing_key = key;
+		}
+		return result;
+	}
+
+	async storeCrossSigningSignatures(
+		_userId: UserId,
+		signatures: Record<string, Record<string, JsonObject>>,
+	): Promise<
+		Record<string, Record<string, { errcode: string; error: string }>>
+	> {
+		const failures: Record<
+			string,
+			Record<string, { errcode: string; error: string }>
+		> = {};
+		for (const [targetUserId, keyMap] of Object.entries(signatures)) {
+			for (const [keyId, signedObject] of Object.entries(keyMap)) {
+				const signedSigs = (
+					signedObject as Record<string, unknown>
+				).signatures as Record<string, Record<string, string>> | undefined;
+				if (!signedSigs) {
+					failures[targetUserId] ??= {};
+					(
+						failures[targetUserId] as Record<
+							string,
+							{ errcode: string; error: string }
+						>
+					)[keyId] = {
+						errcode: "M_INVALID_SIGNATURE",
+						error: "Missing signatures field",
+					};
+					continue;
+				}
+
+				// Try updating device keys
+				const deviceKeys = await this.getDeviceKeys(
+					targetUserId as UserId,
+					keyId as DeviceId,
+				);
+				if (deviceKeys) {
+					if (!deviceKeys.signatures) deviceKeys.signatures = {};
+					for (const [signer, sigs] of Object.entries(signedSigs)) {
+						deviceKeys.signatures[signer] ??= {};
+						Object.assign(
+							deviceKeys.signatures[signer] as Record<string, string>,
+							sigs,
+						);
+					}
+					await this.setDeviceKeys(
+						targetUserId as UserId,
+						keyId as DeviceId,
+						deviceKeys,
+					);
+					continue;
+				}
+
+				// Try updating cross-signing keys
+				const crossKeys = await this.getCrossSigningKeys(
+					targetUserId as UserId,
+				);
+				let matched = false;
+				for (const [crossKeyType, key] of [
+					["master_key", crossKeys.master_key],
+					["self_signing_key", crossKeys.self_signing_key],
+					["user_signing_key", crossKeys.user_signing_key],
+				] as const) {
+					if (!key) continue;
+					if (
+						Object.keys(key.keys).some(
+							(k) => k === keyId || k.endsWith(`:${keyId}`),
+						)
+					) {
+						if (!key.signatures) key.signatures = {};
+						for (const [signer, sigs] of Object.entries(signedSigs)) {
+							key.signatures[signer] ??= {};
+							Object.assign(
+								key.signatures[signer] as Record<string, string>,
+								sigs,
+							);
+						}
+						await this.exec(
+							"UPDATE cross_signing_keys SET key_json = ? WHERE user_id = ? AND key_type = ?",
+							[this.json(key), targetUserId, crossKeyType],
+						);
+						matched = true;
+						break;
+					}
+				}
+				if (matched) continue;
+
+				failures[targetUserId] ??= {};
+				(
+					failures[targetUserId] as Record<
+						string,
+						{ errcode: string; error: string }
+					>
+				)[keyId] = {
+					errcode: "M_NOT_FOUND",
+					error: "Key not found",
+				};
+			}
+		}
+		return failures;
+	}
+
+	async createKeyBackupVersion(
+		userId: UserId,
+		algorithm: string,
+		authData: JsonObject,
+	): Promise<string> {
+		const [maxRow] = (await this.query(
+			"SELECT MAX(CAST(version AS UNSIGNED)) AS m FROM key_backup_versions WHERE user_id = ?",
+			[userId],
+		)) as Record<string, unknown>[];
+		const version = String((Number(maxRow?.m) || 0) + 1);
+		await this.exec(
+			"INSERT INTO key_backup_versions (user_id, version, algorithm, auth_data) VALUES (?, ?, ?, ?)",
+			[userId, version, algorithm, this.json(authData)],
+		);
+		return version;
+	}
+
+	async getKeyBackupVersion(
+		userId: UserId,
+		version?: string,
+	): Promise<
+		| {
+				version: string;
+				algorithm: string;
+				auth_data: JsonObject;
+				count: number;
+				etag: string;
+		  }
+		| undefined
+	> {
+		let rows: Record<string, unknown>[];
+		if (version) {
+			rows = (await this.query(
+				"SELECT version, algorithm, auth_data FROM key_backup_versions WHERE user_id = ? AND version = ?",
+				[userId, version],
+			)) as Record<string, unknown>[];
+		} else {
+			rows = (await this.query(
+				"SELECT version, algorithm, auth_data FROM key_backup_versions WHERE user_id = ? ORDER BY CAST(version AS UNSIGNED) DESC LIMIT 1",
+				[userId],
+			)) as Record<string, unknown>[];
+		}
+		if (!rows[0]) return undefined;
+		const v = rows[0];
+		const ver = v.version as string;
+
+		const [countRow] = (await this.query(
+			"SELECT COUNT(*) AS cnt FROM key_backup_data WHERE user_id = ? AND version = ?",
+			[userId, ver],
+		)) as Record<string, unknown>[];
+		const count = Number(countRow?.cnt ?? 0);
+
+		return {
+			version: ver,
+			algorithm: v.algorithm as string,
+			auth_data: this.parseJson(v.auth_data) as JsonObject,
+			count,
+			etag: await this.computeMysqlBackupEtag(userId, ver),
+		};
+	}
+
+	private async computeMysqlBackupEtag(
+		userId: UserId,
+		version: string,
+	): Promise<string> {
+		const rows = (await this.query(
+			"SELECT room_id, session_id FROM key_backup_data WHERE user_id = ? AND version = ?",
+			[userId, version],
+		)) as Record<string, unknown>[];
+		if (rows.length === 0) return "0";
+		let hash = 0;
+		for (const r of rows) {
+			for (const c of `${r.room_id}${r.session_id}`) {
+				hash = ((hash << 5) - hash + c.charCodeAt(0)) | 0;
+			}
+		}
+		return String(Math.abs(hash));
+	}
+
+	async updateKeyBackupVersion(
+		userId: UserId,
+		version: string,
+		authData: JsonObject,
+	): Promise<boolean> {
+		const result = await this.exec(
+			"UPDATE key_backup_versions SET auth_data = ? WHERE user_id = ? AND version = ?",
+			[this.json(authData), userId, version],
+		);
+		return (result as unknown as { affectedRows: number }).affectedRows > 0;
+	}
+
+	async deleteKeyBackupVersion(
+		userId: UserId,
+		version: string,
+	): Promise<boolean> {
+		await this.exec(
+			"DELETE FROM key_backup_data WHERE user_id = ? AND version = ?",
+			[userId, version],
+		);
+		const result = await this.exec(
+			"DELETE FROM key_backup_versions WHERE user_id = ? AND version = ?",
+			[userId, version],
+		);
+		return (result as unknown as { affectedRows: number }).affectedRows > 0;
+	}
+
+	async putKeyBackupKeys(
+		userId: UserId,
+		version: string,
+		roomId: RoomId | undefined,
+		sessionId: string | undefined,
+		keys:
+			| KeyBackupData
+			| { sessions: Record<string, KeyBackupData> }
+			| {
+					rooms: Record<
+						RoomId,
+						{ sessions: Record<string, KeyBackupData> }
+					>;
+			  },
+	): Promise<{ count: number; etag: string } | undefined> {
+		// Verify version exists and is the latest
+		const [latestRow] = (await this.query(
+			"SELECT version FROM key_backup_versions WHERE user_id = ? ORDER BY CAST(version AS UNSIGNED) DESC LIMIT 1",
+			[userId],
+		)) as Record<string, unknown>[];
+		if (!latestRow || (latestRow.version as string) !== version) return undefined;
+
+		const entries: [RoomId, string, KeyBackupData][] = [];
+		if (roomId && sessionId) {
+			entries.push([roomId, sessionId, keys as KeyBackupData]);
+		} else if (roomId) {
+			const roomKeys = keys as { sessions: Record<string, KeyBackupData> };
+			for (const [sid, data] of Object.entries(roomKeys.sessions)) {
+				entries.push([roomId, sid, data]);
+			}
+		} else {
+			const allKeys = keys as {
+				rooms: Record<
+					RoomId,
+					{ sessions: Record<string, KeyBackupData> }
+				>;
+			};
+			for (const [rid, roomData] of Object.entries(allKeys.rooms)) {
+				for (const [sid, data] of Object.entries(roomData.sessions)) {
+					entries.push([rid as RoomId, sid, data]);
+				}
+			}
+		}
+
+		for (const [rid, sid, data] of entries) {
+			// Check existing for merge priority
+			const existingRows = (await this.query(
+				"SELECT key_json FROM key_backup_data WHERE user_id = ? AND version = ? AND room_id = ? AND session_id = ?",
+				[userId, version, rid, sid],
+			)) as Record<string, unknown>[];
+			if (existingRows[0]) {
+				const existing = this.parseJson(existingRows[0].key_json) as KeyBackupData;
+				if (
+					!(data.is_verified && !existing.is_verified) &&
+					!(data.is_verified === existing.is_verified &&
+						data.first_message_index < existing.first_message_index) &&
+					!(data.is_verified === existing.is_verified &&
+						data.first_message_index === existing.first_message_index &&
+						data.forwarded_count < existing.forwarded_count)
+				) {
+					continue;
+				}
+			}
+			await this.exec(
+				"INSERT INTO key_backup_data (user_id, version, room_id, session_id, key_json) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE key_json = VALUES(key_json)",
+				[userId, version, rid, sid, this.json(data)],
+			);
+		}
+
+		const [countRow] = (await this.query(
+			"SELECT COUNT(*) AS cnt FROM key_backup_data WHERE user_id = ? AND version = ?",
+			[userId, version],
+		)) as Record<string, unknown>[];
+		const count = Number(countRow?.cnt ?? 0);
+		return { count, etag: await this.computeMysqlBackupEtag(userId, version) };
+	}
+
+	async getKeyBackupKeys(
+		userId: UserId,
+		version: string,
+		roomId?: RoomId,
+		sessionId?: string,
+	): Promise<
+		| KeyBackupData
+		| { sessions: Record<string, KeyBackupData> }
+		| {
+				rooms: Record<
+					RoomId,
+					{ sessions: Record<string, KeyBackupData> }
+				>;
+		  }
+		| undefined
+	> {
+		if (roomId && sessionId) {
+			const rows = (await this.query(
+				"SELECT key_json FROM key_backup_data WHERE user_id = ? AND version = ? AND room_id = ? AND session_id = ?",
+				[userId, version, roomId, sessionId],
+			)) as Record<string, unknown>[];
+			return rows[0]
+				? (this.parseJson(rows[0].key_json) as KeyBackupData)
+				: undefined;
+		} else if (roomId) {
+			const rows = (await this.query(
+				"SELECT session_id, key_json FROM key_backup_data WHERE user_id = ? AND version = ? AND room_id = ?",
+				[userId, version, roomId],
+			)) as Record<string, unknown>[];
+			const sessions: Record<string, KeyBackupData> = {};
+			for (const r of rows) {
+				sessions[r.session_id as string] = this.parseJson(
+					r.key_json,
+				) as KeyBackupData;
+			}
+			return { sessions };
+		} else {
+			const rows = (await this.query(
+				"SELECT room_id, session_id, key_json FROM key_backup_data WHERE user_id = ? AND version = ?",
+				[userId, version],
+			)) as Record<string, unknown>[];
+			const rooms: Record<
+				RoomId,
+				{ sessions: Record<string, KeyBackupData> }
+			> = {};
+			for (const r of rows) {
+				const rid = r.room_id as RoomId;
+				if (!rooms[rid]) rooms[rid] = { sessions: {} };
+				(rooms[rid] as { sessions: Record<string, KeyBackupData> }).sessions[
+					r.session_id as string
+				] = this.parseJson(r.key_json) as KeyBackupData;
+			}
+			return { rooms };
+		}
+	}
+
+	async deleteKeyBackupKeys(
+		userId: UserId,
+		version: string,
+		roomId?: RoomId,
+		sessionId?: string,
+	): Promise<{ count: number; etag: string } | undefined> {
+		// Verify version exists
+		const [versionRow] = (await this.query(
+			"SELECT version FROM key_backup_versions WHERE user_id = ? AND version = ?",
+			[userId, version],
+		)) as Record<string, unknown>[];
+		if (!versionRow) return undefined;
+
+		if (roomId && sessionId) {
+			await this.exec(
+				"DELETE FROM key_backup_data WHERE user_id = ? AND version = ? AND room_id = ? AND session_id = ?",
+				[userId, version, roomId, sessionId],
+			);
+		} else if (roomId) {
+			await this.exec(
+				"DELETE FROM key_backup_data WHERE user_id = ? AND version = ? AND room_id = ?",
+				[userId, version, roomId],
+			);
+		} else {
+			await this.exec(
+				"DELETE FROM key_backup_data WHERE user_id = ? AND version = ?",
+				[userId, version],
+			);
+		}
+
+		const [countRow] = (await this.query(
+			"SELECT COUNT(*) AS cnt FROM key_backup_data WHERE user_id = ? AND version = ?",
+			[userId, version],
+		)) as Record<string, unknown>[];
+		const count = Number(countRow?.cnt ?? 0);
+		return { count, etag: await this.computeMysqlBackupEtag(userId, version) };
 	}
 
 	async sendToDevice(
