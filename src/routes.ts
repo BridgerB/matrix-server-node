@@ -595,6 +595,7 @@ export const registerRoutes = (
 	router.get(
 		"/_matrix/client/v3/thirdparty/protocols",
 		async () => ({ status: 200, body: {} }),
+		auth,
 	);
 
 	router.get("/_matrix/client/v3/sync", getSync(storage, serverName), auth);

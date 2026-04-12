@@ -12,7 +12,7 @@ import {
 import { bundleAggregations, indexRelation } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { UserId } from "../types/identifiers.ts";
+import type { UserId } from "../types/index.ts";
 import type { JsonObject } from "../types/json.ts";
 
 export const putSendEvent =
@@ -366,30 +366,29 @@ export const getTimestampToEvent =
 		const dir = req.query.get("dir");
 		if (dir !== "f" && dir !== "b") throw badJson("'dir' must be 'f' or 'b'");
 
+		// Events are stored in forward chronological order
 		const result = await storage.getEventsByRoom(roomId, 10000, undefined, "f");
 		if (result.events.length === 0) throw notFound("No events in room");
 
 		let best: { eventId: string; originServerTs: number } | undefined;
 
-		for (const entry of result.events) {
-			const eventTs = entry.event.origin_server_ts as number;
-			if (dir === "f") {
+		if (dir === "f") {
+			// Find first event at or after ts (events are chronological, first match wins)
+			for (const entry of result.events) {
+				const eventTs = entry.event.origin_server_ts;
 				if (eventTs >= ts) {
-					if (
-						!best ||
-						eventTs < best.originServerTs
-					) {
-						best = { eventId: entry.eventId, originServerTs: eventTs };
-					}
+					best = { eventId: entry.eventId, originServerTs: eventTs };
+					break;
 				}
-			} else {
+			}
+		} else {
+			// Find last event at or before ts (scan forward, keep updating)
+			for (const entry of result.events) {
+				const eventTs = entry.event.origin_server_ts;
 				if (eventTs <= ts) {
-					if (
-						!best ||
-						eventTs > best.originServerTs
-					) {
-						best = { eventId: entry.eventId, originServerTs: eventTs };
-					}
+					best = { eventId: entry.eventId, originServerTs: eventTs };
+				} else {
+					break;
 				}
 			}
 		}
