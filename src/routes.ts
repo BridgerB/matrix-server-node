@@ -52,22 +52,29 @@ import {
 	getFederationEventAuth,
 	getFederationRoomState,
 	getFederationRoomStateIds,
+	getFederationTimestampToEvent,
 	postFederationBackfill,
 	postFederationMissingEvents,
 } from "./handlers/federation/events.ts";
 import { getServerKeys } from "./handlers/federation/keys.ts";
 import {
 	getMakeJoin,
+	getMakeKnock,
 	getMakeLeave,
 	putFederationInvite,
 	putSendJoin,
+	putSendKnock,
 	putSendLeave,
 } from "./handlers/federation/membership.ts";
 import {
+	getFederationOpenIdUserinfo,
 	getFederationPublicRooms,
+	getFederationVersion,
 	getQueryDirectory,
 	getQueryProfile,
+	postFederationPublicRooms,
 } from "./handlers/federation/query.ts";
+import { postFederationHierarchy } from "./handlers/federation/spaces.ts";
 import { putFederationSend } from "./handlers/federation/transactions.ts";
 import { getFilterById, postCreateFilter } from "./handlers/filters.ts";
 import { getLoginFlows, postLogin } from "./handlers/login.ts";
@@ -568,6 +575,20 @@ export const registerRoutes = (
 
 	router.get("/_matrix/client/v3/sync", getSync(storage, serverName), auth);
 
+<<<<<<< Updated upstream
+=======
+	// Appservice endpoints
+	router.post(
+		"/_matrix/client/v1/appservice/:appserviceId/ping",
+		postAppservicePing(registrations),
+	);
+	router.put(
+		"/_matrix/client/v3/directory/list/appservice/:networkId/:roomId",
+		putAppserviceDirectoryListRoom(storage, registrations),
+		asAuth,
+	);
+
+>>>>>>> Stashed changes
 	if (signingKey) {
 		const federationClient = new FederationClient(
 			serverName as ServerName,
@@ -586,6 +607,11 @@ export const registerRoutes = (
 		);
 
 		router.get(
+			"/_matrix/federation/v1/version",
+			getFederationVersion(),
+		);
+
+		router.get(
 			"/_matrix/federation/v1/query/profile",
 			getQueryProfile(storage),
 			fedAuth,
@@ -599,6 +625,16 @@ export const registerRoutes = (
 			"/_matrix/federation/v1/publicRooms",
 			getFederationPublicRooms(storage),
 			fedAuth,
+		);
+		router.post(
+			"/_matrix/federation/v1/publicRooms",
+			postFederationPublicRooms(storage),
+			fedAuth,
+		);
+
+		router.get(
+			"/_matrix/federation/v1/openid/userinfo",
+			getFederationOpenIdUserinfo(storage),
 		);
 
 		router.get(
@@ -629,6 +665,12 @@ export const registerRoutes = (
 		router.post(
 			"/_matrix/federation/v1/get_missing_events/:roomId",
 			postFederationMissingEvents(storage),
+			fedAuth,
+		);
+
+		router.get(
+			"/_matrix/federation/v1/timestamp_to_event/:roomId",
+			getFederationTimestampToEvent(storage),
 			fedAuth,
 		);
 
@@ -677,6 +719,23 @@ export const registerRoutes = (
 		router.put(
 			"/_matrix/federation/v2/invite/:roomId/:eventId",
 			putFederationInvite(storage, serverName, signingKey, federationClient),
+			fedAuth,
+		);
+
+		router.get(
+			"/_matrix/federation/v1/make_knock/:roomId/:userId",
+			getMakeKnock(storage, serverName),
+			fedAuth,
+		);
+		router.put(
+			"/_matrix/federation/v1/send_knock/:roomId/:eventId",
+			putSendKnock(storage, serverName, signingKey, federationClient),
+			fedAuth,
+		);
+
+		router.get(
+			"/_matrix/federation/v1/hierarchy/:roomId",
+			postFederationHierarchy(storage),
 			fedAuth,
 		);
 	}
