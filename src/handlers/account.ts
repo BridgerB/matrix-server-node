@@ -1,3 +1,4 @@
+import { hashPassword } from "../crypto-utils.ts";
 import { badJson } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
@@ -29,7 +30,8 @@ export const postChangePassword =
 				`Password must be at least ${MIN_PASSWORD_LENGTH} characters`,
 			);
 
-		await storage.updatePassword(req.userId as string, newPassword); // TODO: hash with argon2
+		const passwordHash = await hashPassword(newPassword);
+		await storage.updatePassword(req.userId as string, passwordHash);
 
 		const logoutDevices = body.logout_devices !== false;
 		if (logoutDevices) {

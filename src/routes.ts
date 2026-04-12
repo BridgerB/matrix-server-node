@@ -1,4 +1,9 @@
+import { parseRegistrations } from "./appservice/registration.ts";
 import { FederationClient } from "./federation/client.ts";
+import {
+	postAppservicePing,
+	putAppserviceDirectoryListRoom,
+} from "./handlers/appservice.ts";
 import {
 	getWhoAmI,
 	postChangePassword,
@@ -25,6 +30,7 @@ import {
 	getDirectoryListRoom,
 	getDirectoryRoom,
 	getPublicRooms,
+	getRoomAliases,
 	postPublicRooms,
 	putDirectoryListRoom,
 	putDirectoryRoom,
@@ -34,6 +40,7 @@ import {
 	versionsHandler,
 	wellKnownClientHandler,
 	wellKnownServerHandler,
+	wellKnownSupportHandler,
 } from "./handlers/discovery.ts";
 import {
 	getKeysChanges,
@@ -52,31 +59,69 @@ import {
 	getFederationEventAuth,
 	getFederationRoomState,
 	getFederationRoomStateIds,
+	getFederationTimestampToEvent,
 	postFederationBackfill,
 	postFederationMissingEvents,
 } from "./handlers/federation/events.ts";
 import { getServerKeys } from "./handlers/federation/keys.ts";
 import {
 	getMakeJoin,
+	getMakeKnock,
 	getMakeLeave,
 	putFederationInvite,
 	putSendJoin,
+	putSendKnock,
 	putSendLeave,
 } from "./handlers/federation/membership.ts";
 import {
+	getFederationOpenIdUserinfo,
 	getFederationPublicRooms,
+	getFederationVersion,
 	getQueryDirectory,
 	getQueryProfile,
+	postFederationPublicRooms,
 } from "./handlers/federation/query.ts";
+import {
+	getFederationMediaDownload,
+	getFederationMediaThumbnail,
+} from "./handlers/federation/media.ts";
+import { postFederationHierarchy } from "./handlers/federation/spaces.ts";
 import { putFederationSend } from "./handlers/federation/transactions.ts";
+import {
+	postDeviceSigningUpload,
+	postSignaturesUpload,
+} from "./handlers/cross-signing.ts";
 import { getFilterById, postCreateFilter } from "./handlers/filters.ts";
+import {
+	deleteKeyBackupAll,
+	deleteKeyBackupRoom,
+	deleteKeyBackupSession,
+	deleteKeyBackupVersion,
+	getKeyBackupAll,
+	getKeyBackupRoom,
+	getKeyBackupSession,
+	getKeyBackupVersion,
+	postKeyBackupVersion,
+	putKeyBackupAll,
+	putKeyBackupRoom,
+	putKeyBackupSession,
+	putKeyBackupVersion,
+} from "./handlers/key-backup.ts";
 import { getLoginFlows, postLogin } from "./handlers/login.ts";
+import {
+	getSsoCallback,
+	getSsoConfig,
+	getSsoFallback,
+	getSsoRedirect,
+} from "./handlers/sso.ts";
 import { postLogout, postLogoutAll } from "./handlers/logout.ts";
 import {
 	getConfig,
 	getDownload,
 	getThumbnail,
+	postCreateMedia,
 	postUpload,
+	putAsyncUpload,
 } from "./handlers/media.ts";
 import { getNotifications } from "./handlers/notifications.ts";
 import { postOpenIdToken } from "./handlers/openid.ts";
@@ -101,6 +146,7 @@ import {
 	putPushRuleEnabled,
 } from "./handlers/push-rules.ts";
 import { getPushers, postPushersSet } from "./handlers/pushers.ts";
+import { postReadMarkers } from "./handlers/read-markers.ts";
 import { postReceipt } from "./handlers/receipts.ts";
 import { postRefresh } from "./handlers/refresh.ts";
 import { postRegister } from "./handlers/register.ts";
@@ -110,9 +156,11 @@ import {
 	getAllState,
 	getContext,
 	getEvent,
+	getJoinedMembers,
 	getMembers,
 	getMessages,
 	getStateEvent,
+	getTimestampToEvent,
 	postRedact,
 	putSendEvent,
 	putStateEvent,
@@ -122,9 +170,11 @@ import {
 	getJoinedRooms,
 	postBan,
 	postCreateRoom,
+	postForget,
 	postInvite,
 	postJoin,
 	postKick,
+	postKnock,
 	postLeave,
 	postUnban,
 } from "./handlers/rooms.ts";
@@ -139,9 +189,12 @@ import {
 } from "./handlers/threepid.ts";
 import { putTyping } from "./handlers/typing.ts";
 import { postUserDirectorySearch } from "./handlers/user-directory.ts";
+import { getUrlPreview } from "./handlers/url-preview.ts";
 import { getTurnServer } from "./handlers/voip.ts";
+import { requireAppserviceAuth } from "./middleware/appservice-auth.ts";
 import { requireAuth } from "./middleware/auth.ts";
 import { requireFederationAuth } from "./middleware/federation-auth.ts";
+import { rateLimit } from "./middleware/rate-limit.ts";
 import type { Router } from "./router.ts";
 import type { SigningKey } from "./signing.ts";
 import type { Storage } from "./storage/interface.ts";
@@ -153,17 +206,52 @@ export const registerRoutes = (
 	serverName: string,
 	signingKey?: SigningKey,
 ): void => {
+	const registrations = parseRegistrations();
 	const auth = requireAuth(storage);
+	const asAuth = requireAppserviceAuth(registrations, serverName);
+	const loginRL = rateLimit("login");
+	const registerRL = rateLimit("register");
+	const defaultRL = rateLimit("default");
 
 	router.get("/_matrix/client/versions", versionsHandler(serverName));
 	router.get("/.well-known/matrix/server", wellKnownServerHandler(serverName));
 	router.get("/.well-known/matrix/client", wellKnownClientHandler(serverName));
+	router.get("/.well-known/matrix/support", wellKnownSupportHandler());
 	router.get("/_matrix/client/v3/capabilities", getCapabilities(), auth);
 
-	router.get("/_matrix/client/v3/login", getLoginFlows());
-	router.post("/_matrix/client/v3/login", postLogin(storage, serverName));
-	router.post("/_matrix/client/v3/register", postRegister(storage, serverName));
+	router.get("/_matrix/client/v3/login", getLoginFlows(registrations));
+	router.post(
+		"/_matrix/client/v3/login",
+		postLogin(storage, serverName, registrations),
+		loginRL,
+	);
+	router.post(
+		"/_matrix/client/v3/register",
+		postRegister(storage, serverName),
+		registerRL,
+	);
 	router.post("/_matrix/client/v3/refresh", postRefresh(storage));
+
+	// SSO routes (only registered when SSO is configured)
+	const ssoConfig = getSsoConfig();
+	if (ssoConfig) {
+		router.get(
+			"/_matrix/client/v3/login/sso/redirect/:idpId",
+			getSsoRedirect(ssoConfig),
+		);
+		router.get(
+			"/_matrix/client/v3/login/sso/redirect",
+			getSsoRedirect(ssoConfig),
+		);
+		router.get(
+			"/_matrix/client/v3/login/sso/callback",
+			getSsoCallback(storage, serverName, ssoConfig),
+		);
+		router.get(
+			"/_matrix/client/v3/auth/m.login.sso/fallback/web",
+			getSsoFallback(ssoConfig),
+		);
+	}
 
 	router.post("/_matrix/client/v3/logout", postLogout(storage), auth);
 	router.post("/_matrix/client/v3/logout/all", postLogoutAll(storage), auth);
@@ -173,11 +261,13 @@ export const registerRoutes = (
 		"/_matrix/client/v3/account/password",
 		postChangePassword(storage),
 		auth,
+		defaultRL,
 	);
 	router.post(
 		"/_matrix/client/v3/account/deactivate",
 		postDeactivate(storage),
 		auth,
+		defaultRL,
 	);
 
 	router.get("/_matrix/client/v3/profile/:userId", getProfile(storage));
@@ -268,6 +358,11 @@ export const registerRoutes = (
 		auth,
 	);
 	router.post(
+		"/_matrix/client/v3/rooms/:roomId/knock",
+		postKnock(storage, serverName),
+		auth,
+	);
+	router.post(
 		"/_matrix/client/v3/rooms/:roomId/kick",
 		postKick(storage, serverName),
 		auth,
@@ -280,6 +375,11 @@ export const registerRoutes = (
 	router.post(
 		"/_matrix/client/v3/rooms/:roomId/unban",
 		postUnban(storage, serverName),
+		auth,
+	);
+	router.post(
+		"/_matrix/client/v3/rooms/:roomId/forget",
+		postForget(storage),
 		auth,
 	);
 
@@ -322,6 +422,21 @@ export const registerRoutes = (
 	router.get(
 		"/_matrix/client/v3/rooms/:roomId/members",
 		getMembers(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v3/rooms/:roomId/joined_members",
+		getJoinedMembers(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v3/rooms/:roomId/aliases",
+		getRoomAliases(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v3/rooms/:roomId/timestamp_to_event",
+		getTimestampToEvent(storage),
 		auth,
 	);
 	router.get(
@@ -417,6 +532,12 @@ export const registerRoutes = (
 		auth,
 	);
 
+	router.post(
+		"/_matrix/client/v3/rooms/:roomId/read_markers",
+		postReadMarkers(storage),
+		auth,
+	);
+
 	router.get(
 		"/_matrix/client/v3/presence/:userId/status",
 		getPresence(storage),
@@ -428,6 +549,16 @@ export const registerRoutes = (
 		auth,
 	);
 
+	router.post(
+		"/_matrix/media/v1/create",
+		postCreateMedia(storage, serverName),
+		auth,
+	);
+	router.put(
+		"/_matrix/media/v3/upload/:serverName/:mediaId",
+		putAsyncUpload(storage, serverName),
+		auth,
+	);
 	router.post(
 		"/_matrix/media/v3/upload",
 		postUpload(storage, serverName),
@@ -446,6 +577,35 @@ export const registerRoutes = (
 		getThumbnail(storage),
 	);
 	router.get("/_matrix/media/v3/config", getConfig(), auth);
+
+	// Authenticated media endpoints (spec v1.11+)
+	router.get(
+		"/_matrix/client/v1/media/download/:serverName/:mediaId/:fileName",
+		getDownload(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v1/media/download/:serverName/:mediaId",
+		getDownload(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v1/media/thumbnail/:serverName/:mediaId",
+		getThumbnail(storage),
+		auth,
+	);
+	router.get("/_matrix/client/v1/media/config", getConfig(), auth);
+
+	router.get(
+		"/_matrix/client/v1/media/preview_url",
+		getUrlPreview(),
+		auth,
+	);
+	router.get(
+		"/_matrix/media/v3/preview_url",
+		getUrlPreview(),
+		auth,
+	);
 
 	router.get(
 		"/_matrix/client/v3/pushrules/global/:kind/:ruleId/enabled",
@@ -500,7 +660,92 @@ export const registerRoutes = (
 	router.post("/_matrix/client/v3/keys/upload", postKeysUpload(storage), auth);
 	router.post("/_matrix/client/v3/keys/query", postKeysQuery(storage), auth);
 	router.post("/_matrix/client/v3/keys/claim", postKeysClaim(storage), auth);
-	router.get("/_matrix/client/v3/keys/changes", getKeysChanges(), auth);
+	router.get("/_matrix/client/v3/keys/changes", getKeysChanges(storage), auth);
+
+	router.post(
+		"/_matrix/client/v3/keys/device_signing/upload",
+		postDeviceSigningUpload(storage),
+		auth,
+	);
+	router.post(
+		"/_matrix/client/v3/keys/signatures/upload",
+		postSignaturesUpload(storage),
+		auth,
+	);
+
+	// Key backup version management
+	router.post(
+		"/_matrix/client/v3/room_keys/version",
+		postKeyBackupVersion(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v3/room_keys/version/:version",
+		getKeyBackupVersion(storage),
+		auth,
+	);
+	router.put(
+		"/_matrix/client/v3/room_keys/version/:version",
+		putKeyBackupVersion(storage),
+		auth,
+	);
+	router.delete(
+		"/_matrix/client/v3/room_keys/version/:version",
+		deleteKeyBackupVersion(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v3/room_keys/version",
+		getKeyBackupVersion(storage),
+		auth,
+	);
+
+	// Key backup data — specific routes first
+	router.put(
+		"/_matrix/client/v3/room_keys/keys/:roomId/:sessionId",
+		putKeyBackupSession(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v3/room_keys/keys/:roomId/:sessionId",
+		getKeyBackupSession(storage),
+		auth,
+	);
+	router.delete(
+		"/_matrix/client/v3/room_keys/keys/:roomId/:sessionId",
+		deleteKeyBackupSession(storage),
+		auth,
+	);
+	router.put(
+		"/_matrix/client/v3/room_keys/keys/:roomId",
+		putKeyBackupRoom(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v3/room_keys/keys/:roomId",
+		getKeyBackupRoom(storage),
+		auth,
+	);
+	router.delete(
+		"/_matrix/client/v3/room_keys/keys/:roomId",
+		deleteKeyBackupRoom(storage),
+		auth,
+	);
+	router.put(
+		"/_matrix/client/v3/room_keys/keys",
+		putKeyBackupAll(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v3/room_keys/keys",
+		getKeyBackupAll(storage),
+		auth,
+	);
+	router.delete(
+		"/_matrix/client/v3/room_keys/keys",
+		deleteKeyBackupAll(storage),
+		auth,
+	);
 
 	router.put(
 		"/_matrix/client/v3/sendToDevice/:eventType/:txnId",
@@ -566,7 +811,24 @@ export const registerRoutes = (
 		auth,
 	);
 
+	router.get(
+		"/_matrix/client/v3/thirdparty/protocols",
+		async () => ({ status: 200, body: {} }),
+		auth,
+	);
+
 	router.get("/_matrix/client/v3/sync", getSync(storage, serverName), auth);
+
+	// Appservice endpoints
+	router.post(
+		"/_matrix/client/v1/appservice/:appserviceId/ping",
+		postAppservicePing(registrations),
+	);
+	router.put(
+		"/_matrix/client/v3/directory/list/appservice/:networkId/:roomId",
+		putAppserviceDirectoryListRoom(storage, registrations),
+		asAuth,
+	);
 
 	if (signingKey) {
 		const federationClient = new FederationClient(
@@ -586,6 +848,11 @@ export const registerRoutes = (
 		);
 
 		router.get(
+			"/_matrix/federation/v1/version",
+			getFederationVersion(),
+		);
+
+		router.get(
 			"/_matrix/federation/v1/query/profile",
 			getQueryProfile(storage),
 			fedAuth,
@@ -599,6 +866,16 @@ export const registerRoutes = (
 			"/_matrix/federation/v1/publicRooms",
 			getFederationPublicRooms(storage),
 			fedAuth,
+		);
+		router.post(
+			"/_matrix/federation/v1/publicRooms",
+			postFederationPublicRooms(storage),
+			fedAuth,
+		);
+
+		router.get(
+			"/_matrix/federation/v1/openid/userinfo",
+			getFederationOpenIdUserinfo(storage),
 		);
 
 		router.get(
@@ -629,6 +906,12 @@ export const registerRoutes = (
 		router.post(
 			"/_matrix/federation/v1/get_missing_events/:roomId",
 			postFederationMissingEvents(storage),
+			fedAuth,
+		);
+
+		router.get(
+			"/_matrix/federation/v1/timestamp_to_event/:roomId",
+			getFederationTimestampToEvent(storage),
 			fedAuth,
 		);
 
@@ -677,6 +960,34 @@ export const registerRoutes = (
 		router.put(
 			"/_matrix/federation/v2/invite/:roomId/:eventId",
 			putFederationInvite(storage, serverName, signingKey, federationClient),
+			fedAuth,
+		);
+
+		router.get(
+			"/_matrix/federation/v1/make_knock/:roomId/:userId",
+			getMakeKnock(storage, serverName),
+			fedAuth,
+		);
+		router.put(
+			"/_matrix/federation/v1/send_knock/:roomId/:eventId",
+			putSendKnock(storage, serverName, signingKey, federationClient),
+			fedAuth,
+		);
+
+		router.get(
+			"/_matrix/federation/v1/hierarchy/:roomId",
+			postFederationHierarchy(storage),
+			fedAuth,
+		);
+
+		router.get(
+			"/_matrix/federation/v1/media/download/:mediaId",
+			getFederationMediaDownload(storage, serverName),
+			fedAuth,
+		);
+		router.get(
+			"/_matrix/federation/v1/media/thumbnail/:mediaId",
+			getFederationMediaThumbnail(storage, serverName),
 			fedAuth,
 		);
 	}
