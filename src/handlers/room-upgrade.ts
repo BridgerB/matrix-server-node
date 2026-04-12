@@ -4,8 +4,10 @@ import {
 	buildEvent,
 	checkEventAuth,
 	computeEventId,
+	computeRoomIdV12,
 	type EventContext,
 	getUserPowerLevel,
+	isRoomVersion12Plus,
 	requireJoinedRoom,
 	selectAuthEvents,
 	sendStateEvent,
@@ -53,10 +55,46 @@ export const postRoomUpgrade =
 			);
 		}
 
-		const newRoomId = generateRoomId(serverName) as RoomId;
+		const newVersion = body.new_version as RoomVersion;
+		const v12Plus = isRoomVersion12Plus(newVersion);
+
+		const lastCreateEvent = oldRoom.state_events.get("m.room.create\0");
+		const lastCreateEventId = lastCreateEvent
+			? computeEventId(lastCreateEvent)
+			: ("" as EventId);
+
+		const newCreateContent = {
+			room_version: body.new_version,
+			predecessor: {
+				room_id: oldRoomId,
+				event_id: lastCreateEventId,
+			},
+		};
+
+		let newRoomId: RoomId;
+		if (v12Plus) {
+			const tempRoomId = "!placeholder:temp" as RoomId;
+			const { event: tempCreateEvent } = buildEvent({
+				roomId: tempRoomId,
+				sender: userId,
+				type: "m.room.create",
+				content: newCreateContent,
+				stateKey: "",
+				depth: 0,
+				prevEvents: [],
+				authEvents: [],
+				serverName,
+			});
+			const createForHash = { ...tempCreateEvent };
+			delete (createForHash as Record<string, unknown>).room_id;
+			newRoomId = computeRoomIdV12(createForHash) as RoomId;
+		} else {
+			newRoomId = generateRoomId(serverName) as RoomId;
+		}
+
 		const newRoomState: RoomState = {
 			room_id: newRoomId,
-			room_version: body.new_version as RoomVersion,
+			room_version: newVersion,
 			state_events: new Map(),
 			depth: 0,
 			forward_extremities: [],
@@ -69,11 +107,6 @@ export const postRoomUpgrade =
 			prevEvents: [],
 		};
 
-		const lastCreateEvent = oldRoom.state_events.get("m.room.create\0");
-		const lastCreateEventId = lastCreateEvent
-			? computeEventId(lastCreateEvent)
-			: ("" as EventId);
-
 		await sendStateEvent(
 			storage,
 			serverName,
@@ -81,13 +114,7 @@ export const postRoomUpgrade =
 			userId,
 			"m.room.create",
 			"",
-			{
-				room_version: body.new_version,
-				predecessor: {
-					room_id: oldRoomId,
-					event_id: lastCreateEventId,
-				},
-			},
+			newCreateContent,
 		);
 
 		await sendStateEvent(

@@ -9,7 +9,8 @@ export type RoomVersion =
 	| "8"
 	| "9"
 	| "10"
-	| "11";
+	| "11"
+	| "12";
 
 export interface RoomVersionCapability {
 	preferred: RoomVersion;
