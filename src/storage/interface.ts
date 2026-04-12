@@ -419,6 +419,49 @@ export interface Storage {
 	getFederationTxn(origin: ServerName, txnId: string): Promise<boolean>;
 	setFederationTxn(origin: ServerName, txnId: string): Promise<void>;
 
+	// 3PID verification
+	storeVerificationToken(
+		sessionId: string,
+		data: {
+			medium: string;
+			address: string;
+			clientSecret: string;
+			sendAttempt: number;
+			token: string;
+			validated: boolean;
+			userId?: string;
+		},
+	): Promise<void>;
+	getVerificationSession(
+		sessionId: string,
+	): Promise<
+		| {
+				medium: string;
+				address: string;
+				clientSecret: string;
+				sendAttempt: number;
+				token: string;
+				validated: boolean;
+				userId?: string;
+		  }
+		| undefined
+	>;
+	validateVerificationToken(
+		sessionId: string,
+		token: string,
+	): Promise<boolean>;
+
+	// Login tokens (single-use tokens for m.login.token)
+	storeLoginToken(
+		token: string,
+		userId: UserId,
+		expiresAt: Timestamp,
+	): Promise<void>;
+	getLoginToken(
+		token: string,
+	): Promise<{ userId: UserId; expiresAt: Timestamp } | undefined>;
+	deleteLoginToken(token: string): Promise<void>;
+
 	// Federation - Room import
 	importRoomState(
 		roomId: RoomId,

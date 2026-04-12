@@ -5,7 +5,10 @@ import type { LoginFlow, LoginRequest, LoginResponse } from "../types/index.ts";
 import { createSessionAndRespond } from "./auth-shared.ts";
 import { getSsoConfig, loginTokenStore } from "./sso.ts";
 
-const BASE_FLOWS: LoginFlow[] = [{ type: "m.login.password" }];
+const BASE_FLOWS: LoginFlow[] = [
+	{ type: "m.login.password" },
+	{ type: "m.login.token" },
+];
 
 const getSsoFlows = (): LoginFlow[] => {
 	const ssoConfig = getSsoConfig();
@@ -17,7 +20,6 @@ const getSsoFlows = (): LoginFlow[] => {
 				{ id: "oidc", name: "SSO", brand: "org.matrix.oidc" },
 			],
 		},
-		{ type: "m.login.token" },
 	];
 };
 
@@ -93,11 +95,19 @@ const handleTokenLogin = async (
 	const token = body.token;
 	if (!token) throw badJson("Missing 'token' field for m.login.token");
 
-	const entry = loginTokenStore.get(token);
-	if (!entry) throw forbidden("Invalid or expired login token");
+	// Check in-memory SSO store first, then storage-backed login tokens
+	let entry = loginTokenStore.get(token);
+	if (entry) {
+		loginTokenStore.delete(token);
+	} else {
+		const storageEntry = await storage.getLoginToken(token);
+		if (storageEntry) {
+			entry = storageEntry;
+			await storage.deleteLoginToken(token);
+		}
+	}
 
-	// Single-use: delete immediately
-	loginTokenStore.delete(token);
+	if (!entry) throw forbidden("Invalid or expired login token");
 
 	if (entry.expiresAt < Date.now()) {
 		throw forbidden("Login token has expired");

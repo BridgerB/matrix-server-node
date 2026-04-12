@@ -52,22 +52,29 @@ import {
 	getFederationEventAuth,
 	getFederationRoomState,
 	getFederationRoomStateIds,
+	getFederationTimestampToEvent,
 	postFederationBackfill,
 	postFederationMissingEvents,
 } from "./handlers/federation/events.ts";
 import { getServerKeys } from "./handlers/federation/keys.ts";
 import {
 	getMakeJoin,
+	getMakeKnock,
 	getMakeLeave,
 	putFederationInvite,
 	putSendJoin,
+	putSendKnock,
 	putSendLeave,
 } from "./handlers/federation/membership.ts";
 import {
+	getFederationOpenIdUserinfo,
 	getFederationPublicRooms,
+	getFederationVersion,
 	getQueryDirectory,
 	getQueryProfile,
+	postFederationPublicRooms,
 } from "./handlers/federation/query.ts";
+import { postFederationHierarchy } from "./handlers/federation/spaces.ts";
 import { putFederationSend } from "./handlers/federation/transactions.ts";
 import { getFilterById, postCreateFilter } from "./handlers/filters.ts";
 import { getLoginFlows, postLogin } from "./handlers/login.ts";
@@ -143,6 +150,21 @@ import {
 	postAddThreePid,
 	postDeleteThreePid,
 } from "./handlers/threepid.ts";
+import {
+	getAdminWhois,
+	getRegisterAvailable,
+	getRegistrationTokenValidity,
+	postAccount3pidEmailRequestToken,
+	postAccount3pidMsisdnRequestToken,
+	postKnock,
+	postLoginGetToken,
+	postPasswordEmailRequestToken,
+	postPasswordMsisdnRequestToken,
+	postRegisterEmailRequestToken,
+	postRegisterMsisdnRequestToken,
+	postThreePidBind,
+	postThreePidUnbind,
+} from "./handlers/threepid-verify.ts";
 import { putTyping } from "./handlers/typing.ts";
 import { postUserDirectorySearch } from "./handlers/user-directory.ts";
 import { getTurnServer } from "./handlers/voip.ts";
@@ -169,6 +191,22 @@ export const registerRoutes = (
 	router.get("/_matrix/client/v3/login", getLoginFlows());
 	router.post("/_matrix/client/v3/login", postLogin(storage, serverName));
 	router.post("/_matrix/client/v3/register", postRegister(storage, serverName));
+	router.get(
+		"/_matrix/client/v3/register/available",
+		getRegisterAvailable(storage),
+	);
+	router.post(
+		"/_matrix/client/v3/register/email/requestToken",
+		postRegisterEmailRequestToken(storage, serverName),
+	);
+	router.post(
+		"/_matrix/client/v3/register/msisdn/requestToken",
+		postRegisterMsisdnRequestToken(),
+	);
+	router.get(
+		"/_matrix/client/v1/register/m.login.registration_token/validity",
+		getRegistrationTokenValidity(),
+	);
 	router.post("/_matrix/client/v3/refresh", postRefresh(storage));
 
 	// SSO routes (only registered when SSO is configured)
@@ -192,6 +230,12 @@ export const registerRoutes = (
 		);
 	}
 
+	router.post(
+		"/_matrix/client/v1/login/get_token",
+		postLoginGetToken(storage),
+		auth,
+	);
+
 	router.post("/_matrix/client/v3/logout", postLogout(storage), auth);
 	router.post("/_matrix/client/v3/logout/all", postLogoutAll(storage), auth);
 	router.get("/_matrix/client/v3/account/whoami", getWhoAmI(), auth);
@@ -202,8 +246,22 @@ export const registerRoutes = (
 		auth,
 	);
 	router.post(
+		"/_matrix/client/v3/account/password/email/requestToken",
+		postPasswordEmailRequestToken(storage, serverName),
+	);
+	router.post(
+		"/_matrix/client/v3/account/password/msisdn/requestToken",
+		postPasswordMsisdnRequestToken(),
+	);
+	router.post(
 		"/_matrix/client/v3/account/deactivate",
 		postDeactivate(storage),
+		auth,
+	);
+
+	router.get(
+		"/_matrix/client/v3/admin/whois/:userId",
+		getAdminWhois(storage),
 		auth,
 	);
 
@@ -282,6 +340,11 @@ export const registerRoutes = (
 	router.post(
 		"/_matrix/client/v3/rooms/:roomId/join",
 		postJoin(storage, serverName),
+		auth,
+	);
+	router.post(
+		"/_matrix/client/v3/knock/:roomIdOrAlias",
+		postKnock(storage, serverName),
 		auth,
 	);
 	router.post(
@@ -560,6 +623,24 @@ export const registerRoutes = (
 		postDeleteThreePid(storage),
 		auth,
 	);
+	router.post(
+		"/_matrix/client/v3/account/3pid/email/requestToken",
+		postAccount3pidEmailRequestToken(storage, serverName),
+	);
+	router.post(
+		"/_matrix/client/v3/account/3pid/msisdn/requestToken",
+		postAccount3pidMsisdnRequestToken(),
+	);
+	router.post(
+		"/_matrix/client/v3/account/3pid/bind",
+		postThreePidBind(),
+		auth,
+	);
+	router.post(
+		"/_matrix/client/v3/account/3pid/unbind",
+		postThreePidUnbind(),
+		auth,
+	);
 
 	router.post(
 		"/_matrix/client/v3/user_directory/search",
@@ -613,6 +694,11 @@ export const registerRoutes = (
 		);
 
 		router.get(
+			"/_matrix/federation/v1/version",
+			getFederationVersion(),
+		);
+
+		router.get(
 			"/_matrix/federation/v1/query/profile",
 			getQueryProfile(storage),
 			fedAuth,
@@ -626,6 +712,16 @@ export const registerRoutes = (
 			"/_matrix/federation/v1/publicRooms",
 			getFederationPublicRooms(storage),
 			fedAuth,
+		);
+		router.post(
+			"/_matrix/federation/v1/publicRooms",
+			postFederationPublicRooms(storage),
+			fedAuth,
+		);
+
+		router.get(
+			"/_matrix/federation/v1/openid/userinfo",
+			getFederationOpenIdUserinfo(storage),
 		);
 
 		router.get(
@@ -656,6 +752,12 @@ export const registerRoutes = (
 		router.post(
 			"/_matrix/federation/v1/get_missing_events/:roomId",
 			postFederationMissingEvents(storage),
+			fedAuth,
+		);
+
+		router.get(
+			"/_matrix/federation/v1/timestamp_to_event/:roomId",
+			getFederationTimestampToEvent(storage),
 			fedAuth,
 		);
 
@@ -704,6 +806,23 @@ export const registerRoutes = (
 		router.put(
 			"/_matrix/federation/v2/invite/:roomId/:eventId",
 			putFederationInvite(storage, serverName, signingKey, federationClient),
+			fedAuth,
+		);
+
+		router.get(
+			"/_matrix/federation/v1/make_knock/:roomId/:userId",
+			getMakeKnock(storage, serverName),
+			fedAuth,
+		);
+		router.put(
+			"/_matrix/federation/v1/send_knock/:roomId/:eventId",
+			putSendKnock(storage, serverName, signingKey, federationClient),
+			fedAuth,
+		);
+
+		router.get(
+			"/_matrix/federation/v1/hierarchy/:roomId",
+			postFederationHierarchy(storage),
 			fedAuth,
 		);
 	}
