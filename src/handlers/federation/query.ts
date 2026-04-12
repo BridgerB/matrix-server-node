@@ -61,3 +61,7 @@ export const getFederationPublicRooms =
 			body: { chunk: rooms, total_room_count_estimate: rooms.length },
 		};
 	};
+
+export const getQueryGeneric = (): Handler => async () => {
+	throw notFound("Unknown query type");
+};

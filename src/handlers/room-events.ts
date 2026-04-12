@@ -12,6 +12,7 @@ import {
 import { bundleAggregations, indexRelation } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
+import type { PDU } from "../types/events.ts";
 import type { JsonObject } from "../types/json.ts";
 
 export const putSendEvent =
@@ -248,6 +249,52 @@ export const postRedact =
 
 		await storage.setTxnEventId(userId, deviceId, txnId, eventId);
 		return { status: 200, body: { event_id: eventId } };
+	};
+
+export const getTimestampToEvent =
+	(storage: Storage): Handler =>
+	async (req) => {
+		const roomId = req.params.roomId as string;
+		const userId = req.userId as string;
+		await requireJoinedRoom(storage, roomId, userId);
+
+		const tsStr = req.query.get("ts");
+		if (!tsStr) throw badJson("Missing required query parameter: ts");
+		const ts = parseInt(tsStr, 10);
+		const dir = (req.query.get("dir") ?? "f") as "f" | "b";
+
+		const result = await storage.getEventsByRoom(roomId, 10000, undefined, "f");
+		let closest: { event: PDU; eventId: string } | undefined;
+		let closestDiff = Infinity;
+
+		for (const entry of result.events) {
+			const diff =
+				dir === "f"
+					? entry.event.origin_server_ts - ts
+					: ts - entry.event.origin_server_ts;
+			if (diff >= 0 && diff < closestDiff) {
+				closestDiff = diff;
+				closest = entry;
+			}
+		}
+
+		if (!closest) {
+			// Fall back to the last/first event
+			closest =
+				dir === "f"
+					? result.events[result.events.length - 1]
+					: result.events[0];
+		}
+
+		if (!closest) throw notFound("No events found");
+
+		return {
+			status: 200,
+			body: {
+				event_id: closest.eventId,
+				origin_server_ts: closest.event.origin_server_ts,
+			},
+		};
 	};
 
 export const getContext =

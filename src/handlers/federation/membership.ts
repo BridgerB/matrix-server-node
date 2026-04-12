@@ -219,3 +219,14 @@ export const putFederationInvite =
 			body: { event: coSigned },
 		};
 	};
+
+export const postExchangeThirdPartyInvite =
+	(): Handler => async () => {
+		throw forbidden("Third party invites not supported");
+	};
+
+export const postThreePidOnBind =
+	(): Handler => async () => ({
+		status: 200,
+		body: {},
+	});
