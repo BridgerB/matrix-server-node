@@ -60,6 +60,7 @@ export const getDownload =
 		const headers: Record<string, string> = {
 			"Content-Type": metadata.content_type,
 			"Content-Length": String(data.length),
+			"Content-Security-Policy": "sandbox",
 		};
 
 		const fileName = req.params.fileName ?? metadata.upload_name;
@@ -86,6 +87,7 @@ export const getThumbnail =
 			headers: {
 				"Content-Type": metadata.content_type,
 				"Content-Length": String(data.length),
+				"Content-Security-Policy": "sandbox",
 			},
 		};
 	};

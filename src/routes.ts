@@ -155,7 +155,7 @@ import { postReceipt } from "./handlers/receipts.ts";
 import { postRefresh } from "./handlers/refresh.ts";
 import { postRegister } from "./handlers/register.ts";
 import { getRelations } from "./handlers/relations.ts";
-import { postReportEvent } from "./handlers/report.ts";
+import { postReportEvent, postReportRoom } from "./handlers/report.ts";
 import {
 	getAllState,
 	getContext,
@@ -271,6 +271,10 @@ export const registerRoutes = (
 	);
 	router.get(
 		"/_matrix/client/v3/register/m.login.registration_token/validity",
+		getRegistrationTokenValidity(),
+	);
+	router.get(
+		"/_matrix/client/v1/register/m.login.registration_token/validity",
 		getRegistrationTokenValidity(),
 	);
 	router.post("/_matrix/client/v3/refresh", postRefresh(storage));
@@ -924,6 +928,59 @@ export const registerRoutes = (
 	router.get(
 		"/_matrix/client/v3/thirdparty/user",
 		getThirdpartyUser(),
+		auth,
+	);
+
+	// v1 path aliases for endpoints Element Web uses
+	router.get(
+		"/_matrix/client/v1/rooms/:roomId/hierarchy",
+		getSpaceHierarchy(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v1/rooms/:roomId/relations/:eventId/:relType/:eventType",
+		getRelations(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v1/rooms/:roomId/relations/:eventId/:relType",
+		getRelations(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v1/rooms/:roomId/relations/:eventId",
+		getRelations(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v1/rooms/:roomId/threads",
+		getThreads(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v1/rooms/:roomId/timestamp_to_event",
+		getTimestampToEvent(storage),
+		auth,
+	);
+
+	// Trailing-slash pushrules variants
+	router.get("/_matrix/client/v3/pushrules/", getAllPushRules(storage), auth);
+	router.get(
+		"/_matrix/client/v3/pushrules/global/",
+		getGlobalPushRules(storage),
+		auth,
+	);
+
+	// Deprecated events endpoint
+	router.get("/_matrix/client/v3/events", (_req) => ({
+		status: 200,
+		body: { chunk: [], start: "", end: "" },
+	}), auth);
+
+	// Room report without eventId
+	router.post(
+		"/_matrix/client/v3/rooms/:roomId/report",
+		postReportRoom(storage),
 		auth,
 	);
 
