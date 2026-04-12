@@ -575,20 +575,6 @@ export const registerRoutes = (
 
 	router.get("/_matrix/client/v3/sync", getSync(storage, serverName), auth);
 
-<<<<<<< Updated upstream
-=======
-	// Appservice endpoints
-	router.post(
-		"/_matrix/client/v1/appservice/:appserviceId/ping",
-		postAppservicePing(registrations),
-	);
-	router.put(
-		"/_matrix/client/v3/directory/list/appservice/:networkId/:roomId",
-		putAppserviceDirectoryListRoom(storage, registrations),
-		asAuth,
-	);
-
->>>>>>> Stashed changes
 	if (signingKey) {
 		const federationClient = new FederationClient(
 			serverName as ServerName,
