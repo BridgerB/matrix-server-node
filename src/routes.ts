@@ -1,4 +1,9 @@
+import { parseRegistrations } from "./appservice/registration.ts";
 import { FederationClient } from "./federation/client.ts";
+import {
+	postAppservicePing,
+	putAppserviceDirectoryListRoom,
+} from "./handlers/appservice.ts";
 import {
 	getWhoAmI,
 	postChangePassword,
@@ -140,6 +145,7 @@ import {
 import { putTyping } from "./handlers/typing.ts";
 import { postUserDirectorySearch } from "./handlers/user-directory.ts";
 import { getTurnServer } from "./handlers/voip.ts";
+import { requireAppserviceAuth } from "./middleware/appservice-auth.ts";
 import { requireAuth } from "./middleware/auth.ts";
 import { requireFederationAuth } from "./middleware/federation-auth.ts";
 import type { Router } from "./router.ts";
@@ -153,15 +159,20 @@ export const registerRoutes = (
 	serverName: string,
 	signingKey?: SigningKey,
 ): void => {
+	const registrations = parseRegistrations();
 	const auth = requireAuth(storage);
+	const asAuth = requireAppserviceAuth(registrations, serverName);
 
 	router.get("/_matrix/client/versions", versionsHandler(serverName));
 	router.get("/.well-known/matrix/server", wellKnownServerHandler(serverName));
 	router.get("/.well-known/matrix/client", wellKnownClientHandler(serverName));
 	router.get("/_matrix/client/v3/capabilities", getCapabilities(), auth);
 
-	router.get("/_matrix/client/v3/login", getLoginFlows());
-	router.post("/_matrix/client/v3/login", postLogin(storage, serverName));
+	router.get("/_matrix/client/v3/login", getLoginFlows(registrations));
+	router.post(
+		"/_matrix/client/v3/login",
+		postLogin(storage, serverName, registrations),
+	);
 	router.post("/_matrix/client/v3/register", postRegister(storage, serverName));
 	router.post("/_matrix/client/v3/refresh", postRefresh(storage));
 
@@ -568,6 +579,31 @@ export const registerRoutes = (
 
 	router.get("/_matrix/client/v3/sync", getSync(storage, serverName), auth);
 
+<<<<<<< Updated upstream
+=======
+	router.post(
+		"/_matrix/client/unstable/org.matrix.simplified_msc3575/sync",
+		slidingSync(storage, serverName),
+		auth,
+	);
+	router.post(
+		"/_matrix/client/v4/sync",
+		slidingSync(storage, serverName),
+		auth,
+	);
+
+	// Appservice endpoints
+	router.post(
+		"/_matrix/client/v1/appservice/:appserviceId/ping",
+		postAppservicePing(registrations),
+	);
+	router.put(
+		"/_matrix/client/v3/directory/list/appservice/:networkId/:roomId",
+		putAppserviceDirectoryListRoom(storage, registrations),
+		asAuth,
+	);
+
+>>>>>>> Stashed changes
 	if (signingKey) {
 		const federationClient = new FederationClient(
 			serverName as ServerName,
