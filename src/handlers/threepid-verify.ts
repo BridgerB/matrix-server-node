@@ -227,6 +227,17 @@ export const getAdminWhois =
 	(storage: Storage): Handler =>
 	async (req) => {
 		const targetUserId = req.params.userId!;
+		const requestingUser = req.userId!;
+
+		// Only allow users to query their own session info
+		// (server admin role not implemented)
+		if (targetUserId !== requestingUser) {
+			throw new MatrixError(
+				"M_FORBIDDEN",
+				"You can only query your own session information",
+				403,
+			);
+		}
 
 		const sessions = await storage.getSessionsByUser(targetUserId);
 
