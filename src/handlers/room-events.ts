@@ -6,6 +6,7 @@ import {
 	getUserPowerLevel,
 	pduToClientEvent,
 	redactEvent,
+	requireJoinedOrWorldReadable,
 	requireJoinedRoom,
 	selectAuthEvents,
 } from "../events.ts";
@@ -87,7 +88,7 @@ export const getAllState =
 	(storage: Storage): Handler =>
 	async (req) => {
 		const roomId = req.params.roomId as string;
-		await requireJoinedRoom(storage, roomId, req.userId as string);
+		await requireJoinedOrWorldReadable(storage, roomId, req.userId);
 
 		const stateEntries = await storage.getAllState(roomId);
 		const events = stateEntries.map((e) =>
@@ -103,7 +104,7 @@ export const getStateEvent =
 		const eventType = req.params.eventType as string;
 		const stateKey = req.params.stateKey ?? "";
 
-		await requireJoinedRoom(storage, roomId, req.userId as string);
+		await requireJoinedOrWorldReadable(storage, roomId, req.userId);
 
 		const entry = await storage.getStateEvent(roomId, eventType, stateKey);
 		if (!entry) throw notFound("State event not found");
@@ -115,7 +116,7 @@ export const getMessages =
 	(storage: Storage): Handler =>
 	async (req) => {
 		const roomId = req.params.roomId as string;
-		await requireJoinedRoom(storage, roomId, req.userId as string);
+		await requireJoinedOrWorldReadable(storage, roomId, req.userId);
 
 		const dir = (req.query.get("dir") ?? "f") as "b" | "f";
 		if (dir !== "b" && dir !== "f") throw badJson("dir must be 'b' or 'f'");
@@ -145,7 +146,7 @@ export const getMembers =
 	(storage: Storage): Handler =>
 	async (req) => {
 		const roomId = req.params.roomId as string;
-		await requireJoinedRoom(storage, roomId, req.userId as string);
+		await requireJoinedOrWorldReadable(storage, roomId, req.userId);
 
 		const membershipFilter = req.query.get("membership");
 		const notMembershipFilter = req.query.get("not_membership");
@@ -175,14 +176,14 @@ export const getEvent =
 		const roomId = req.params.roomId as string;
 		const eventId = req.params.eventId as string;
 
-		await requireJoinedRoom(storage, roomId, req.userId as string);
+		await requireJoinedOrWorldReadable(storage, roomId, req.userId);
 
 		const entry = await storage.getEvent(eventId);
 		if (!entry || entry.event.room_id !== roomId)
 			throw notFound("Event not found");
 
 		const clientEvent = pduToClientEvent(entry.event, entry.eventId);
-		await bundleAggregations(storage, [clientEvent], req.userId as string);
+		await bundleAggregations(storage, [clientEvent], req.userId ?? "");
 		return { status: 200, body: clientEvent };
 	};
 
@@ -255,9 +256,9 @@ export const getContext =
 	async (req) => {
 		const roomId = req.params.roomId as string;
 		const eventId = req.params.eventId as string;
-		const userId = req.userId as string;
+		const userId = req.userId ?? "";
 
-		await requireJoinedRoom(storage, roomId, userId);
+		await requireJoinedOrWorldReadable(storage, roomId, req.userId);
 
 		const entry = await storage.getEvent(eventId);
 		if (!entry || entry.event.room_id !== roomId)
