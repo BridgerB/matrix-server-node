@@ -69,7 +69,26 @@ import {
 	getQueryProfile,
 } from "./handlers/federation/query.ts";
 import { putFederationSend } from "./handlers/federation/transactions.ts";
+import {
+	postDeviceSigningUpload,
+	postSignaturesUpload,
+} from "./handlers/cross-signing.ts";
 import { getFilterById, postCreateFilter } from "./handlers/filters.ts";
+import {
+	deleteKeyBackupAll,
+	deleteKeyBackupRoom,
+	deleteKeyBackupSession,
+	deleteKeyBackupVersion,
+	getKeyBackupAll,
+	getKeyBackupRoom,
+	getKeyBackupSession,
+	getKeyBackupVersion,
+	postKeyBackupVersion,
+	putKeyBackupAll,
+	putKeyBackupRoom,
+	putKeyBackupSession,
+	putKeyBackupVersion,
+} from "./handlers/key-backup.ts";
 import { getLoginFlows, postLogin } from "./handlers/login.ts";
 import { postLogout, postLogoutAll } from "./handlers/logout.ts";
 import {
@@ -501,6 +520,91 @@ export const registerRoutes = (
 	router.post("/_matrix/client/v3/keys/query", postKeysQuery(storage), auth);
 	router.post("/_matrix/client/v3/keys/claim", postKeysClaim(storage), auth);
 	router.get("/_matrix/client/v3/keys/changes", getKeysChanges(), auth);
+
+	router.post(
+		"/_matrix/client/v3/keys/device_signing/upload",
+		postDeviceSigningUpload(storage),
+		auth,
+	);
+	router.post(
+		"/_matrix/client/v3/keys/signatures/upload",
+		postSignaturesUpload(storage),
+		auth,
+	);
+
+	// Key backup version management
+	router.post(
+		"/_matrix/client/v3/room_keys/version",
+		postKeyBackupVersion(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v3/room_keys/version/:version",
+		getKeyBackupVersion(storage),
+		auth,
+	);
+	router.put(
+		"/_matrix/client/v3/room_keys/version/:version",
+		putKeyBackupVersion(storage),
+		auth,
+	);
+	router.delete(
+		"/_matrix/client/v3/room_keys/version/:version",
+		deleteKeyBackupVersion(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v3/room_keys/version",
+		getKeyBackupVersion(storage),
+		auth,
+	);
+
+	// Key backup data — specific routes first
+	router.put(
+		"/_matrix/client/v3/room_keys/keys/:roomId/:sessionId",
+		putKeyBackupSession(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v3/room_keys/keys/:roomId/:sessionId",
+		getKeyBackupSession(storage),
+		auth,
+	);
+	router.delete(
+		"/_matrix/client/v3/room_keys/keys/:roomId/:sessionId",
+		deleteKeyBackupSession(storage),
+		auth,
+	);
+	router.put(
+		"/_matrix/client/v3/room_keys/keys/:roomId",
+		putKeyBackupRoom(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v3/room_keys/keys/:roomId",
+		getKeyBackupRoom(storage),
+		auth,
+	);
+	router.delete(
+		"/_matrix/client/v3/room_keys/keys/:roomId",
+		deleteKeyBackupRoom(storage),
+		auth,
+	);
+	router.put(
+		"/_matrix/client/v3/room_keys/keys",
+		putKeyBackupAll(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v3/room_keys/keys",
+		getKeyBackupAll(storage),
+		auth,
+	);
+	router.delete(
+		"/_matrix/client/v3/room_keys/keys",
+		deleteKeyBackupAll(storage),
+		auth,
+	);
 
 	router.put(
 		"/_matrix/client/v3/sendToDevice/:eventType/:txnId",
