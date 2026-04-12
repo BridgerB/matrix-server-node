@@ -1,4 +1,9 @@
+import { parseRegistrations } from "./appservice/registration.ts";
 import { FederationClient } from "./federation/client.ts";
+import {
+	postAppservicePing,
+	putAppserviceDirectoryListRoom,
+} from "./handlers/appservice.ts";
 import {
 	getWhoAmI,
 	postChangePassword,
@@ -163,7 +168,6 @@ import {
 } from "./handlers/rooms.ts";
 import { postSearch } from "./handlers/search.ts";
 import { getSpaceHierarchy } from "./handlers/spaces.ts";
-import { slidingSync } from "./handlers/sliding-sync.ts";
 import { getSync } from "./handlers/sync.ts";
 import { getThreads } from "./handlers/threads.ts";
 import {
@@ -175,6 +179,7 @@ import { putTyping } from "./handlers/typing.ts";
 import { postUserDirectorySearch } from "./handlers/user-directory.ts";
 import { getUrlPreview } from "./handlers/url-preview.ts";
 import { getTurnServer } from "./handlers/voip.ts";
+import { requireAppserviceAuth } from "./middleware/appservice-auth.ts";
 import { requireAuth } from "./middleware/auth.ts";
 import { requireFederationAuth } from "./middleware/federation-auth.ts";
 import { rateLimit } from "./middleware/rate-limit.ts";
@@ -189,7 +194,9 @@ export const registerRoutes = (
 	serverName: string,
 	signingKey?: SigningKey,
 ): void => {
+	const registrations = parseRegistrations();
 	const auth = requireAuth(storage);
+	const asAuth = requireAppserviceAuth(registrations, serverName);
 	const loginRL = rateLimit("login");
 	const registerRL = rateLimit("register");
 	const defaultRL = rateLimit("default");
@@ -200,10 +207,10 @@ export const registerRoutes = (
 	router.get("/.well-known/matrix/support", wellKnownSupportHandler());
 	router.get("/_matrix/client/v3/capabilities", getCapabilities(), auth);
 
-	router.get("/_matrix/client/v3/login", getLoginFlows());
+	router.get("/_matrix/client/v3/login", getLoginFlows(registrations));
 	router.post(
 		"/_matrix/client/v3/login",
-		postLogin(storage, serverName),
+		postLogin(storage, serverName, registrations),
 		loginRL,
 	);
 	router.post(
@@ -769,15 +776,15 @@ export const registerRoutes = (
 
 	router.get("/_matrix/client/v3/sync", getSync(storage, serverName), auth);
 
+	// Appservice endpoints
 	router.post(
-		"/_matrix/client/unstable/org.matrix.simplified_msc3575/sync",
-		slidingSync(storage, serverName),
-		auth,
+		"/_matrix/client/v1/appservice/:appserviceId/ping",
+		postAppservicePing(registrations),
 	);
-	router.post(
-		"/_matrix/client/v4/sync",
-		slidingSync(storage, serverName),
-		auth,
+	router.put(
+		"/_matrix/client/v3/directory/list/appservice/:networkId/:roomId",
+		putAppserviceDirectoryListRoom(storage, registrations),
+		asAuth,
 	);
 
 	if (signingKey) {
