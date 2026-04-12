@@ -247,6 +247,14 @@ export interface Storage {
 		serverName: ServerName,
 		mediaId: string,
 	): Promise<{ metadata: StoredMedia; data: Buffer } | undefined>;
+	reserveMedia(media: StoredMedia): Promise<void>;
+	updateMediaContent(
+		serverName: ServerName,
+		mediaId: string,
+		contentType: string,
+		fileName: string | undefined,
+		data: Buffer,
+	): Promise<boolean>;
 
 	// Filters
 	createFilter(userId: UserId, filter: JsonObject): Promise<string>;

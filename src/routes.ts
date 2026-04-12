@@ -81,6 +81,10 @@ import {
 	getQueryProfile,
 	postFederationPublicRooms,
 } from "./handlers/federation/query.ts";
+import {
+	getFederationMediaDownload,
+	getFederationMediaThumbnail,
+} from "./handlers/federation/media.ts";
 import { postFederationHierarchy } from "./handlers/federation/spaces.ts";
 import { putFederationSend } from "./handlers/federation/transactions.ts";
 import {
@@ -109,7 +113,9 @@ import {
 	getConfig,
 	getDownload,
 	getThumbnail,
+	postCreateMedia,
 	postUpload,
+	putAsyncUpload,
 } from "./handlers/media.ts";
 import { getNotifications } from "./handlers/notifications.ts";
 import { postOpenIdToken } from "./handlers/openid.ts";
@@ -516,6 +522,16 @@ export const registerRoutes = (
 		auth,
 	);
 
+	router.post(
+		"/_matrix/media/v1/create",
+		postCreateMedia(storage, serverName),
+		auth,
+	);
+	router.put(
+		"/_matrix/media/v3/upload/:serverName/:mediaId",
+		putAsyncUpload(storage, serverName),
+		auth,
+	);
 	router.post(
 		"/_matrix/media/v3/upload",
 		postUpload(storage, serverName),
@@ -934,6 +950,17 @@ export const registerRoutes = (
 		router.get(
 			"/_matrix/federation/v1/hierarchy/:roomId",
 			postFederationHierarchy(storage),
+			fedAuth,
+		);
+
+		router.get(
+			"/_matrix/federation/v1/media/download/:mediaId",
+			getFederationMediaDownload(storage, serverName),
+			fedAuth,
+		);
+		router.get(
+			"/_matrix/federation/v1/media/thumbnail/:mediaId",
+			getFederationMediaThumbnail(storage, serverName),
 			fedAuth,
 		);
 	}

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { computeEventId } from "../events.ts";
 import type {
 	CrossSigningKey,
@@ -668,6 +669,32 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		mediaId: string,
 	): Promise<{ metadata: StoredMedia; data: Buffer } | undefined> {
 		return this.mediaStore.get(`${serverName}/${mediaId}`);
+	}
+
+	async reserveMedia(media: StoredMedia): Promise<void> {
+		this.mediaStore.set(`${media.origin}/${media.media_id}`, {
+			metadata: media,
+			data: Buffer.alloc(0),
+		});
+	}
+
+	async updateMediaContent(
+		serverName: ServerName,
+		mediaId: string,
+		contentType: string,
+		fileName: string | undefined,
+		data: Buffer,
+	): Promise<boolean> {
+		const key = `${serverName}/${mediaId}`;
+		const existing = this.mediaStore.get(key);
+		if (!existing) return false;
+		const hash = createHash("sha256").update(data).digest("base64");
+		existing.metadata.content_type = contentType;
+		existing.metadata.upload_name = fileName;
+		existing.metadata.file_size = data.length;
+		existing.metadata.content_hash = hash;
+		existing.data = data;
+		return true;
 	}
 
 	async createFilter(userId: UserId, filter: JsonObject): Promise<string> {
