@@ -315,6 +315,23 @@ export const postInvite =
 		return { status: 200, body: {} };
 	};
 
+export const postKnock =
+	(storage: Storage, serverName: string): Handler =>
+	async (req) => {
+		const roomId = req.params.roomId as string;
+		const body = (req.body ?? {}) as { reason?: string };
+		await sendMembershipEvent(
+			storage,
+			serverName,
+			roomId,
+			req.userId as string,
+			req.userId as string,
+			"knock",
+			body.reason,
+		);
+		return { status: 200, body: {} };
+	};
+
 export const postKick =
 	(storage: Storage, serverName: string): Handler =>
 	async (req) => {

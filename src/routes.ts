@@ -145,6 +145,7 @@ import {
 	postInvite,
 	postJoin,
 	postKick,
+	postKnock,
 	postLeave,
 	postUnban,
 } from "./handlers/rooms.ts";
@@ -299,6 +300,11 @@ export const registerRoutes = (
 	router.post(
 		"/_matrix/client/v3/rooms/:roomId/invite",
 		postInvite(storage, serverName),
+		auth,
+	);
+	router.post(
+		"/_matrix/client/v3/rooms/:roomId/knock",
+		postKnock(storage, serverName),
 		auth,
 	);
 	router.post(
