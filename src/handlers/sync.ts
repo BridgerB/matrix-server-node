@@ -1,4 +1,5 @@
 import { pduToClientEvent } from "../events.ts";
+import { getIgnoredUsers } from "../ignored-users.ts";
 import { evaluatePushRules, getOrInitRules } from "../push-rules.ts";
 import { bundleAggregations } from "../relations.ts";
 import type { Handler } from "../router.ts";
@@ -7,7 +8,6 @@ import type { ClientEvent, PDU } from "../types/events.ts";
 import type { DeviceId, RoomId, UserId } from "../types/index.ts";
 import type { PushRulesContent } from "../types/push.ts";
 import type { RoomPowerLevelsContent } from "../types/state-events.ts";
-import type { IgnoredUserListContent } from "../types/account-data.ts";
 import type {
 	InvitedRoom,
 	JoinedRoom,
@@ -19,16 +19,6 @@ import type {
 const TIMELINE_LIMIT = 20;
 const MAX_TIMEOUT = 30000;
 
-const getIgnoredUsers = async (
-	storage: Storage,
-	userId: UserId,
-): Promise<Set<UserId>> => {
-	const data = await storage.getGlobalAccountData(userId, "m.ignored_user_list");
-	if (!data) return new Set();
-	const content = data as unknown as IgnoredUserListContent;
-	if (!content.ignored_users) return new Set();
-	return new Set(Object.keys(content.ignored_users) as UserId[]);
-};
 const collectJoinedUsers = async (
 	storage: Storage,
 	roomId: RoomId,
@@ -93,6 +83,7 @@ const buildReceiptContent = (
 const buildEphemeralEvents = async (
 	storage: Storage,
 	roomId: RoomId,
+	forUserId: UserId,
 ): Promise<ClientEvent[]> => {
 	const events: ClientEvent[] = [
 		{
@@ -101,10 +92,15 @@ const buildEphemeralEvents = async (
 		} as unknown as ClientEvent,
 	];
 	const receipts = await storage.getReceipts(roomId);
-	if (receipts.length > 0) {
+	// Filter private receipts: m.read.private only visible to the owning user
+	const visibleReceipts = receipts.filter(
+		(r) =>
+			r.receiptType !== "m.read.private" || r.userId === forUserId,
+	);
+	if (visibleReceipts.length > 0) {
 		events.push({
 			type: "m.receipt",
-			content: buildReceiptContent(receipts),
+			content: buildReceiptContent(visibleReceipts),
 		} as unknown as ClientEvent);
 	}
 	return events;
@@ -199,7 +195,7 @@ const buildInitialSync = async (
 				timelineClientEvents = timelineClientEvents.filter(
 					(e) =>
 						e.state_key !== undefined ||
-						!ignoredUsers.has(e.sender as UserId),
+						!ignoredUsers.has(e.sender),
 				);
 			}
 
@@ -216,6 +212,13 @@ const buildInitialSync = async (
 			const prevBatch =
 				limited && result.end !== undefined ? String(result.end) : undefined;
 
+			const notifEvents =
+				ignoredUsers.size > 0
+					? timelineEvents.filter(
+							(e) => !ignoredUsers.has(e.event.sender as UserId),
+						)
+					: timelineEvents;
+
 			join[roomId] = {
 				state: stateEvents.length > 0 ? { events: stateEvents } : undefined,
 				timeline: {
@@ -228,7 +231,7 @@ const buildInitialSync = async (
 					roomId,
 					userId,
 					userRules,
-					timelineEvents,
+					notifEvents,
 				),
 			};
 		} else if (membership === "invite") {
@@ -261,7 +264,7 @@ const buildInitialSync = async (
 		}
 
 		(join[roomId] as JoinedRoom).ephemeral = {
-			events: await buildEphemeralEvents(storage, roomId as RoomId),
+			events: await buildEphemeralEvents(storage, roomId as RoomId, userId),
 		};
 
 		const users = await collectJoinedUsers(storage, roomId as RoomId);
@@ -327,7 +330,7 @@ const buildIncrementalSync = async (
 				timelineClientEvents = timelineClientEvents.filter(
 					(e) =>
 						e.state_key !== undefined ||
-						!ignoredUsers.has(e.sender as UserId),
+						!ignoredUsers.has(e.sender),
 				);
 			}
 
@@ -347,7 +350,7 @@ const buildIncrementalSync = async (
 					? String((newEvents[0] as (typeof newEvents)[number]).streamPos - 1)
 					: undefined;
 
-			const ephemeralEvents = await buildEphemeralEvents(storage, roomId);
+			const ephemeralEvents = await buildEphemeralEvents(storage, roomId, userId);
 
 			if (
 				timelineClientEvents.length > 0 ||
@@ -360,7 +363,12 @@ const buildIncrementalSync = async (
 					undefined,
 					"b",
 				);
-				const recentEvents = recentResult.events.reverse();
+				let recentEvents = recentResult.events.reverse();
+				if (ignoredUsers.size > 0) {
+					recentEvents = recentEvents.filter(
+						(e) => !ignoredUsers.has(e.event.sender),
+					);
+				}
 
 				join[roomId] = {
 					state:

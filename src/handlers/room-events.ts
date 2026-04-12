@@ -9,10 +9,10 @@ import {
 	requireJoinedRoom,
 	selectAuthEvents,
 } from "../events.ts";
+import { getIgnoredUsers } from "../ignored-users.ts";
 import { bundleAggregations, indexRelation } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { IgnoredUserListContent } from "../types/account-data.ts";
 import type { UserId } from "../types/index.ts";
 import type { JsonObject } from "../types/json.ts";
 
@@ -133,20 +133,13 @@ export const getMessages =
 			pduToClientEvent(e.event, e.eventId),
 		);
 
-		const ignoredData = await storage.getGlobalAccountData(
-			userId,
-			"m.ignored_user_list",
-		);
-		if (ignoredData) {
-			const ignored = (ignoredData as unknown as IgnoredUserListContent)
-				.ignored_users;
-			if (ignored) {
-				const ignoredSet = new Set(Object.keys(ignored));
-				chunk = chunk.filter(
-					(e) =>
-						e.state_key !== undefined || !ignoredSet.has(e.sender),
-				);
-			}
+		const ignoredUsers = await getIgnoredUsers(storage, userId);
+		if (ignoredUsers.size > 0) {
+			chunk = chunk.filter(
+				(e) =>
+					e.state_key !== undefined ||
+					!ignoredUsers.has(e.sender as UserId),
+			);
 		}
 
 		await bundleAggregations(storage, chunk, userId);
