@@ -32,10 +32,13 @@ const cleanup = (now: number): void => {
 	}
 };
 
+const RATE_LIMIT_DISABLED = process.env.DISABLE_RATE_LIMIT === "1";
+
 export const rateLimit = (category: string): Middleware => {
 	const config = RATE_CONFIGS[category] ?? RATE_CONFIGS["default"]!;
 
 	return async (req, next) => {
+		if (RATE_LIMIT_DISABLED) return next(req);
 		const ip = req.raw.socket.remoteAddress ?? "unknown";
 		const key = `${ip}:${category}`;
 		const now = Date.now();
