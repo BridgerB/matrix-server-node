@@ -1,3 +1,4 @@
+import { MatrixError } from "../errors.ts";
 import { pduToClientEvent } from "../events.ts";
 import { getIgnoredUsers } from "../ignored-users.ts";
 import { evaluatePushRules, getOrInitRules } from "../push-rules.ts";
@@ -5,6 +6,7 @@ import { bundleAggregations } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { ClientEvent, PDU } from "../types/events.ts";
+import type { SyncFilter } from "../types/filters.ts";
 import type { DeviceId, RoomId, UserId } from "../types/index.ts";
 import type { PushRulesContent } from "../types/push.ts";
 import type { RoomPowerLevelsContent } from "../types/state-events.ts";
@@ -12,12 +14,54 @@ import type {
 	InvitedRoom,
 	JoinedRoom,
 	LeftRoom,
+	RoomSummary,
 	SyncResponse,
 	UnreadNotificationCounts,
 } from "../types/sync.ts";
 
-const TIMELINE_LIMIT = 20;
+const DEFAULT_TIMELINE_LIMIT = 20;
 const MAX_TIMEOUT = 30000;
+
+interface ResolvedFilter {
+	timelineLimit: number;
+	lazyLoadMembers: boolean;
+}
+
+const resolveFilter = async (
+	storage: Storage,
+	userId: UserId,
+	filterParam: string | null,
+): Promise<ResolvedFilter> => {
+	const defaults: ResolvedFilter = {
+		timelineLimit: DEFAULT_TIMELINE_LIMIT,
+		lazyLoadMembers: false,
+	};
+	if (filterParam === null) return defaults;
+
+	let filter: SyncFilter | undefined;
+	if (filterParam.startsWith("{")) {
+		try {
+			filter = JSON.parse(filterParam) as SyncFilter;
+		} catch {
+			return defaults;
+		}
+	} else {
+		// It's a filter ID
+		const stored = await storage.getFilter(userId, filterParam);
+		if (stored) {
+			filter = stored as SyncFilter;
+		}
+	}
+
+	if (!filter) return defaults;
+
+	return {
+		timelineLimit:
+			filter.room?.timeline?.limit ?? DEFAULT_TIMELINE_LIMIT,
+		lazyLoadMembers:
+			filter.room?.state?.lazy_load_members ?? false,
+	};
+};
 
 const collectJoinedUsers = async (
 	storage: Storage,
@@ -158,11 +202,46 @@ const computeNotificationCounts = async (
 
 	return { notification_count, highlight_count };
 };
+const buildRoomSummary = async (
+	storage: Storage,
+	roomId: RoomId,
+	userId: UserId,
+): Promise<RoomSummary> => {
+	const members = await storage.getMemberEvents(roomId);
+	let joinedCount = 0;
+	let invitedCount = 0;
+	const heroes: UserId[] = [];
+
+	for (const m of members) {
+		const membership = (m.event.content as Record<string, unknown>)
+			.membership as string;
+		const stateKey = m.event.state_key as UserId;
+		if (membership === "join") {
+			joinedCount++;
+			if (stateKey !== userId && heroes.length < 5) {
+				heroes.push(stateKey);
+			}
+		} else if (membership === "invite") {
+			invitedCount++;
+			if (stateKey !== userId && heroes.length < 5) {
+				heroes.push(stateKey);
+			}
+		}
+	}
+
+	return {
+		"m.heroes": heroes.length > 0 ? heroes : undefined,
+		"m.joined_member_count": joinedCount,
+		"m.invited_member_count": invitedCount,
+	};
+};
+
 const buildInitialSync = async (
 	storage: Storage,
 	userId: UserId,
 	deviceId: DeviceId,
 	nextBatch: number,
+	filter: ResolvedFilter,
 ): Promise<SyncResponse> => {
 	const userRooms = await storage.getRoomsForUserWithMembership(userId);
 
@@ -175,7 +254,7 @@ const buildInitialSync = async (
 		if (membership === "join") {
 			const result = await storage.getEventsByRoom(
 				roomId,
-				TIMELINE_LIMIT,
+				filter.timelineLimit,
 				undefined,
 				"b",
 			);
@@ -183,9 +262,8 @@ const buildInitialSync = async (
 			const timelineEventIds = new Set(timelineEvents.map((e) => e.eventId));
 
 			const allState = await storage.getAllState(roomId);
-			const stateEvents = allState
-				.filter((e) => !timelineEventIds.has(e.eventId))
-				.map((e) => pduToClientEvent(e.event, e.eventId));
+			let stateEntries = allState
+				.filter((e) => !timelineEventIds.has(e.eventId));
 
 			let timelineClientEvents = timelineEvents.map((e) =>
 				pduToClientEvent(e.event, e.eventId),
@@ -199,15 +277,36 @@ const buildInitialSync = async (
 				);
 			}
 
+			// When lazy_load_members is enabled, only include member events
+			// for users who appear in the timeline
+			if (filter.lazyLoadMembers) {
+				const timelineSenders = new Set<string>();
+				for (const ev of timelineClientEvents) {
+					timelineSenders.add(ev.sender);
+					if (ev.type === "m.room.member" && ev.state_key) {
+						timelineSenders.add(ev.state_key);
+					}
+				}
+				stateEntries = stateEntries.filter(
+					(e) =>
+						e.event.type !== "m.room.member" ||
+						timelineSenders.has(e.event.state_key ?? ""),
+				);
+			}
+
+			const stateEvents = stateEntries.map((e) =>
+				pduToClientEvent(e.event, e.eventId),
+			);
+
 			await bundleAggregations(storage, timelineClientEvents, userId);
 
 			const totalEvents = await storage.getEventsByRoom(
 				roomId,
-				TIMELINE_LIMIT + 1,
+				filter.timelineLimit + 1,
 				undefined,
 				"b",
 			);
-			const limited = totalEvents.events.length > TIMELINE_LIMIT;
+			const limited = totalEvents.events.length > filter.timelineLimit;
 
 			const prevBatch =
 				limited && result.end !== undefined ? String(result.end) : undefined;
@@ -219,7 +318,10 @@ const buildInitialSync = async (
 						)
 					: timelineEvents;
 
+			const summary = await buildRoomSummary(storage, roomId, userId);
+
 			join[roomId] = {
+				summary,
 				state: stateEvents.length > 0 ? { events: stateEvents } : undefined,
 				timeline: {
 					events: timelineClientEvents,
@@ -304,6 +406,7 @@ const buildIncrementalSync = async (
 	since: number,
 	nextBatch: number,
 	fullState: boolean,
+	filter: ResolvedFilter,
 ): Promise<SyncResponse> => {
 	const userRooms = await storage.getRoomsForUserWithMembership(userId);
 
@@ -319,7 +422,7 @@ const buildIncrementalSync = async (
 			const { events: newEvents, limited } = await storage.getEventsByRoomSince(
 				roomId,
 				since,
-				TIMELINE_LIMIT,
+				filter.timelineLimit,
 			);
 
 			let timelineClientEvents = newEvents.map((e) =>
@@ -340,8 +443,25 @@ const buildIncrementalSync = async (
 			if (fullState) {
 				const allState = await storage.getAllState(roomId);
 				const timelineIds = new Set(newEvents.map((e) => e.eventId));
-				stateClientEvents = allState
-					.filter((e) => !timelineIds.has(e.eventId))
+				let stateEntries = allState
+					.filter((e) => !timelineIds.has(e.eventId));
+
+				if (filter.lazyLoadMembers) {
+					const timelineSenders = new Set<string>();
+					for (const ev of timelineClientEvents) {
+						timelineSenders.add(ev.sender);
+						if (ev.type === "m.room.member" && ev.state_key) {
+							timelineSenders.add(ev.state_key);
+						}
+					}
+					stateEntries = stateEntries.filter(
+						(e) =>
+							e.event.type !== "m.room.member" ||
+							timelineSenders.has(e.event.state_key ?? ""),
+					);
+				}
+
+				stateClientEvents = stateEntries
 					.map((e) => pduToClientEvent(e.event, e.eventId));
 			}
 
@@ -359,7 +479,7 @@ const buildIncrementalSync = async (
 			) {
 				const recentResult = await storage.getEventsByRoom(
 					roomId,
-					TIMELINE_LIMIT,
+					filter.timelineLimit,
 					undefined,
 					"b",
 				);
@@ -370,7 +490,10 @@ const buildIncrementalSync = async (
 					);
 				}
 
+				const summary = await buildRoomSummary(storage, roomId, userId);
+
 				join[roomId] = {
+					summary,
 					state:
 						stateClientEvents.length > 0
 							? { events: stateClientEvents }
@@ -397,7 +520,7 @@ const buildIncrementalSync = async (
 			const { events: newEvents } = await storage.getEventsByRoomSince(
 				roomId,
 				since,
-				TIMELINE_LIMIT,
+				filter.timelineLimit,
 			);
 			const membershipChanged = newEvents.some(
 				(e) => e.event.type === "m.room.member" && e.event.state_key === userId,
@@ -418,7 +541,7 @@ const buildIncrementalSync = async (
 			const { events: newEvents, limited } = await storage.getEventsByRoomSince(
 				roomId,
 				since,
-				TIMELINE_LIMIT,
+				filter.timelineLimit,
 			);
 			const membershipChanged = newEvents.some(
 				(e) => e.event.type === "m.room.member" && e.event.state_key === userId,
@@ -474,6 +597,18 @@ export const getSync =
 			MAX_TIMEOUT,
 		);
 		const fullState = req.query.get("full_state") === "true";
+		const filterParam = req.query.get("filter");
+
+		// Validate since token
+		if (since !== undefined) {
+			const currentPos = await storage.getStreamPosition();
+			if (since < 0 || since > currentPos) {
+				throw new MatrixError("M_UNKNOWN_POS", "Invalid sync token", 400);
+			}
+		}
+
+		// Resolve filter (inline JSON or filter ID)
+		const filter = await resolveFilter(storage, userId, filterParam);
 
 		if (since !== undefined && timeout > 0) {
 			await storage.waitForEvents(since, timeout);
@@ -483,7 +618,7 @@ export const getSync =
 
 		const response: SyncResponse =
 			since === undefined
-				? await buildInitialSync(storage, userId, deviceId, nextBatch)
+				? await buildInitialSync(storage, userId, deviceId, nextBatch, filter)
 				: await buildIncrementalSync(
 						storage,
 						userId,
@@ -491,6 +626,7 @@ export const getSync =
 						since,
 						nextBatch,
 						fullState,
+						filter,
 					);
 
 		return { status: 200, body: response };
