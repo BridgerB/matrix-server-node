@@ -1,7 +1,26 @@
+import { lookup } from "node:dns/promises";
 import * as http from "node:http";
 import * as https from "node:https";
-import { invalidParam, missingParam } from "../errors.ts";
+import { forbidden, invalidParam, missingParam } from "../errors.ts";
 import type { Handler } from "../router.ts";
+
+/**
+ * Check if an IP address is private/internal (SSRF protection).
+ */
+function isPrivateIp(ip: string): boolean {
+	// IPv4 private ranges
+	if (ip.startsWith("10.") || ip.startsWith("127.") || ip === "0.0.0.0") return true;
+	if (ip.startsWith("172.")) {
+		const second = parseInt(ip.split(".")[1] ?? "0", 10);
+		if (second >= 16 && second <= 31) return true;
+	}
+	if (ip.startsWith("192.168.")) return true;
+	if (ip.startsWith("169.254.")) return true;
+	// IPv6 loopback and private
+	if (ip === "::1" || ip === "::") return true;
+	if (ip.startsWith("fc") || ip.startsWith("fd") || ip.startsWith("fe80")) return true;
+	return false;
+}
 
 const MAX_RESPONSE_SIZE = 50 * 1024; // 50KB
 const FETCH_TIMEOUT_MS = 10_000;
@@ -172,6 +191,17 @@ export const getUrlPreview = (): Handler => async (req) => {
 
 	if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
 		throw invalidParam("URL must use http or https scheme");
+	}
+
+	// SSRF protection: resolve hostname and block private IPs
+	try {
+		const { address } = await lookup(parsedUrl.hostname);
+		if (isPrivateIp(address)) {
+			throw forbidden("URL resolves to a private IP address");
+		}
+	} catch (err) {
+		if (err instanceof Error && err.message.includes("private IP")) throw err;
+		throw invalidParam("Could not resolve URL hostname");
 	}
 
 	try {

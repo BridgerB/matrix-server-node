@@ -140,7 +140,7 @@ async function registerGuest(
 		user_id: userId,
 		localpart,
 		server_name: serverName,
-		password_hash: "",
+		password_hash: randomBytes(32).toString("base64url"),
 		account_type: "guest",
 		is_deactivated: false,
 		created_at: now,
