@@ -1,4 +1,4 @@
-import { badJson, forbidden, notFound } from "../errors.ts";
+import { badJson, forbidden, missingParam, notFound } from "../errors.ts";
 import {
 	buildEvent,
 	checkEventAuth,
@@ -12,6 +12,7 @@ import {
 import { bundleAggregations, indexRelation } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
+import type { UserId } from "../types/identifiers.ts";
 import type { JsonObject } from "../types/json.ts";
 
 export const putSendEvent =
@@ -322,5 +323,81 @@ export const getContext =
 						? String(targetIdx + eventsAfter.length + 1)
 						: undefined,
 			},
+		};
+	};
+
+export const getJoinedMembers =
+	(storage: Storage): Handler =>
+	async (req) => {
+		const roomId = req.params.roomId as string;
+		await requireJoinedRoom(storage, roomId, req.userId as string);
+
+		const entries = await storage.getMemberEvents(roomId);
+		const joined: Record<
+			string,
+			{ display_name: string | null; avatar_url: string | null }
+		> = {};
+
+		for (const entry of entries) {
+			const content = entry.event.content as Record<string, unknown>;
+			if (content.membership !== "join") continue;
+			const userId = entry.event.state_key as string;
+			const profile = await storage.getProfile(userId as UserId);
+			joined[userId] = {
+				display_name: profile?.displayname ?? null,
+				avatar_url: profile?.avatar_url ?? null,
+			};
+		}
+
+		return { status: 200, body: { joined } };
+	};
+
+export const getTimestampToEvent =
+	(storage: Storage): Handler =>
+	async (req) => {
+		const roomId = req.params.roomId as string;
+		await requireJoinedRoom(storage, roomId, req.userId as string);
+
+		const tsStr = req.query.get("ts");
+		if (!tsStr) throw missingParam("Missing 'ts'");
+		const ts = parseInt(tsStr, 10);
+		if (Number.isNaN(ts)) throw badJson("'ts' must be a number");
+
+		const dir = req.query.get("dir");
+		if (dir !== "f" && dir !== "b") throw badJson("'dir' must be 'f' or 'b'");
+
+		const result = await storage.getEventsByRoom(roomId, 10000, undefined, "f");
+		if (result.events.length === 0) throw notFound("No events in room");
+
+		let best: { eventId: string; originServerTs: number } | undefined;
+
+		for (const entry of result.events) {
+			const eventTs = entry.event.origin_server_ts as number;
+			if (dir === "f") {
+				if (eventTs >= ts) {
+					if (
+						!best ||
+						eventTs < best.originServerTs
+					) {
+						best = { eventId: entry.eventId, originServerTs: eventTs };
+					}
+				}
+			} else {
+				if (eventTs <= ts) {
+					if (
+						!best ||
+						eventTs > best.originServerTs
+					) {
+						best = { eventId: entry.eventId, originServerTs: eventTs };
+					}
+				}
+			}
+		}
+
+		if (!best) throw notFound("No event found for the given timestamp");
+
+		return {
+			status: 200,
+			body: { event_id: best.eventId, origin_server_ts: best.originServerTs },
 		};
 	};

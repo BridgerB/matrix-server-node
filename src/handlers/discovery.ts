@@ -36,6 +36,11 @@ export const wellKnownClientHandler = (serverName: string): Handler => {
 	return async () => ({ status: 200, body });
 };
 
+export const wellKnownSupportHandler = (): Handler => {
+	const body = { contacts: [] as unknown[] };
+	return async () => ({ status: 200, body });
+};
+
 export const getCapabilities = (): Handler => {
 	const body = {
 		capabilities: {

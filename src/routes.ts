@@ -25,6 +25,7 @@ import {
 	getDirectoryListRoom,
 	getDirectoryRoom,
 	getPublicRooms,
+	getRoomAliases,
 	postPublicRooms,
 	putDirectoryListRoom,
 	putDirectoryRoom,
@@ -34,6 +35,7 @@ import {
 	versionsHandler,
 	wellKnownClientHandler,
 	wellKnownServerHandler,
+	wellKnownSupportHandler,
 } from "./handlers/discovery.ts";
 import {
 	getKeysChanges,
@@ -110,9 +112,11 @@ import {
 	getAllState,
 	getContext,
 	getEvent,
+	getJoinedMembers,
 	getMembers,
 	getMessages,
 	getStateEvent,
+	getTimestampToEvent,
 	postRedact,
 	putSendEvent,
 	putStateEvent,
@@ -122,6 +126,7 @@ import {
 	getJoinedRooms,
 	postBan,
 	postCreateRoom,
+	postForget,
 	postInvite,
 	postJoin,
 	postKick,
@@ -158,6 +163,7 @@ export const registerRoutes = (
 	router.get("/_matrix/client/versions", versionsHandler(serverName));
 	router.get("/.well-known/matrix/server", wellKnownServerHandler(serverName));
 	router.get("/.well-known/matrix/client", wellKnownClientHandler(serverName));
+	router.get("/.well-known/matrix/support", wellKnownSupportHandler());
 	router.get("/_matrix/client/v3/capabilities", getCapabilities(), auth);
 
 	router.get("/_matrix/client/v3/login", getLoginFlows());
@@ -282,6 +288,11 @@ export const registerRoutes = (
 		postUnban(storage, serverName),
 		auth,
 	);
+	router.post(
+		"/_matrix/client/v3/rooms/:roomId/forget",
+		postForget(storage),
+		auth,
+	);
 
 	router.put(
 		"/_matrix/client/v3/rooms/:roomId/send/:eventType/:txnId",
@@ -322,6 +333,21 @@ export const registerRoutes = (
 	router.get(
 		"/_matrix/client/v3/rooms/:roomId/members",
 		getMembers(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v3/rooms/:roomId/joined_members",
+		getJoinedMembers(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v3/rooms/:roomId/aliases",
+		getRoomAliases(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v3/rooms/:roomId/timestamp_to_event",
+		getTimestampToEvent(storage),
 		auth,
 	);
 	router.get(
@@ -564,6 +590,11 @@ export const registerRoutes = (
 		"/_matrix/client/v3/rooms/:roomId/upgrade",
 		postRoomUpgrade(storage, serverName),
 		auth,
+	);
+
+	router.get(
+		"/_matrix/client/v3/thirdparty/protocols",
+		async () => ({ status: 200, body: {} }),
 	);
 
 	router.get("/_matrix/client/v3/sync", getSync(storage, serverName), auth);
