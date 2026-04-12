@@ -1,4 +1,6 @@
+import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { createServer as createTlsServer } from "node:https";
 import { cors } from "./middleware/cors.ts";
 import { Router } from "./router.ts";
 import { registerRoutes } from "./routes.ts";
@@ -59,3 +61,22 @@ server.listen(PORT, () => {
 		`matrix-server-node listening on :${PORT} (server_name: ${SERVER_NAME})`,
 	);
 });
+
+// Optional: TLS federation listener (for Complement / production federation)
+const TLS_CERT = process.env.TLS_CERT;
+const TLS_KEY = process.env.TLS_KEY;
+const FED_PORT = parseInt(process.env.FED_PORT ?? "8448", 10);
+
+if (TLS_CERT && TLS_KEY) {
+	const tlsServer = createTlsServer(
+		{
+			cert: readFileSync(TLS_CERT),
+			key: readFileSync(TLS_KEY),
+		},
+		(req, res) => router.handle(req, res),
+	);
+
+	tlsServer.listen(FED_PORT, () => {
+		console.log(`Federation TLS listening on :${FED_PORT}`);
+	});
+}
