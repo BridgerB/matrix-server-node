@@ -579,19 +579,6 @@ export const registerRoutes = (
 
 	router.get("/_matrix/client/v3/sync", getSync(storage, serverName), auth);
 
-<<<<<<< Updated upstream
-=======
-	router.post(
-		"/_matrix/client/unstable/org.matrix.simplified_msc3575/sync",
-		slidingSync(storage, serverName),
-		auth,
-	);
-	router.post(
-		"/_matrix/client/v4/sync",
-		slidingSync(storage, serverName),
-		auth,
-	);
-
 	// Appservice endpoints
 	router.post(
 		"/_matrix/client/v1/appservice/:appserviceId/ping",
@@ -603,7 +590,6 @@ export const registerRoutes = (
 		asAuth,
 	);
 
->>>>>>> Stashed changes
 	if (signingKey) {
 		const federationClient = new FederationClient(
 			serverName as ServerName,

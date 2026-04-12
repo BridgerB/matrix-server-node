@@ -7,6 +7,21 @@ import type { EventId } from "../types/identifiers.ts";
 
 let txnCounter = 0;
 
+// Cache compiled regexes per registration to avoid recompilation on every event
+const regexCache = new WeakMap<
+	{ regex: string },
+	RegExp
+>();
+
+const getRegex = (ns: { regex: string }): RegExp => {
+	let cached = regexCache.get(ns);
+	if (!cached) {
+		cached = new RegExp(ns.regex);
+		regexCache.set(ns, cached);
+	}
+	return cached;
+};
+
 /**
  * Push an event to all appservices whose namespaces match the event.
  *
@@ -29,13 +44,13 @@ export const pushToAppservices = (
 
 		const matchesUser = reg.namespaces.users?.some(
 			(ns) =>
-				new RegExp(ns.regex).test(event.sender) ||
+				getRegex(ns).test(event.sender) ||
 				(event.state_key !== undefined &&
-					new RegExp(ns.regex).test(event.state_key)),
+					getRegex(ns).test(event.state_key)),
 		);
 
 		const matchesRoom = reg.namespaces.rooms?.some((ns) =>
-			new RegExp(ns.regex).test(event.room_id),
+			getRegex(ns).test(event.room_id),
 		);
 
 		if (!matchesUser && !matchesRoom) continue;
