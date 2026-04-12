@@ -10,6 +10,12 @@ import {
 	postDeactivate,
 } from "./handlers/account.ts";
 import {
+	getAdminLock,
+	getAdminSuspend,
+	putAdminLock,
+	putAdminSuspend,
+} from "./handlers/admin.ts";
+import {
 	deleteTag,
 	getGlobalAccountData,
 	getRoomAccountData,
@@ -36,9 +42,11 @@ import {
 	putDirectoryRoom,
 } from "./handlers/directory.ts";
 import {
+	getAuthMetadata,
 	getCapabilities,
 	versionsHandler,
 	wellKnownClientHandler,
+	wellKnownPolicyServerHandler,
 	wellKnownServerHandler,
 	wellKnownSupportHandler,
 } from "./handlers/discovery.ts";
@@ -134,8 +142,10 @@ import {
 	getAvatarUrl,
 	getDisplayName,
 	getProfile,
+	getProfileField,
 	putAvatarUrl,
 	putDisplayName,
+	putProfileField,
 } from "./handlers/profile.ts";
 import {
 	deletePushRule,
@@ -155,7 +165,13 @@ import { postReceipt } from "./handlers/receipts.ts";
 import { postRefresh } from "./handlers/refresh.ts";
 import { postRegister } from "./handlers/register.ts";
 import { getRelations } from "./handlers/relations.ts";
-import { postReportEvent, postReportRoom } from "./handlers/report.ts";
+import {
+	postReportEvent,
+	postReportRoom,
+	postReportUser,
+} from "./handlers/report.ts";
+import { getRoomInitialSync } from "./handlers/room-initial-sync.ts";
+import { getRoomSummary } from "./handlers/room-summary.ts";
 import {
 	getAllState,
 	getContext,
@@ -244,6 +260,11 @@ export const registerRoutes = (
 	router.get("/.well-known/matrix/server", wellKnownServerHandler(serverName));
 	router.get("/.well-known/matrix/client", wellKnownClientHandler(serverName));
 	router.get("/.well-known/matrix/support", wellKnownSupportHandler());
+	router.get(
+		"/.well-known/matrix/policy_server",
+		wellKnownPolicyServerHandler(),
+	);
+	router.get("/_matrix/client/v1/auth_metadata", getAuthMetadata());
 	router.get("/_matrix/client/v3/capabilities", getCapabilities(), auth);
 
 	router.get("/_matrix/client/v3/login", getLoginFlows(registrations));
@@ -336,6 +357,27 @@ export const registerRoutes = (
 		auth,
 	);
 
+	router.put(
+		"/_matrix/client/v1/admin/lock/:userId",
+		putAdminLock(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v1/admin/lock/:userId",
+		getAdminLock(storage),
+		auth,
+	);
+	router.put(
+		"/_matrix/client/v1/admin/suspend/:userId",
+		putAdminSuspend(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v1/admin/suspend/:userId",
+		getAdminSuspend(storage),
+		auth,
+	);
+
 	router.get("/_matrix/client/v3/profile/:userId", getProfile(storage));
 	router.get(
 		"/_matrix/client/v3/profile/:userId/displayname",
@@ -353,6 +395,15 @@ export const registerRoutes = (
 	router.put(
 		"/_matrix/client/v3/profile/:userId/avatar_url",
 		putAvatarUrl(storage, serverName),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v3/profile/:userId/:keyName",
+		getProfileField(storage),
+	);
+	router.put(
+		"/_matrix/client/v3/profile/:userId/:keyName",
+		putProfileField(storage, serverName),
 		auth,
 	);
 
@@ -833,6 +884,12 @@ export const registerRoutes = (
 	);
 
 	router.post(
+		"/_matrix/client/v3/users/:userId/report",
+		postReportUser(storage),
+		auth,
+	);
+
+	router.post(
 		"/_matrix/client/v3/user/:userId/openid/request_token",
 		postOpenIdToken(storage, serverName),
 		auth,
@@ -887,6 +944,18 @@ export const registerRoutes = (
 	);
 
 	router.post("/_matrix/client/v3/search", postSearch(storage), auth);
+
+	router.get(
+		"/_matrix/client/v1/room_summary/:roomIdOrAlias",
+		getRoomSummary(storage),
+		auth,
+	);
+
+	router.get(
+		"/_matrix/client/v3/rooms/:roomId/initialSync",
+		getRoomInitialSync(storage),
+		auth,
+	);
 
 	router.get(
 		"/_matrix/client/v3/rooms/:roomId/hierarchy",
@@ -1190,4 +1259,13 @@ export const registerRoutes = (
 			fedAuth,
 		);
 	}
+
+	// Policy server endpoint — we are not a policy server, return 404
+	router.post("/_matrix/policy/v1/sign", (_req) => ({
+		status: 404,
+		body: {
+			errcode: "M_NOT_FOUND",
+			error: "This server is not a policy server",
+		},
+	}));
 };

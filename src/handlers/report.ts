@@ -2,7 +2,7 @@ import { notFound } from "../errors.ts";
 import { requireJoinedRoom } from "../events.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { EventId, RoomId } from "../types/index.ts";
+import type { EventId, RoomId, UserId } from "../types/index.ts";
 
 export const postReportEvent =
 	(storage: Storage): Handler =>
@@ -38,6 +38,25 @@ export const postReportRoom =
 			"" as EventId,
 			undefined,
 			body.reason,
+		);
+
+		return { status: 200, body: {} };
+	};
+
+export const postReportUser =
+	(_storage: Storage): Handler =>
+	async (req) => {
+		const _targetUserId = req.params.userId as UserId;
+		const _reporterId = req.userId as string;
+
+		const body = (req.body ?? {}) as { reason?: string };
+		// Store report — use empty room ID and event ID since this is a user report
+		await _storage.storeReport(
+			_reporterId,
+			"" as RoomId,
+			"" as EventId,
+			undefined,
+			body.reason ? `User report for ${_targetUserId}: ${body.reason}` : `User report for ${_targetUserId}`,
 		);
 
 		return { status: 200, body: {} };
