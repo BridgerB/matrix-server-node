@@ -101,6 +101,7 @@ import {
 	putPushRuleEnabled,
 } from "./handlers/push-rules.ts";
 import { getPushers, postPushersSet } from "./handlers/pushers.ts";
+import { postReadMarkers } from "./handlers/read-markers.ts";
 import { postReceipt } from "./handlers/receipts.ts";
 import { postRefresh } from "./handlers/refresh.ts";
 import { postRegister } from "./handlers/register.ts";
@@ -414,6 +415,12 @@ export const registerRoutes = (
 	router.post(
 		"/_matrix/client/v3/rooms/:roomId/receipt/:receiptType/:eventId",
 		postReceipt(storage),
+		auth,
+	);
+
+	router.post(
+		"/_matrix/client/v3/rooms/:roomId/read_markers",
+		postReadMarkers(storage),
 		auth,
 	);
 

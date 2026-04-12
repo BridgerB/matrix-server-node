@@ -9,9 +9,11 @@ import {
 	requireJoinedRoom,
 	selectAuthEvents,
 } from "../events.ts";
+import { getIgnoredUsers } from "../ignored-users.ts";
 import { bundleAggregations, indexRelation } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
+import type { UserId } from "../types/index.ts";
 import type { JsonObject } from "../types/json.ts";
 
 export const putSendEvent =
@@ -115,7 +117,8 @@ export const getMessages =
 	(storage: Storage): Handler =>
 	async (req) => {
 		const roomId = req.params.roomId as string;
-		await requireJoinedRoom(storage, roomId, req.userId as string);
+		const userId = req.userId as UserId;
+		await requireJoinedRoom(storage, roomId, userId);
 
 		const dir = (req.query.get("dir") ?? "f") as "b" | "f";
 		if (dir !== "b" && dir !== "f") throw badJson("dir must be 'b' or 'f'");
@@ -126,10 +129,20 @@ export const getMessages =
 		const limit = Math.min(Math.max(parseInt(limitStr ?? "10", 10), 1), 100);
 
 		const result = await storage.getEventsByRoom(roomId, limit, from, dir);
-		const chunk = result.events.map((e) =>
+		let chunk = result.events.map((e) =>
 			pduToClientEvent(e.event, e.eventId),
 		);
-		await bundleAggregations(storage, chunk, req.userId as string);
+
+		const ignoredUsers = await getIgnoredUsers(storage, userId);
+		if (ignoredUsers.size > 0) {
+			chunk = chunk.filter(
+				(e) =>
+					e.state_key !== undefined ||
+					!ignoredUsers.has(e.sender as UserId),
+			);
+		}
+
+		await bundleAggregations(storage, chunk, userId);
 
 		return {
 			status: 200,
