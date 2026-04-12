@@ -823,7 +823,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 	}
 
 	async storeCrossSigningSignatures(
-		_userId: UserId,
+		userId: UserId,
 		signatures: Record<string, Record<string, JsonObject>>,
 	): Promise<
 		Record<string, Record<string, { errcode: string; error: string }>>
@@ -850,6 +850,31 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 						error: "Missing signatures field",
 					};
 					continue;
+				}
+
+				// Authorization: can only sign own devices or other users' master keys
+				if (targetUserId !== userId) {
+					const targetCrossKeys = this.crossSigningKeysMap.get(
+						targetUserId as UserId,
+					);
+					const isMasterKey =
+						targetCrossKeys?.master_key &&
+						Object.keys(targetCrossKeys.master_key.keys).some(
+							(k) => k === keyId || k.endsWith(`:${keyId}`),
+						);
+					if (!isMasterKey) {
+						failures[targetUserId] ??= {};
+						(
+							failures[targetUserId] as Record<
+								string,
+								{ errcode: string; error: string }
+							>
+						)[keyId] = {
+							errcode: "M_FORBIDDEN",
+							error: "Can only sign own devices or other users' master keys",
+						};
+						continue;
+					}
 				}
 
 				// Try updating device keys
@@ -1080,7 +1105,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		if (existing) {
 			// Merge: prefer verified, then lower first_message_index, then lower forwarded_count
 			if (
-				newData.is_verified && !existing.is_verified ||
+				(newData.is_verified && !existing.is_verified) ||
 				(newData.is_verified === existing.is_verified &&
 					newData.first_message_index < existing.first_message_index) ||
 				(newData.is_verified === existing.is_verified &&

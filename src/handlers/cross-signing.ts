@@ -1,3 +1,4 @@
+import { generateSessionId } from "../crypto.ts";
 import { badJson, forbidden } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
@@ -13,7 +14,12 @@ export const postDeviceSigningUpload =
 			master_key?: CrossSigningKey;
 			self_signing_key?: CrossSigningKey;
 			user_signing_key?: CrossSigningKey;
-			auth?: Record<string, unknown>;
+			auth?: {
+				type?: string;
+				session?: string;
+				password?: string;
+				identifier?: { type: string; user?: string };
+			};
 		};
 
 		const existing = await storage.getCrossSigningKeys(userId);
@@ -29,16 +35,39 @@ export const postDeviceSigningUpload =
 			const newKeyVal =
 				newKeyId !== undefined ? body.master_key.keys[newKeyId] : undefined;
 			if (existingKeyVal !== newKeyVal) {
-				// Key is changing — require UIAA
-				if (!body.auth) {
+				if (!body.auth || !body.auth.type) {
+					const sessionId = generateSessionId();
+					await storage.createUIAASession(sessionId);
 					return {
 						status: 401,
 						body: {
 							flows: [{ stages: ["m.login.password"] }],
 							params: {},
-							session: crypto.randomUUID(),
+							session: sessionId,
 						},
 					};
+				}
+
+				// Validate UIAA auth
+				if (body.auth.type === "m.login.password") {
+					const session = body.auth.session
+						? await storage.getUIAASession(body.auth.session)
+						: undefined;
+					if (!session) throw forbidden("Unknown session");
+
+					const account = await storage.getUserById(userId);
+					if (!account) throw forbidden("User not found");
+
+					if (body.auth.password !== account.password_hash)
+						throw forbidden("Invalid password");
+
+					await storage.addUIAACompleted(
+						body.auth.session!,
+						"m.login.password",
+					);
+					await storage.deleteUIAASession(body.auth.session!);
+				} else {
+					throw forbidden(`Unsupported auth type: ${body.auth.type}`);
 				}
 			}
 		}

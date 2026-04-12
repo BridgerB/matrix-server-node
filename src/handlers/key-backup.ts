@@ -1,24 +1,38 @@
-import { MatrixError, notFound } from "../errors.ts";
+import { MatrixError, badJson, missingParam, notFound } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { KeyBackupData } from "../types/e2ee.ts";
 import type { RoomId, UserId } from "../types/index.ts";
 import type { JsonObject } from "../types/json.ts";
 
+const validateKeyBackupData = (data: unknown): data is KeyBackupData => {
+	if (!data || typeof data !== "object") return false;
+	const d = data as Record<string, unknown>;
+	return (
+		typeof d.first_message_index === "number" &&
+		typeof d.forwarded_count === "number" &&
+		typeof d.is_verified === "boolean" &&
+		d.session_data !== null &&
+		typeof d.session_data === "object"
+	);
+};
+
 // POST /room_keys/version — create new backup version
 export const postKeyBackupVersion =
 	(storage: Storage): Handler =>
 	async (req) => {
 		const userId = req.userId as UserId;
-		const body = (req.body ?? {}) as {
-			algorithm: string;
-			auth_data: JsonObject;
-		};
+		const body = (req.body ?? {}) as Record<string, unknown>;
+
+		if (!body.algorithm || typeof body.algorithm !== "string")
+			throw missingParam("algorithm");
+		if (!body.auth_data || typeof body.auth_data !== "object")
+			throw missingParam("auth_data");
 
 		const version = await storage.createKeyBackupVersion(
 			userId,
 			body.algorithm,
-			body.auth_data,
+			body.auth_data as JsonObject,
 		);
 
 		return { status: 200, body: { version } };
@@ -120,6 +134,10 @@ export const putKeyBackupSession =
 		const roomId = req.params.roomId as RoomId;
 		const sessionId = req.params.sessionId as string;
 		const version = getVersionParam(req);
+		if (!validateKeyBackupData(req.body))
+			throw badJson(
+				"Invalid key backup data: requires first_message_index, forwarded_count, is_verified, session_data",
+			);
 		const body = req.body as KeyBackupData;
 
 		const result = await storage.putKeyBackupKeys(
