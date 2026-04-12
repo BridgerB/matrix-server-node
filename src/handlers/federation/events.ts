@@ -188,33 +188,25 @@ export const getFederationTimestampToEvent =
 		if (!isServerAllowedByAcl(req.origin as ServerName, room))
 			throw forbidden("Server is denied by ACL");
 
-		// Fetch all events in the room and find closest to the timestamp
-		const result = await storage.getEventsByRoom(roomId, 10000);
+		// Events are stored in forward chronological order
+		const result = await storage.getEventsByRoom(roomId, 10000, undefined, "f");
 		const events = result.events;
 
 		let closest: { event: PDU; eventId: EventId } | undefined;
 
-		for (const entry of events) {
-			const entryTs = entry.event.origin_server_ts;
-			if (dir === "f") {
-				// Forward: find earliest event at or after ts
-				if (entryTs >= ts) {
-					if (
-						!closest ||
-						entryTs < closest.event.origin_server_ts
-					) {
-						closest = entry;
-					}
+		if (dir === "f") {
+			for (const entry of events) {
+				if (entry.event.origin_server_ts >= ts) {
+					closest = entry;
+					break;
 				}
-			} else {
-				// Backward: find latest event at or before ts
-				if (entryTs <= ts) {
-					if (
-						!closest ||
-						entryTs > closest.event.origin_server_ts
-					) {
-						closest = entry;
-					}
+			}
+		} else {
+			for (const entry of events) {
+				if (entry.event.origin_server_ts <= ts) {
+					closest = entry;
+				} else {
+					break;
 				}
 			}
 		}

@@ -1,4 +1,6 @@
+import { randomBytes } from "node:crypto";
 import { generateSessionId } from "../crypto.ts";
+import { hashPassword } from "../crypto-utils.ts";
 import {
 	badJson,
 	forbidden,
@@ -27,6 +29,12 @@ const USERNAME_RE = /^[a-z0-9._=\-/]+$/;
 export const postRegister =
 	(storage: Storage, serverName: string): Handler =>
 	async (req) => {
+		const kind = req.query.get("kind") ?? "user";
+
+		if (kind === "guest") {
+			return registerGuest(storage, serverName, req);
+		}
+
 		const body = req.body as RegisterRequest;
 
 		if (!body.auth) {
@@ -86,11 +94,13 @@ export const postRegister =
 		const userId = `@${localpart}:${serverName}`;
 		const now = Date.now();
 
+		const passwordHash = await hashPassword(body.password);
+
 		await storage.createUser({
 			user_id: userId,
 			localpart,
 			server_name: serverName,
-			password_hash: body.password, // TODO: hash with argon2
+			password_hash: passwordHash,
 			account_type: "user",
 			is_deactivated: false,
 			created_at: now,
@@ -118,3 +128,44 @@ export const postRegister =
 
 		return { status: 200, body: response };
 	};
+
+async function registerGuest(
+	storage: Storage,
+	serverName: string,
+	req: import("../router.ts").RouterRequest,
+): Promise<import("../router.ts").RouterResponse> {
+	const guestId = randomBytes(12).toString("base64url");
+	const localpart = `_guest_${guestId}`;
+	const userId = `@${localpart}:${serverName}`;
+	const now = Date.now();
+
+	await storage.createUser({
+		user_id: userId,
+		localpart,
+		server_name: serverName,
+		password_hash: randomBytes(32).toString("base64url"),
+		account_type: "guest",
+		is_deactivated: false,
+		created_at: now,
+	});
+
+	const body = (req.body ?? {}) as {
+		device_id?: string;
+		initial_device_display_name?: string;
+	};
+
+	const { accessToken, deviceId } = await createSessionAndRespond(
+		storage,
+		req,
+		userId,
+		body,
+	);
+
+	const response: LoginResponse = {
+		user_id: userId,
+		access_token: accessToken,
+		device_id: deviceId,
+	};
+
+	return { status: 200, body: response };
+}

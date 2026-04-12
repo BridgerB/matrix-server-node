@@ -4,6 +4,7 @@ import {
 	getMembership,
 	getStateContent,
 	getUserPowerLevel,
+	requireJoinedRoom,
 } from "../events.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
@@ -259,4 +260,14 @@ export const postPublicRooms =
 			searchTerm,
 		);
 		return { status: 200, body: response };
+	};
+
+export const getRoomAliases =
+	(storage: Storage): Handler =>
+	async (req) => {
+		const roomId = req.params.roomId as RoomId;
+		await requireJoinedRoom(storage, roomId, req.userId as string);
+
+		const aliases = await storage.getAliasesForRoom(roomId);
+		return { status: 200, body: { aliases } };
 	};

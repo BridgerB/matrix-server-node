@@ -1,5 +1,11 @@
+import { createHash } from "node:crypto";
 import { computeEventId } from "../events.ts";
-import type { DeviceKeys, OneTimeKey } from "../types/e2ee.ts";
+import type {
+	CrossSigningKey,
+	DeviceKeys,
+	KeyBackupData,
+	OneTimeKey,
+} from "../types/e2ee.ts";
 import type {
 	PDU,
 	StrippedStateEvent,
@@ -64,6 +70,27 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 	private deviceKeysMap = new Map<string, DeviceKeys>();
 	private oneTimeKeysMap = new Map<string, Map<KeyId, string | OneTimeKey>>();
 	private fallbackKeysMap = new Map<string, Map<KeyId, string | OneTimeKey>>();
+	private crossSigningKeysMap = new Map<
+		UserId,
+		{
+			master_key?: CrossSigningKey;
+			self_signing_key?: CrossSigningKey;
+			user_signing_key?: CrossSigningKey;
+		}
+	>();
+	private keyBackupVersions = new Map<
+		UserId,
+		{
+			version: string;
+			algorithm: string;
+			auth_data: JsonObject;
+		}[]
+	>();
+	private keyBackupData = new Map<
+		string,
+		Map<RoomId, Map<string, KeyBackupData>>
+	>();
+	private keyBackupCounter = 0;
 	private toDeviceInbox = new Map<string, ToDeviceEvent[]>();
 	private pushersMap = new Map<UserId, Pusher[]>();
 	private relationsMap = new Map<
@@ -660,6 +687,32 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		return this.mediaStore.get(`${serverName}/${mediaId}`);
 	}
 
+	async reserveMedia(media: StoredMedia): Promise<void> {
+		this.mediaStore.set(`${media.origin}/${media.media_id}`, {
+			metadata: media,
+			data: Buffer.alloc(0),
+		});
+	}
+
+	async updateMediaContent(
+		serverName: ServerName,
+		mediaId: string,
+		contentType: string,
+		fileName: string | undefined,
+		data: Buffer,
+	): Promise<boolean> {
+		const key = `${serverName}/${mediaId}`;
+		const existing = this.mediaStore.get(key);
+		if (!existing) return false;
+		const hash = createHash("sha256").update(data).digest("base64");
+		existing.metadata.content_type = contentType;
+		existing.metadata.upload_name = fileName;
+		existing.metadata.file_size = data.length;
+		existing.metadata.content_hash = hash;
+		existing.data = data;
+		return true;
+	}
+
 	async createFilter(userId: UserId, filter: JsonObject): Promise<string> {
 		let userFilters = this.filters.get(userId);
 		if (!userFilters) {
@@ -785,6 +838,404 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 				[...fallbacks.keys()].map((keyId) => keyId.split(":")[0] as string),
 			),
 		];
+	}
+
+	// Cross-signing keys
+	async setCrossSigningKeys(
+		userId: UserId,
+		keys: {
+			master_key?: CrossSigningKey;
+			self_signing_key?: CrossSigningKey;
+			user_signing_key?: CrossSigningKey;
+		},
+	): Promise<void> {
+		const existing = this.crossSigningKeysMap.get(userId) ?? {};
+		if (keys.master_key) existing.master_key = keys.master_key;
+		if (keys.self_signing_key) existing.self_signing_key = keys.self_signing_key;
+		if (keys.user_signing_key)
+			existing.user_signing_key = keys.user_signing_key;
+		this.crossSigningKeysMap.set(userId, existing);
+	}
+
+	async getCrossSigningKeys(userId: UserId): Promise<{
+		master_key?: CrossSigningKey;
+		self_signing_key?: CrossSigningKey;
+		user_signing_key?: CrossSigningKey;
+	}> {
+		return this.crossSigningKeysMap.get(userId) ?? {};
+	}
+
+	async storeCrossSigningSignatures(
+		userId: UserId,
+		signatures: Record<string, Record<string, JsonObject>>,
+	): Promise<
+		Record<string, Record<string, { errcode: string; error: string }>>
+	> {
+		// Store signatures onto device keys or cross-signing keys
+		const failures: Record<
+			string,
+			Record<string, { errcode: string; error: string }>
+		> = {};
+		for (const [targetUserId, keyMap] of Object.entries(signatures)) {
+			for (const [keyId, signedObject] of Object.entries(keyMap)) {
+				const signedSigs = (
+					signedObject as Record<string, unknown>
+				).signatures as Record<string, Record<string, string>> | undefined;
+				if (!signedSigs) {
+					failures[targetUserId] ??= {};
+					(
+						failures[targetUserId] as Record<
+							string,
+							{ errcode: string; error: string }
+						>
+					)[keyId] = {
+						errcode: "M_INVALID_SIGNATURE",
+						error: "Missing signatures field",
+					};
+					continue;
+				}
+
+				// Authorization: can only sign own devices or other users' master keys
+				if (targetUserId !== userId) {
+					const targetCrossKeys = this.crossSigningKeysMap.get(
+						targetUserId as UserId,
+					);
+					const isMasterKey =
+						targetCrossKeys?.master_key &&
+						Object.keys(targetCrossKeys.master_key.keys).some(
+							(k) => k === keyId || k.endsWith(`:${keyId}`),
+						);
+					if (!isMasterKey) {
+						failures[targetUserId] ??= {};
+						(
+							failures[targetUserId] as Record<
+								string,
+								{ errcode: string; error: string }
+							>
+						)[keyId] = {
+							errcode: "M_FORBIDDEN",
+							error: "Can only sign own devices or other users' master keys",
+						};
+						continue;
+					}
+				}
+
+				// Try updating device keys
+				const deviceKeys = await this.getDeviceKeys(
+					targetUserId as UserId,
+					keyId as DeviceId,
+				);
+				if (deviceKeys) {
+					if (!deviceKeys.signatures) deviceKeys.signatures = {};
+					for (const [signer, sigs] of Object.entries(signedSigs)) {
+						deviceKeys.signatures[signer] ??= {};
+						Object.assign(
+							deviceKeys.signatures[signer] as Record<string, string>,
+							sigs,
+						);
+					}
+					continue;
+				}
+
+				// Try updating cross-signing keys
+				const crossKeys = this.crossSigningKeysMap.get(
+					targetUserId as UserId,
+				);
+				if (crossKeys) {
+					let matched = false;
+					for (const key of [
+						crossKeys.master_key,
+						crossKeys.self_signing_key,
+						crossKeys.user_signing_key,
+					]) {
+						if (!key) continue;
+						if (Object.keys(key.keys).some((k) => k === keyId || k.endsWith(`:${keyId}`))) {
+							if (!key.signatures) key.signatures = {};
+							for (const [signer, sigs] of Object.entries(signedSigs)) {
+								key.signatures[signer] ??= {};
+								Object.assign(
+									key.signatures[signer] as Record<string, string>,
+									sigs,
+								);
+							}
+							matched = true;
+							break;
+						}
+					}
+					if (matched) continue;
+				}
+
+				failures[targetUserId] ??= {};
+				(
+					failures[targetUserId] as Record<
+						string,
+						{ errcode: string; error: string }
+					>
+				)[keyId] = {
+					errcode: "M_NOT_FOUND",
+					error: "Key not found",
+				};
+			}
+		}
+		return failures;
+	}
+
+	// Key backup
+	async createKeyBackupVersion(
+		userId: UserId,
+		algorithm: string,
+		authData: JsonObject,
+	): Promise<string> {
+		let versions = this.keyBackupVersions.get(userId);
+		if (!versions) {
+			versions = [];
+			this.keyBackupVersions.set(userId, versions);
+		}
+		this.keyBackupCounter++;
+		const version = String(this.keyBackupCounter);
+		versions.push({ version, algorithm, auth_data: authData });
+		return version;
+	}
+
+	async getKeyBackupVersion(
+		userId: UserId,
+		version?: string,
+	): Promise<
+		| {
+				version: string;
+				algorithm: string;
+				auth_data: JsonObject;
+				count: number;
+				etag: string;
+		  }
+		| undefined
+	> {
+		const versions = this.keyBackupVersions.get(userId);
+		if (!versions || versions.length === 0) return undefined;
+
+		const v = version
+			? versions.find((b) => b.version === version)
+			: versions[versions.length - 1];
+		if (!v) return undefined;
+
+		const backupKey = `${userId}\0${v.version}`;
+		const rooms = this.keyBackupData.get(backupKey);
+		let count = 0;
+		if (rooms) {
+			for (const sessions of rooms.values()) {
+				count += sessions.size;
+			}
+		}
+
+		return {
+			version: v.version,
+			algorithm: v.algorithm,
+			auth_data: v.auth_data,
+			count,
+			etag: this.computeBackupEtag(backupKey),
+		};
+	}
+
+	private computeBackupEtag(backupKey: string): string {
+		const rooms = this.keyBackupData.get(backupKey);
+		if (!rooms) return "0";
+		let hash = 0;
+		for (const [roomId, sessions] of rooms) {
+			for (const sessionId of sessions.keys()) {
+				for (const c of `${roomId}${sessionId}`) {
+					hash = ((hash << 5) - hash + c.charCodeAt(0)) | 0;
+				}
+			}
+		}
+		return String(Math.abs(hash));
+	}
+
+	async updateKeyBackupVersion(
+		userId: UserId,
+		version: string,
+		authData: JsonObject,
+	): Promise<boolean> {
+		const versions = this.keyBackupVersions.get(userId);
+		if (!versions) return false;
+		const v = versions.find((b) => b.version === version);
+		if (!v) return false;
+		v.auth_data = authData;
+		return true;
+	}
+
+	async deleteKeyBackupVersion(
+		userId: UserId,
+		version: string,
+	): Promise<boolean> {
+		const versions = this.keyBackupVersions.get(userId);
+		if (!versions) return false;
+		const idx = versions.findIndex((b) => b.version === version);
+		if (idx === -1) return false;
+		versions.splice(idx, 1);
+		this.keyBackupData.delete(`${userId}\0${version}`);
+		return true;
+	}
+
+	async putKeyBackupKeys(
+		userId: UserId,
+		version: string,
+		roomId: RoomId | undefined,
+		sessionId: string | undefined,
+		keys:
+			| KeyBackupData
+			| { sessions: Record<string, KeyBackupData> }
+			| {
+					rooms: Record<
+						RoomId,
+						{ sessions: Record<string, KeyBackupData> }
+					>;
+			  },
+	): Promise<{ count: number; etag: string } | undefined> {
+		const versions = this.keyBackupVersions.get(userId);
+		if (!versions || versions.length === 0) return undefined;
+		const current = versions[versions.length - 1]!;
+		if (current.version !== version) return undefined;
+
+		const backupKey = `${userId}\0${version}`;
+		let rooms = this.keyBackupData.get(backupKey);
+		if (!rooms) {
+			rooms = new Map();
+			this.keyBackupData.set(backupKey, rooms);
+		}
+
+		if (roomId && sessionId) {
+			// Single session
+			const data = keys as KeyBackupData;
+			this.mergeBackupKey(rooms, roomId, sessionId, data);
+		} else if (roomId) {
+			// Room sessions
+			const roomKeys = keys as { sessions: Record<string, KeyBackupData> };
+			for (const [sid, data] of Object.entries(roomKeys.sessions)) {
+				this.mergeBackupKey(rooms, roomId, sid, data);
+			}
+		} else {
+			// All rooms
+			const allKeys = keys as {
+				rooms: Record<
+					RoomId,
+					{ sessions: Record<string, KeyBackupData> }
+				>;
+			};
+			for (const [rid, roomData] of Object.entries(allKeys.rooms)) {
+				for (const [sid, data] of Object.entries(roomData.sessions)) {
+					this.mergeBackupKey(rooms, rid as RoomId, sid, data);
+				}
+			}
+		}
+
+		let count = 0;
+		for (const sessions of rooms.values()) count += sessions.size;
+		return { count, etag: this.computeBackupEtag(backupKey) };
+	}
+
+	private mergeBackupKey(
+		rooms: Map<RoomId, Map<string, KeyBackupData>>,
+		roomId: RoomId,
+		sessionId: string,
+		newData: KeyBackupData,
+	): void {
+		let sessions = rooms.get(roomId);
+		if (!sessions) {
+			sessions = new Map();
+			rooms.set(roomId, sessions);
+		}
+		const existing = sessions.get(sessionId);
+		if (existing) {
+			// Merge: prefer verified, then lower first_message_index, then lower forwarded_count
+			if (
+				(newData.is_verified && !existing.is_verified) ||
+				(newData.is_verified === existing.is_verified &&
+					newData.first_message_index < existing.first_message_index) ||
+				(newData.is_verified === existing.is_verified &&
+					newData.first_message_index === existing.first_message_index &&
+					newData.forwarded_count < existing.forwarded_count)
+			) {
+				sessions.set(sessionId, newData);
+			}
+		} else {
+			sessions.set(sessionId, newData);
+		}
+	}
+
+	async getKeyBackupKeys(
+		userId: UserId,
+		version: string,
+		roomId?: RoomId,
+		sessionId?: string,
+	): Promise<
+		| KeyBackupData
+		| { sessions: Record<string, KeyBackupData> }
+		| {
+				rooms: Record<
+					RoomId,
+					{ sessions: Record<string, KeyBackupData> }
+				>;
+		  }
+		| undefined
+	> {
+		const backupKey = `${userId}\0${version}`;
+		const rooms = this.keyBackupData.get(backupKey);
+
+		if (roomId && sessionId) {
+			const sessions = rooms?.get(roomId);
+			return sessions?.get(sessionId);
+		} else if (roomId) {
+			const sessions = rooms?.get(roomId);
+			const result: Record<string, KeyBackupData> = {};
+			if (sessions) {
+				for (const [sid, data] of sessions) result[sid] = data;
+			}
+			return { sessions: result };
+		} else {
+			const result: Record<
+				RoomId,
+				{ sessions: Record<string, KeyBackupData> }
+			> = {};
+			if (rooms) {
+				for (const [rid, sessions] of rooms) {
+					const sessionsObj: Record<string, KeyBackupData> = {};
+					for (const [sid, data] of sessions) sessionsObj[sid] = data;
+					result[rid] = { sessions: sessionsObj };
+				}
+			}
+			return { rooms: result };
+		}
+	}
+
+	async deleteKeyBackupKeys(
+		userId: UserId,
+		version: string,
+		roomId?: RoomId,
+		sessionId?: string,
+	): Promise<{ count: number; etag: string } | undefined> {
+		const versions = this.keyBackupVersions.get(userId);
+		if (!versions || !versions.some((v) => v.version === version))
+			return undefined;
+
+		const backupKey = `${userId}\0${version}`;
+		const rooms = this.keyBackupData.get(backupKey);
+		if (!rooms) return { count: 0, etag: "0" };
+
+		if (roomId && sessionId) {
+			const sessions = rooms.get(roomId);
+			if (sessions) {
+				sessions.delete(sessionId);
+				if (sessions.size === 0) rooms.delete(roomId);
+			}
+		} else if (roomId) {
+			rooms.delete(roomId);
+		} else {
+			rooms.clear();
+		}
+
+		let count = 0;
+		for (const sessions of rooms.values()) count += sessions.size;
+		return { count, etag: this.computeBackupEtag(backupKey) };
 	}
 
 	async sendToDevice(
