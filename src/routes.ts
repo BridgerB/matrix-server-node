@@ -454,6 +454,24 @@ export const registerRoutes = (
 	);
 	router.get("/_matrix/media/v3/config", getConfig(), auth);
 
+	// Authenticated media endpoints (spec v1.11+)
+	router.get(
+		"/_matrix/client/v1/media/download/:serverName/:mediaId/:fileName",
+		getDownload(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v1/media/download/:serverName/:mediaId",
+		getDownload(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v1/media/thumbnail/:serverName/:mediaId",
+		getThumbnail(storage),
+		auth,
+	);
+	router.get("/_matrix/client/v1/media/config", getConfig(), auth);
+
 	router.get(
 		"/_matrix/client/v3/pushrules/global/:kind/:ruleId/enabled",
 		getPushRuleEnabled(storage),
