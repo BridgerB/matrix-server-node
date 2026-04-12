@@ -22,3 +22,23 @@ export const postReportEvent =
 
 		return { status: 200, body: {} };
 	};
+
+export const postReportRoom =
+	(storage: Storage): Handler =>
+	async (req) => {
+		const roomId = req.params.roomId as RoomId;
+		const userId = req.userId as string;
+
+		await requireJoinedRoom(storage, roomId, userId);
+
+		const body = (req.body ?? {}) as { reason?: string };
+		await storage.storeReport(
+			userId,
+			roomId,
+			"" as EventId,
+			undefined,
+			body.reason,
+		);
+
+		return { status: 200, body: {} };
+	};

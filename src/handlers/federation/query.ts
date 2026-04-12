@@ -117,6 +117,11 @@ export const getFederationVersion = (): Handler => () => ({
 	},
 });
 
+export const getQueryGeneric = (): Handler => (_req) => ({
+	status: 200,
+	body: {},
+});
+
 export const getFederationOpenIdUserinfo =
 	(storage: Storage): Handler =>
 	async (req) => {

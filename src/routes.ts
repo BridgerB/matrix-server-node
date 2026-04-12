@@ -63,11 +63,14 @@ import {
 	postFederationBackfill,
 	postFederationMissingEvents,
 } from "./handlers/federation/events.ts";
+import { getKeyQuery, postKeyQuery } from "./handlers/federation/key-notary.ts";
 import { getServerKeys } from "./handlers/federation/keys.ts";
 import {
 	getMakeJoin,
 	getMakeKnock,
 	getMakeLeave,
+	postExchangeThirdPartyInvite,
+	postThreePidOnBind,
 	putFederationInvite,
 	putSendJoin,
 	putSendKnock,
@@ -78,6 +81,7 @@ import {
 	getFederationPublicRooms,
 	getFederationVersion,
 	getQueryDirectory,
+	getQueryGeneric,
 	getQueryProfile,
 	postFederationPublicRooms,
 } from "./handlers/federation/query.ts";
@@ -182,6 +186,14 @@ import { postSearch } from "./handlers/search.ts";
 import { getSpaceHierarchy } from "./handlers/spaces.ts";
 import { getSync } from "./handlers/sync.ts";
 import { getThreads } from "./handlers/threads.ts";
+import {
+	getProtocol,
+	getProtocols,
+	getThirdpartyLocation,
+	getThirdpartyLocationByProtocol,
+	getThirdpartyUser,
+	getThirdpartyUserByProtocol,
+} from "./handlers/thirdparty.ts";
 import {
 	getThreePids,
 	postAddThreePid,
@@ -885,8 +897,33 @@ export const registerRoutes = (
 	);
 
 	router.get(
+		"/_matrix/client/v3/thirdparty/protocol/:protocol",
+		getProtocol(),
+		auth,
+	);
+	router.get(
 		"/_matrix/client/v3/thirdparty/protocols",
-		async () => ({ status: 200, body: {} }),
+		getProtocols(),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v3/thirdparty/location/:protocol",
+		getThirdpartyLocationByProtocol(),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v3/thirdparty/location",
+		getThirdpartyLocation(),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v3/thirdparty/user/:protocol",
+		getThirdpartyUserByProtocol(),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/v3/thirdparty/user",
+		getThirdpartyUser(),
 		auth,
 	);
 
@@ -920,6 +957,17 @@ export const registerRoutes = (
 			getServerKeys(serverName, signingKey),
 		);
 
+		router.post(
+			"/_matrix/key/v2/query",
+			postKeyQuery(storage),
+			fedAuth,
+		);
+		router.get(
+			"/_matrix/key/v2/query/:serverName",
+			getKeyQuery(storage),
+			fedAuth,
+		);
+
 		router.get(
 			"/_matrix/federation/v1/version",
 			getFederationVersion(),
@@ -933,6 +981,11 @@ export const registerRoutes = (
 		router.get(
 			"/_matrix/federation/v1/query/directory",
 			getQueryDirectory(storage),
+			fedAuth,
+		);
+		router.get(
+			"/_matrix/federation/v1/query/:queryType",
+			getQueryGeneric(),
 			fedAuth,
 		);
 		router.get(
@@ -1061,6 +1114,22 @@ export const registerRoutes = (
 		router.get(
 			"/_matrix/federation/v1/media/thumbnail/:mediaId",
 			getFederationMediaThumbnail(storage, serverName),
+			fedAuth,
+		);
+
+		router.put(
+			"/_matrix/federation/v1/invite/:roomId/:eventId",
+			putFederationInvite(storage, serverName, signingKey, federationClient),
+			fedAuth,
+		);
+		router.post(
+			"/_matrix/federation/v1/exchange_third_party_invite/:roomId",
+			postExchangeThirdPartyInvite(),
+			fedAuth,
+		);
+		router.post(
+			"/_matrix/federation/v1/3pid/onbind",
+			postThreePidOnBind(),
 			fedAuth,
 		);
 	}

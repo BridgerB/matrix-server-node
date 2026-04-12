@@ -275,6 +275,16 @@ export const getMakeKnock =
 			},
 		};
 	};
+export const postExchangeThirdPartyInvite = (): Handler => (_req) => ({
+	status: 200,
+	body: {},
+});
+
+export const postThreePidOnBind = (): Handler => (_req) => ({
+	status: 200,
+	body: {},
+});
+
 export const putSendKnock =
 	(
 		storage: Storage,
