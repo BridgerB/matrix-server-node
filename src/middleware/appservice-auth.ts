@@ -3,7 +3,7 @@ import { extractAccessToken } from "./auth.ts";
 import { findAppserviceByToken } from "../appservice/registration.ts";
 import type { AppserviceRegistration } from "../types/appservice.ts";
 import type { Middleware } from "../router.ts";
-import type { UserId } from "../types/identifiers.ts";
+import type { DeviceId, UserId } from "../types/identifiers.ts";
 
 /**
  * Middleware that authenticates requests from application services.
@@ -47,6 +47,12 @@ export const requireAppserviceAuth =
 		}
 
 		req.accessToken = token;
+
+		// v1.17: Application service device masquerading via device_id query param
+		const masqueradeDeviceId = req.query.get("device_id");
+		if (masqueradeDeviceId) {
+			req.deviceId = masqueradeDeviceId as DeviceId;
+		}
 
 		return next(req);
 	};

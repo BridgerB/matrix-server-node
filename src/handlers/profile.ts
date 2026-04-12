@@ -57,13 +57,27 @@ const propagateProfileToRooms = async (
 	}
 };
 
+/** Collect all extended profile fields for a user */
+const getExtendedFields = (userId: UserId): Record<string, unknown> => {
+	const prefix = `${userId}\0`;
+	const fields: Record<string, unknown> = {};
+	for (const [key, value] of extendedProfileFields) {
+		if (key.startsWith(prefix)) {
+			const fieldName = key.slice(prefix.length);
+			fields[fieldName] = value;
+		}
+	}
+	return fields;
+};
+
 export const getProfile =
 	(storage: Storage): Handler =>
 	async (req) => {
 		const userId = req.params.userId as UserId;
 		const profile = await storage.getProfile(userId);
 		if (!profile) throw notFound("User not found");
-		return { status: 200, body: profile };
+		const extended = getExtendedFields(userId);
+		return { status: 200, body: { ...profile, ...extended } };
 	};
 
 export const getDisplayName =
