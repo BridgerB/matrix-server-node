@@ -35,7 +35,7 @@ export class FederationClient {
 				"Content-Type": "application/json",
 				...(bodyStr ? { "Content-Length": Buffer.byteLength(bodyStr) } : {}),
 			},
-			timeout: 30000,
+			timeout: 10000,
 			rejectUnauthorized: false, // Federation often uses self-signed certs in dev
 		};
 

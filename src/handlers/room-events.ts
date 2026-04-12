@@ -1,6 +1,8 @@
+import { MatrixError } from "../errors.ts";
 import { badJson, forbidden, missingParam, notFound } from "../errors.ts";
 import {
 	buildEvent,
+	canonicalJson,
 	checkEventAuth,
 	getPowerLevels,
 	getUserPowerLevel,
@@ -43,7 +45,19 @@ export const putSendEvent =
 			serverName,
 		});
 
+		const eventSize = Buffer.byteLength(canonicalJson(event), "utf-8");
+		if (eventSize > 65536) {
+			throw new MatrixError("M_TOO_LARGE", "Event is too large", 413);
+		}
+
 		checkEventAuth(event, eventId, room);
+
+		// Store transaction_id in unsigned for the sender
+		event.unsigned = {
+			...event.unsigned,
+			transaction_id: txnId,
+		};
+
 		await storage.storeEvent(event, eventId);
 		await indexRelation(storage, event, eventId);
 
@@ -61,21 +75,37 @@ export const putStateEvent =
 		const eventType = req.params.eventType as string;
 		const stateKey = req.params.stateKey ?? "";
 		const userId = req.userId as string;
+		const newContent = (req.body ?? {}) as JsonObject;
 
 		const room = await requireJoinedRoom(storage, roomId, userId);
+
+		// Check if existing state has the same content — if so, return existing event ID (idempotent)
+		const existing = await storage.getStateEvent(roomId, eventType, stateKey);
+		if (existing) {
+			const existingJson = canonicalJson(existing.event.content);
+			const newJson = canonicalJson(newContent);
+			if (existingJson === newJson) {
+				return { status: 200, body: { event_id: existing.eventId } };
+			}
+		}
 
 		const authEvents = selectAuthEvents(eventType, stateKey, room, userId);
 		const { event, eventId } = buildEvent({
 			roomId,
 			sender: userId,
 			type: eventType,
-			content: (req.body ?? {}) as JsonObject,
+			content: newContent,
 			stateKey,
 			depth: room.depth,
 			prevEvents: [...room.forward_extremities],
 			authEvents,
 			serverName,
 		});
+
+		const stateEventSize = Buffer.byteLength(canonicalJson(event), "utf-8");
+		if (stateEventSize > 65536) {
+			throw new MatrixError("M_TOO_LARGE", "Event is too large", 413);
+		}
 
 		checkEventAuth(event, eventId, room);
 		await storage.setStateEvent(roomId, event, eventId);
@@ -110,6 +140,14 @@ export const getStateEvent =
 
 		const entry = await storage.getStateEvent(roomId, eventType, stateKey);
 		if (!entry) throw notFound("State event not found");
+
+		const format = req.query.get("format");
+		if (format === "event") {
+			return {
+				status: 200,
+				body: pduToClientEvent(entry.event, entry.eventId),
+			};
+		}
 
 		return { status: 200, body: entry.event.content };
 	};
@@ -196,6 +234,16 @@ export const getEvent =
 			throw notFound("Event not found");
 
 		const clientEvent = pduToClientEvent(entry.event, entry.eventId);
+		// Strip transaction_id from unsigned if requester is not the sender
+		if (
+			clientEvent.unsigned &&
+			"transaction_id" in clientEvent.unsigned &&
+			clientEvent.sender !== req.userId
+		) {
+			const { transaction_id: _txnId, ...rest } =
+				clientEvent.unsigned as Record<string, unknown>;
+			clientEvent.unsigned = rest;
+		}
 		await bundleAggregations(storage, [clientEvent], req.userId ?? "");
 		return { status: 200, body: clientEvent };
 	};

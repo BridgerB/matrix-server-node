@@ -20,7 +20,7 @@ export const postChangePassword =
 	async (req) => {
 		const body = req.body as Record<string, unknown>;
 
-		const uiaaResponse = await withUIAA(storage, body);
+		const uiaaResponse = await withUIAA(storage, body, req.userId as string);
 		if (uiaaResponse) return uiaaResponse;
 
 		const newPassword = body.new_password as string | undefined;
@@ -52,7 +52,7 @@ export const postDeactivate =
 	async (req) => {
 		const body = req.body as Record<string, unknown>;
 
-		const uiaaResponse = await withUIAA(storage, body);
+		const uiaaResponse = await withUIAA(storage, body, req.userId as string);
 		if (uiaaResponse) return uiaaResponse;
 
 		await storage.deactivateUser(req.userId as string);

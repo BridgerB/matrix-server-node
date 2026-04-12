@@ -167,8 +167,18 @@ export class Router {
 					});
 					return;
 				}
+				// Validate UTF-8: round-trip through TextDecoder and re-encode
+				const text = raw.toString("utf-8");
+				const reEncoded = Buffer.from(text, "utf-8");
+				if (reEncoded.length !== raw.length || !raw.equals(reEncoded)) {
+					respondJson(res, 400, {
+						errcode: "M_NOT_JSON",
+						error: "Invalid UTF-8 in request body",
+					});
+					return;
+				}
 				try {
-					body = JSON.parse(raw.toString("utf-8"));
+					body = JSON.parse(text);
 				} catch {
 					respondJson(res, 400, {
 						errcode: "M_BAD_JSON",

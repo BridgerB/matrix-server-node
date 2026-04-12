@@ -353,8 +353,14 @@ const checkMembershipAuth = (event: PDU, roomState: RoomState): void => {
 			if (senderMembership !== "join") {
 				throw forbidden("Sender is not in the room");
 			}
+			if (targetMembership === "join") {
+				throw forbidden("Cannot invite user who is already in the room");
+			}
 			if (targetMembership === "ban") {
 				throw forbidden("Cannot invite banned user");
+			}
+			if (event.sender === targetUserId) {
+				throw forbidden("Cannot invite yourself");
 			}
 			const invitePl = pl.invite ?? 0;
 			if (senderPl < invitePl) {
