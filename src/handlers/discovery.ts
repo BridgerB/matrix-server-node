@@ -1,5 +1,6 @@
 import type { Handler } from "../router.ts";
 import type { VersionsResponse, WellKnown } from "../types/index.ts";
+import { getSsoConfig } from "./sso.ts";
 
 export const versionsHandler = (_serverName: string): Handler => {
 	const body: VersionsResponse = {
@@ -18,8 +19,15 @@ export const versionsHandler = (_serverName: string): Handler => {
 			"v1.12",
 			"v1.13",
 			"v1.14",
+			"v1.15",
+			"v1.16",
+			"v1.17",
+			"v1.18",
 		],
-		unstable_features: {},
+		unstable_features: {
+			"org.matrix.msc3765.rich_topic": true,
+			"org.matrix.msc3916.stable": true,
+		},
 	};
 	return async () => ({ status: 200, body });
 };
@@ -48,13 +56,37 @@ export const wellKnownPolicyServerHandler = (): Handler => {
 };
 
 export const getAuthMetadata = (): Handler => {
-	return async () => ({
-		status: 404,
-		body: {
-			errcode: "M_UNRECOGNIZED",
-			error: "SSO/OIDC is not configured on this server",
-		},
-	});
+	return async () => {
+		const ssoConfig = getSsoConfig();
+		if (!ssoConfig) {
+			return {
+				status: 404,
+				body: {
+					errcode: "M_UNRECOGNIZED",
+					error: "SSO/OIDC is not configured on this server",
+				},
+			};
+		}
+
+		const issuer = ssoConfig.issuer.replace(/\/$/, "");
+		return {
+			status: 200,
+			body: {
+				issuer,
+				authorization_endpoint: `${issuer}/authorize`,
+				token_endpoint: `${issuer}/token`,
+				registration_endpoint: `${issuer}/register`,
+				account_management_uri: `${issuer}/account`,
+				account_management_actions_supported: [
+					"org.matrix.profile",
+					"org.matrix.sessions_list",
+					"org.matrix.session_view",
+					"org.matrix.session_end",
+					"org.matrix.cross_signing_reset",
+				],
+			},
+		};
+	};
 };
 
 export const getCapabilities = (): Handler => {
@@ -75,7 +107,11 @@ export const getCapabilities = (): Handler => {
 					"9": "stable",
 					"10": "stable",
 					"11": "stable",
+					"12": "stable",
 				},
+			},
+			"m.profile_fields": {
+				enabled: true,
 			},
 		},
 	};

@@ -8,6 +8,13 @@ import type { EventId, RoomId, ServerName, UserId } from "./types/index.ts";
 import type { RoomState } from "./types/internal.ts";
 import type { JsonObject } from "./types/json.ts";
 import type { RoomPowerLevelsContent } from "./types/state-events.ts";
+
+/** Check whether a room version is v12 or later */
+export const isRoomVersion12Plus = (roomVersion: string | undefined): boolean => {
+	if (!roomVersion) return false;
+	const num = parseInt(roomVersion, 10);
+	return !isNaN(num) && num >= 12;
+};
 export const canonicalJson = (val: unknown): string => {
 	if (val === null || val === undefined) return "null";
 	if (typeof val === "boolean") return val ? "true" : "false";
@@ -47,6 +54,7 @@ const ALLOWED_CONTENT_KEYS: Record<string, Set<string>> = {
 		"type",
 		"federate",
 		"predecessor",
+		"additional_creators",
 	]),
 	"m.room.member": new Set([
 		"membership",
@@ -113,6 +121,15 @@ export const computeEventId = (event: PDU): EventId => {
 		.digest("base64url");
 	return `$${hash}`;
 };
+/**
+ * Compute a room ID for room version 12+ from the create event.
+ * The room ID is the event ID of the create event with `!` sigil instead of `$`.
+ */
+export const computeRoomIdV12 = (createEvent: PDU): RoomId => {
+	const eventId = computeEventId(createEvent);
+	return `!${eventId.slice(1)}` as RoomId;
+};
+
 export const buildEvent = (params: {
 	roomId: RoomId;
 	sender: UserId;
@@ -179,8 +196,11 @@ export const selectAuthEvents = (
 ): EventId[] => {
 	const authEvents: EventId[] = [];
 
-	const createId = getStateEventId(roomState, "m.room.create", "");
-	if (createId) authEvents.push(createId);
+	// In v12+, m.room.create is NOT included in auth_events
+	if (!isRoomVersion12Plus(roomState.room_version)) {
+		const createId = getStateEventId(roomState, "m.room.create", "");
+		if (createId) authEvents.push(createId);
+	}
 
 	const plId = getStateEventId(roomState, "m.room.power_levels", "");
 	if (plId) authEvents.push(plId);
@@ -213,10 +233,28 @@ export const getPowerLevels = (
 		: { users_default: 0, events_default: 0, state_default: 50 };
 };
 
+/** Check if a user is a room creator (sender of create event or in additional_creators) */
+export const isRoomCreator = (
+	userId: UserId,
+	roomState: RoomState,
+): boolean => {
+	const createEvent = roomState.state_events.get("m.room.create\0");
+	if (!createEvent) return false;
+	if (createEvent.sender === userId) return true;
+	const additionalCreators = (createEvent.content as Record<string, unknown>)
+		.additional_creators as string[] | undefined;
+	return additionalCreators?.includes(userId) ?? false;
+};
+
 export const getUserPowerLevel = (
 	userId: UserId,
 	roomState: RoomState,
 ): number => {
+	// In room version 12+, room creators have infinite power level
+	if (isRoomVersion12Plus(roomState.room_version) && isRoomCreator(userId, roomState)) {
+		return Number.MAX_SAFE_INTEGER;
+	}
+
 	const plEvent = roomState.state_events.get("m.room.power_levels\0");
 	if (!plEvent) {
 		// Before power_levels is set, the room creator has implicit PL 100
@@ -236,6 +274,13 @@ const getEventPowerLevel = (
 	const pl = getPowerLevels(roomState);
 	if (pl.events?.[eventType] !== undefined)
 		return pl.events[eventType] as number;
+	// In room version 12+, the default power level for m.room.tombstone is 150
+	if (
+		eventType === "m.room.tombstone" &&
+		isRoomVersion12Plus(roomState.room_version)
+	) {
+		return 150;
+	}
 	return isState ? (pl.state_default ?? 50) : (pl.events_default ?? 0);
 };
 export const getMembership = (
@@ -458,11 +503,46 @@ export const checkEventAuth = (
 	_eventId: EventId,
 	roomState: RoomState,
 ): void => {
+	const isV12Plus = isRoomVersion12Plus(roomState.room_version);
+
 	if (event.type === "m.room.create") {
 		if (roomState.state_events.size > 0) {
 			throw forbidden("m.room.create can only be the first event");
 		}
+		// In v12, the create event must NOT have a room_id in the event body
+		// (it's derived from the hash). However, we still store room_id on the PDU
+		// for internal use — this check validates that auth_events is empty for create.
+		if (isV12Plus && event.auth_events.length > 0) {
+			throw forbidden(
+				"m.room.create must not have auth_events in room version 12+",
+			);
+		}
+		// Validate additional_creators are valid user IDs
+		if (isV12Plus) {
+			const additionalCreators = (event.content as Record<string, unknown>)
+				.additional_creators as string[] | undefined;
+			if (additionalCreators) {
+				for (const uid of additionalCreators) {
+					if (typeof uid !== "string" || !uid.startsWith("@") || !uid.includes(":")) {
+						throw forbidden(`Invalid user ID in additional_creators: ${uid}`);
+					}
+				}
+			}
+		}
 		return;
+	}
+
+	// In v12, m.room.create must NOT be in auth_events
+	if (isV12Plus) {
+		const createEvent = roomState.state_events.get("m.room.create\0");
+		if (createEvent) {
+			const createEventId = computeEventId(createEvent);
+			if (event.auth_events.includes(createEventId)) {
+				throw forbidden(
+					"m.room.create must not be referenced in auth_events in room version 12+",
+				);
+			}
+		}
 	}
 
 	if (event.type === "m.room.member") {
@@ -481,6 +561,35 @@ export const checkEventAuth = (
 		const versionNum = parseInt(roomVersion, 10);
 		if (!isNaN(versionNum) && versionNum >= 10) {
 			validateIntegerPowerLevels(event);
+		}
+		// In v12, room creators must not appear in the users field
+		if (isV12Plus) {
+			const users = (event.content as Record<string, unknown>).users as
+				| Record<string, number>
+				| undefined;
+			if (users) {
+				const createEvent = roomState.state_events.get("m.room.create\0");
+				if (createEvent) {
+					const creator = createEvent.sender;
+					const additionalCreators = (
+						createEvent.content as Record<string, unknown>
+					).additional_creators as string[] | undefined;
+					if (creator in users) {
+						throw forbidden(
+							"Room creators cannot appear in power_levels users field in room version 12+",
+						);
+					}
+					if (additionalCreators) {
+						for (const uid of additionalCreators) {
+							if (uid in users) {
+								throw forbidden(
+									"Room creators cannot appear in power_levels users field in room version 12+",
+								);
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 

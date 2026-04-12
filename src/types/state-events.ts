@@ -20,6 +20,7 @@ export interface RoomCreateContent {
 		room_id: RoomId;
 		event_id: EventId;
 	};
+	additional_creators?: UserId[]; // room version 12+
 }
 
 export type Membership = "invite" | "join" | "knock" | "leave" | "ban";

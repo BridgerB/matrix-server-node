@@ -7,12 +7,17 @@ import {
 	roomNotFound,
 } from "../errors.ts";
 import {
+	buildEvent,
+	computeRoomIdV12,
 	type EventContext,
 	getMembership,
+	isRoomVersion12Plus,
 	sendStateEvent,
 } from "../events.ts";
+
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
+import type { RoomId } from "../types/index.ts";
 import type { RoomState } from "../types/internal.ts";
 import type { JsonObject } from "../types/json.ts";
 import type { CreateRoomRequest } from "../types/room-operations.ts";
@@ -23,11 +28,57 @@ export const postCreateRoom =
 		const body = (req.body ?? {}) as CreateRoomRequest;
 		const userId = req.userId as string;
 		const roomVersion = body.room_version ?? "11";
-		const roomId = generateRoomId(serverName);
+		const v12Plus = isRoomVersion12Plus(roomVersion);
+
+		let roomId: string;
 
 		const preset =
 			body.preset ??
 			(body.visibility === "public" ? "public_chat" : "private_chat");
+
+		const createContent: JsonObject = {
+			room_version: roomVersion,
+			...body.creation_content,
+		};
+
+		if (v12Plus) {
+			// Validate additional_creators
+			const additionalCreators = createContent.additional_creators as
+				| string[]
+				| undefined;
+			if (additionalCreators) {
+				for (const uid of additionalCreators) {
+					if (
+						typeof uid !== "string" ||
+						!uid.startsWith("@") ||
+						!uid.includes(":")
+					) {
+						throw badJson(`Invalid user ID in additional_creators: ${uid}`);
+					}
+				}
+			}
+
+			// For v12, we need to compute the room ID from the create event hash.
+			// Build a temporary create event with a placeholder room_id to compute the hash.
+			const tempRoomId = "!placeholder:temp" as RoomId;
+			const { event: tempCreateEvent } = buildEvent({
+				roomId: tempRoomId,
+				sender: userId,
+				type: "m.room.create",
+				content: createContent,
+				stateKey: "",
+				depth: 0,
+				prevEvents: [],
+				authEvents: [],
+				serverName,
+			});
+			// Remove room_id from the temp event before hashing for v12
+			const createForHash = { ...tempCreateEvent };
+			delete (createForHash as Record<string, unknown>).room_id;
+			roomId = computeRoomIdV12(createForHash);
+		} else {
+			roomId = generateRoomId(serverName);
+		}
 
 		const roomState: RoomState = {
 			room_id: roomId,
@@ -40,10 +91,6 @@ export const postCreateRoom =
 
 		const ctx: EventContext = { roomState, depth: 0, prevEvents: [] };
 
-		const createContent: JsonObject = {
-			room_version: roomVersion,
-			...body.creation_content,
-		};
 		await sendStateEvent(
 			storage,
 			serverName,
@@ -64,33 +111,78 @@ export const postCreateRoom =
 			{ membership: "join" },
 		);
 
-		const plContent: RoomPowerLevelsContent = {
-			users: { [userId]: 100 },
-			users_default: 0,
-			events_default: 0,
-			state_default: 50,
-			ban: 50,
-			kick: 50,
-			redact: 50,
-			invite: 0,
-			events: {
-				"m.room.name": 50,
-				"m.room.power_levels": 100,
-				"m.room.history_visibility": 100,
-				"m.room.canonical_alias": 50,
-				"m.room.avatar": 50,
-				"m.room.tombstone": 100,
-				"m.room.server_acl": 100,
-				"m.room.encryption": 100,
-			},
-		};
+		// In v12+, room creators have infinite power level implicitly,
+		// so they must NOT appear in the users field of m.room.power_levels
+		const plContent: RoomPowerLevelsContent = v12Plus
+			? {
+					users: {},
+					users_default: 0,
+					events_default: 0,
+					state_default: 50,
+					ban: 50,
+					kick: 50,
+					redact: 50,
+					invite: 0,
+					events: {
+						"m.room.name": 50,
+						"m.room.power_levels": 100,
+						"m.room.history_visibility": 100,
+						"m.room.canonical_alias": 50,
+						"m.room.avatar": 50,
+						"m.room.tombstone": 150,
+						"m.room.server_acl": 100,
+						"m.room.encryption": 100,
+					},
+				}
+			: {
+					users: { [userId]: 100 },
+					users_default: 0,
+					events_default: 0,
+					state_default: 50,
+					ban: 50,
+					kick: 50,
+					redact: 50,
+					invite: 0,
+					events: {
+						"m.room.name": 50,
+						"m.room.power_levels": 100,
+						"m.room.history_visibility": 100,
+						"m.room.canonical_alias": 50,
+						"m.room.avatar": 50,
+						"m.room.tombstone": 100,
+						"m.room.server_acl": 100,
+						"m.room.encryption": 100,
+					},
+				};
 		if (preset === "trusted_private_chat" && body.invite) {
 			for (const invitee of body.invite) {
+				// In v12+, don't add room creators to users field
+				if (v12Plus) {
+					const additionalCreators = (createContent.additional_creators ??
+						[]) as string[];
+					if (invitee === userId || additionalCreators.includes(invitee))
+						continue;
+				}
 				(plContent.users as Record<string, number>)[invitee] = 100;
 			}
 		}
-		if (body.power_level_content_override)
+		if (body.power_level_content_override) {
+			// In v12+, strip room creators from the override users field
+			if (v12Plus && body.power_level_content_override.users) {
+				const overrideUsers = { ...body.power_level_content_override.users };
+				delete overrideUsers[userId as string];
+				const additionalCreators = (createContent.additional_creators ??
+					[]) as string[];
+				for (const uid of additionalCreators) {
+					delete overrideUsers[uid as string];
+				}
+				body.power_level_content_override = {
+					...body.power_level_content_override,
+					users: overrideUsers,
+				};
+			}
 			Object.assign(plContent, body.power_level_content_override);
+		}
 		await sendStateEvent(
 			storage,
 			serverName,

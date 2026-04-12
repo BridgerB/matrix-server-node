@@ -2,6 +2,7 @@ import {
 	checkEventAuth,
 	computeEventId,
 	getUserPowerLevel,
+	isRoomVersion12Plus,
 	makeStateKey,
 } from "./events.ts";
 import type { PDU } from "./types/events.ts";
@@ -62,15 +63,23 @@ const applyEvents = (
 /**
  * Resolve conflicting state from multiple forks.
  *
+ * State Resolution v2.0 (room versions 2-11): iterative auth checks start
+ * with the unconflicted state map.
+ *
+ * State Resolution v2.1 (room version 12+): iterative auth checks start
+ * with an empty state map, then merge unconflicted state after.
+ *
  * @param stateAtForks - Array of state maps, one per fork
  * @param authEvents - Map of all available auth events
  * @param roomState - The base room state for auth checking
+ * @param roomVersion - The room version string (determines v2.0 vs v2.1)
  * @returns Resolved state map
  */
 export const resolveState = (
 	stateAtForks: Map<string, PDU>[],
 	authEvents: Map<EventId, PDU>,
 	roomState: RoomState,
+	roomVersion?: string,
 ): Map<string, PDU> => {
 	if (stateAtForks.length === 0) return new Map();
 	if (stateAtForks.length === 1)
@@ -118,7 +127,10 @@ export const resolveState = (
 		roomState,
 	);
 
-	const resolvedState = new Map(unconflicted);
+	const useV21 = isRoomVersion12Plus(roomVersion);
+
+	// v2.0: start with unconflicted state; v2.1: start with empty map
+	const resolvedState = useV21 ? new Map<string, PDU>() : new Map(unconflicted);
 	applyEvents(sortedPower, roomState, resolvedState);
 
 	const sortedOther = reverseTopologicalPowerOrder(
@@ -127,6 +139,15 @@ export const resolveState = (
 		roomState,
 	);
 	applyEvents(sortedOther, roomState, resolvedState);
+
+	// v2.1: merge unconflicted state after applying conflicted events
+	if (useV21) {
+		for (const [key, event] of unconflicted) {
+			if (!resolvedState.has(key)) {
+				resolvedState.set(key, event);
+			}
+		}
+	}
 
 	return resolvedState;
 };
