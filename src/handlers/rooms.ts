@@ -329,7 +329,7 @@ export const postKnock =
 			"knock",
 			body.reason,
 		);
-		return { status: 200, body: { room_id: roomId } };
+		return { status: 200, body: {} };
 	};
 
 export const postKick =

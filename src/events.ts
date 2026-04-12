@@ -285,12 +285,18 @@ const checkMembershipAuth = (event: PDU, roomState: RoomState): void => {
 			if (joinRule === "public") return;
 
 			if (joinRule === "restricted" || joinRule === "knock_restricted") {
-				// If the user has a join_authorised_via_users_server field, accept the join.
-				// A full implementation would verify the authorising user is in the room
-				// and in one of the allowed rooms, but for simplicity we trust the client.
 				const joinAuth = (event.content as Record<string, unknown>)
-					.join_authorised_via_users_server;
-				if (joinAuth) return;
+					.join_authorised_via_users_server as string | undefined;
+				if (joinAuth) {
+					// Verify the authorizing user is actually joined to this room
+					const authUserMembership = getMembership(roomState, joinAuth);
+					if (authUserMembership !== "join") {
+						throw forbidden(
+							"Authorizing user is not a member of the room",
+						);
+					}
+					return;
+				}
 				// Also allow if the user was previously knocked (accepted knock)
 				if (senderMembership === "knock") return;
 			}
@@ -365,16 +371,22 @@ const checkMembershipAuth = (event: PDU, roomState: RoomState): void => {
 			if (senderMembership === "join") {
 				throw forbidden("User is already in the room");
 			}
+			if (senderMembership === "knock") {
+				throw forbidden("User is already knocking");
+			}
+			if (senderMembership === "invite") {
+				throw forbidden("User is already invited");
+			}
 
-			const joinRulesEventKnock = roomState.state_events.get(
+			const joinRulesEvent = roomState.state_events.get(
 				"m.room.join_rules\0",
 			);
-			const joinRuleKnock = joinRulesEventKnock
-				? ((joinRulesEventKnock.content as Record<string, unknown>)
+			const knockJoinRule = joinRulesEvent
+				? ((joinRulesEvent.content as Record<string, unknown>)
 						.join_rule as string)
 				: "invite";
 
-			if (joinRuleKnock !== "knock" && joinRuleKnock !== "knock_restricted") {
+			if (knockJoinRule !== "knock" && knockJoinRule !== "knock_restricted") {
 				throw forbidden(
 					"Room join rules do not allow knocking",
 				);
