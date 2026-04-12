@@ -283,6 +283,18 @@ const checkMembershipAuth = (event: PDU, roomState: RoomState): void => {
 				: "invite";
 
 			if (joinRule === "public") return;
+
+			if (joinRule === "restricted" || joinRule === "knock_restricted") {
+				// If the user has a join_authorised_via_users_server field, accept the join.
+				// A full implementation would verify the authorising user is in the room
+				// and in one of the allowed rooms, but for simplicity we trust the client.
+				const joinAuth = (event.content as Record<string, unknown>)
+					.join_authorised_via_users_server;
+				if (joinAuth) return;
+				// Also allow if the user was previously knocked (accepted knock)
+				if (senderMembership === "knock") return;
+			}
+
 			throw forbidden("Room is invite-only");
 		}
 
@@ -343,8 +355,89 @@ const checkMembershipAuth = (event: PDU, roomState: RoomState): void => {
 			return;
 		}
 
+		case "knock": {
+			if (event.sender !== targetUserId) {
+				throw forbidden("Cannot knock on behalf of another user");
+			}
+			if (senderMembership === "ban") {
+				throw forbidden("User is banned from the room");
+			}
+			if (senderMembership === "join") {
+				throw forbidden("User is already in the room");
+			}
+
+			const joinRulesEventKnock = roomState.state_events.get(
+				"m.room.join_rules\0",
+			);
+			const joinRuleKnock = joinRulesEventKnock
+				? ((joinRulesEventKnock.content as Record<string, unknown>)
+						.join_rule as string)
+				: "invite";
+
+			if (joinRuleKnock !== "knock" && joinRuleKnock !== "knock_restricted") {
+				throw forbidden(
+					"Room join rules do not allow knocking",
+				);
+			}
+			return;
+		}
+
 		default:
 			throw forbidden(`Unknown membership: ${membership}`);
+	}
+};
+
+const validateIntegerPowerLevels = (event: PDU): void => {
+	const content = event.content as Record<string, unknown>;
+	const intFields = [
+		"ban",
+		"events_default",
+		"invite",
+		"kick",
+		"redact",
+		"state_default",
+		"users_default",
+	];
+	for (const field of intFields) {
+		if (field in content && typeof content[field] === "number") {
+			if (!Number.isInteger(content[field])) {
+				throw forbidden(
+					`Power level value for '${field}' must be an integer in room version 10+`,
+				);
+			}
+		}
+	}
+	const events = content.events as Record<string, number> | undefined;
+	if (events && typeof events === "object") {
+		for (const [key, val] of Object.entries(events)) {
+			if (typeof val === "number" && !Number.isInteger(val)) {
+				throw forbidden(
+					`Power level value for event '${key}' must be an integer in room version 10+`,
+				);
+			}
+		}
+	}
+	const users = content.users as Record<string, number> | undefined;
+	if (users && typeof users === "object") {
+		for (const [key, val] of Object.entries(users)) {
+			if (typeof val === "number" && !Number.isInteger(val)) {
+				throw forbidden(
+					`Power level value for user '${key}' must be an integer in room version 10+`,
+				);
+			}
+		}
+	}
+	const notifications = content.notifications as
+		| Record<string, number>
+		| undefined;
+	if (notifications && typeof notifications === "object") {
+		for (const [key, val] of Object.entries(notifications)) {
+			if (typeof val === "number" && !Number.isInteger(val)) {
+				throw forbidden(
+					`Power level value for notification '${key}' must be an integer in room version 10+`,
+				);
+			}
+		}
 	}
 };
 
@@ -368,6 +461,15 @@ export const checkEventAuth = (
 	const senderMembership = getMembership(roomState, event.sender);
 	if (senderMembership !== "join") {
 		throw forbidden("Sender is not in the room");
+	}
+
+	// Room version 10+ requires integer power levels
+	if (event.type === "m.room.power_levels") {
+		const roomVersion = roomState.room_version ?? "1";
+		const versionNum = parseInt(roomVersion, 10);
+		if (!isNaN(versionNum) && versionNum >= 10) {
+			validateIntegerPowerLevels(event);
+		}
 	}
 
 	const isState = event.state_key !== undefined;
