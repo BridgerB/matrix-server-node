@@ -79,3 +79,9 @@ export const unableToAuthoriseJoin = (msg = "Unable to authorise join") =>
 
 export const incompatibleRoomVersion = (msg = "Incompatible room version") =>
 	new MatrixError("M_INCOMPATIBLE_ROOM_VERSION", msg, 400);
+
+export const userLocked = (msg = "User account has been locked") =>
+	new MatrixError("M_USER_LOCKED", msg, 403);
+
+export const userDeactivated = (msg = "User account has been deactivated") =>
+	new MatrixError("M_USER_DEACTIVATED", msg, 403);

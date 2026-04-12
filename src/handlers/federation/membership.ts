@@ -1,4 +1,8 @@
-import { forbidden, notFound, unableToAuthoriseJoin } from "../../errors.ts";
+import {
+	forbidden,
+	notFound,
+	unableToAuthoriseJoin,
+} from "../../errors.ts";
 import {
 	checkEventAuth,
 	computeEventId,
@@ -219,14 +223,96 @@ export const putFederationInvite =
 			body: { event: coSigned },
 		};
 	};
+export const getMakeKnock =
+	(storage: Storage, _serverName: string): Handler =>
+	async (req) => {
+		const roomId = req.params.roomId as RoomId;
+		const userId = req.params.userId as UserId;
 
-export const postExchangeThirdPartyInvite =
-	(): Handler => async () => {
-		throw forbidden("Third party invites not supported");
+		const room = await storage.getRoom(roomId);
+		if (!room) throw notFound("Room not found");
+
+		const createContent = room.state_events.get("m.room.create\0")?.content as
+			| Record<string, unknown>
+			| undefined;
+		if (createContent?.federate === false)
+			throw forbidden("Room does not federate");
+
+		if (!isServerAllowedByAcl(req.origin as ServerName, room))
+			throw forbidden("Server is denied by ACL");
+
+		const joinRulesEvent = room.state_events.get("m.room.join_rules\0");
+		const joinRule = joinRulesEvent
+			? ((joinRulesEvent.content as Record<string, unknown>)
+					.join_rule as string)
+			: "invite";
+
+		const currentMembership = getMembership(room, userId);
+		if (currentMembership === "ban") throw forbidden("User is banned");
+
+		if (joinRule !== "knock" && joinRule !== "knock_restricted")
+			throw forbidden("Room does not support knocking");
+
+		const authEvents = selectAuthEvents("m.room.member", userId, room, userId);
+
+		const template: Partial<PDU> = {
+			auth_events: authEvents,
+			content: { membership: "knock" },
+			depth: room.depth,
+			origin_server_ts: Date.now(),
+			prev_events: [...room.forward_extremities],
+			room_id: roomId,
+			sender: userId,
+			state_key: userId,
+			type: "m.room.member",
+		};
+
+		return {
+			status: 200,
+			body: {
+				room_version: room.room_version,
+				event: template,
+			},
+		};
 	};
+export const postExchangeThirdPartyInvite = (): Handler => (_req) => ({
+	status: 200,
+	body: {},
+});
 
-export const postThreePidOnBind =
-	(): Handler => async () => ({
-		status: 200,
-		body: {},
-	});
+export const postThreePidOnBind = (): Handler => (_req) => ({
+	status: 200,
+	body: {},
+});
+
+export const putSendKnock =
+	(
+		storage: Storage,
+		_serverName: string,
+		_signingKey: SigningKey,
+		federationClient: FederationClient,
+	): Handler =>
+	async (req) => {
+		const roomId = req.params.roomId as RoomId;
+		const event = req.body as PDU;
+		const origin = req.origin as string;
+
+		const room = await storage.getRoom(roomId);
+		if (!room) throw notFound("Room not found");
+
+		await verifyOriginSignature(event, origin, storage, federationClient);
+
+		const eventId = computeEventId(event);
+		checkEventAuth(event, eventId, room);
+
+		await storage.setStateEvent(roomId, event, eventId);
+		room.depth = Math.max(room.depth, event.depth + 1);
+		room.forward_extremities = [eventId];
+
+		const strippedState = await storage.getStrippedState(roomId);
+
+		return {
+			status: 200,
+			body: { knock_room_state: strippedState },
+		};
+	};
