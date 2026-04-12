@@ -41,7 +41,8 @@ export type MatrixErrorCode =
 	| "M_UNKNOWN_POS"
 	| "M_URL_NOT_SET"
 	| "M_CONNECTION_FAILED"
-	| "M_CONNECTION_TIMEOUT";
+	| "M_CONNECTION_TIMEOUT"
+	| "M_USER_LOCKED";
 
 export interface MatrixError {
 	errcode: MatrixErrorCode;

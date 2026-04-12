@@ -139,6 +139,7 @@ import {
 } from "./handlers/threepid.ts";
 import { putTyping } from "./handlers/typing.ts";
 import { postUserDirectorySearch } from "./handlers/user-directory.ts";
+import { getUrlPreview } from "./handlers/url-preview.ts";
 import { getTurnServer } from "./handlers/voip.ts";
 import { requireAuth } from "./middleware/auth.ts";
 import { requireFederationAuth } from "./middleware/federation-auth.ts";
@@ -448,6 +449,17 @@ export const registerRoutes = (
 	router.get("/_matrix/media/v3/config", getConfig(), auth);
 
 	router.get(
+		"/_matrix/client/v1/media/preview_url",
+		getUrlPreview(),
+		auth,
+	);
+	router.get(
+		"/_matrix/media/v3/preview_url",
+		getUrlPreview(),
+		auth,
+	);
+
+	router.get(
 		"/_matrix/client/v3/pushrules/global/:kind/:ruleId/enabled",
 		getPushRuleEnabled(storage),
 		auth,
@@ -500,7 +512,7 @@ export const registerRoutes = (
 	router.post("/_matrix/client/v3/keys/upload", postKeysUpload(storage), auth);
 	router.post("/_matrix/client/v3/keys/query", postKeysQuery(storage), auth);
 	router.post("/_matrix/client/v3/keys/claim", postKeysClaim(storage), auth);
-	router.get("/_matrix/client/v3/keys/changes", getKeysChanges(), auth);
+	router.get("/_matrix/client/v3/keys/changes", getKeysChanges(storage), auth);
 
 	router.put(
 		"/_matrix/client/v3/sendToDevice/:eventType/:txnId",
