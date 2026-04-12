@@ -8,6 +8,12 @@ import type { JsonObject } from "../types/json.ts";
 const MAX_DISPLAYNAME_BYTES = 256;
 const MAX_AVATAR_URL_BYTES = 1000;
 
+/** In-memory store for extended profile fields */
+const extendedProfileFields = new Map<string, unknown>();
+
+const profileFieldKey = (userId: UserId, keyName: string): string =>
+	`${userId}\0${keyName}`;
+
 const propagateProfileToRooms = async (
 	storage: Storage,
 	serverName: string,
@@ -115,5 +121,87 @@ export const putAvatarUrl =
 
 		await storage.setAvatarUrl(targetUserId, avatarUrl ?? null);
 		await propagateProfileToRooms(storage, serverName, targetUserId);
+		return { status: 200, body: {} };
+	};
+
+export const getProfileField =
+	(storage: Storage): Handler =>
+	async (req) => {
+		const userId = req.params.userId as UserId;
+		const keyName = req.params.keyName as string;
+
+		// Handle well-known profile keys
+		if (keyName === "displayname") {
+			const profile = await storage.getProfile(userId);
+			if (!profile) throw notFound("User not found");
+			return {
+				status: 200,
+				body: { displayname: profile.displayname ?? null },
+			};
+		}
+		if (keyName === "avatar_url") {
+			const profile = await storage.getProfile(userId);
+			if (!profile) throw notFound("User not found");
+			return {
+				status: 200,
+				body: { avatar_url: profile.avatar_url ?? null },
+			};
+		}
+
+		// Extended profile fields
+		const profile = await storage.getProfile(userId);
+		if (!profile) throw notFound("User not found");
+
+		const value = extendedProfileFields.get(profileFieldKey(userId, keyName));
+		if (value === undefined) throw notFound("Profile field not found");
+
+		return {
+			status: 200,
+			body: { [keyName]: value },
+		};
+	};
+
+export const putProfileField =
+	(storage: Storage, serverName: string): Handler =>
+	async (req) => {
+		const targetUserId = req.params.userId as UserId;
+		const keyName = req.params.keyName as string;
+
+		if (req.userId !== targetUserId)
+			throw forbidden("Cannot set profile fields for another user");
+
+		const body = (req.body ?? {}) as Record<string, unknown>;
+
+		// Handle well-known profile keys by delegating
+		if (keyName === "displayname") {
+			const displayname = body.displayname as string | undefined;
+			if (displayname !== undefined && displayname !== null) {
+				if (
+					Buffer.byteLength(displayname, "utf-8") > MAX_DISPLAYNAME_BYTES
+				)
+					throw badJson(
+						`Displayname exceeds ${MAX_DISPLAYNAME_BYTES} bytes`,
+					);
+			}
+			await storage.setDisplayName(targetUserId, displayname ?? null);
+			await propagateProfileToRooms(storage, serverName, targetUserId);
+			return { status: 200, body: {} };
+		}
+		if (keyName === "avatar_url") {
+			const avatarUrl = body.avatar_url as string | undefined;
+			if (avatarUrl !== undefined && avatarUrl !== null) {
+				if (Buffer.byteLength(avatarUrl, "utf-8") > MAX_AVATAR_URL_BYTES)
+					throw badJson(
+						`Avatar URL exceeds ${MAX_AVATAR_URL_BYTES} bytes`,
+					);
+			}
+			await storage.setAvatarUrl(targetUserId, avatarUrl ?? null);
+			await propagateProfileToRooms(storage, serverName, targetUserId);
+			return { status: 200, body: {} };
+		}
+
+		// Store extended profile field
+		const value = body[keyName];
+		extendedProfileFields.set(profileFieldKey(targetUserId, keyName), value);
 		return { status: 200, body: {} };
 	};

@@ -40,6 +40,23 @@ export const wellKnownSupportHandler = (): Handler => {
 	return async () => ({ status: 200, body: { contacts: [] } });
 };
 
+export const wellKnownPolicyServerHandler = (): Handler => {
+	return async () => ({
+		status: 404,
+		body: { errcode: "M_NOT_FOUND", error: "No policy server configured" },
+	});
+};
+
+export const getAuthMetadata = (): Handler => {
+	return async () => ({
+		status: 404,
+		body: {
+			errcode: "M_UNRECOGNIZED",
+			error: "SSO/OIDC is not configured on this server",
+		},
+	});
+};
+
 export const getCapabilities = (): Handler => {
 	const body = {
 		capabilities: {
