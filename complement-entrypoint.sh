@@ -54,6 +54,9 @@ fi
 # Export for the Node.js server
 export SERVER_NAME
 export PORT
+export STORAGE=sqlite
+export DATABASE_PATH=/tmp/matrix.db
+export DISABLE_RATE_LIMIT=1
 
 # Start the server
 exec node src/index.ts

@@ -48,8 +48,13 @@ export const postRegister =
 			return { status: 401, body: uiaa };
 		}
 
-		const sessionId = body.auth.session;
-		if (!sessionId) throw badJson("Missing auth session");
+		// Support single-step registration: if auth is provided without a
+		// session, create one on the fly and complete it immediately
+		let sessionId = body.auth.session;
+		if (!sessionId) {
+			sessionId = generateSessionId();
+			await storage.createUIAASession(sessionId);
+		}
 
 		const uiaaSession = await storage.getUIAASession(sessionId);
 		if (!uiaaSession) throw forbidden("Unknown session");
