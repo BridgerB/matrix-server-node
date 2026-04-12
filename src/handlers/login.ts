@@ -29,6 +29,7 @@ export const getLoginFlows =
 				],
 			} as LoginFlow);
 			flows.push({ type: "m.login.token" });
+			flows.push({ type: "m.oauth" });
 		}
 		return { status: 200, body: { flows } };
 	};
@@ -44,7 +45,7 @@ export const postLogin =
 
 		if (!body.type) throw badJson("Missing 'type' field");
 
-		if (body.type === "m.login.token") {
+		if (body.type === "m.login.token" || body.type === "m.oauth") {
 			return handleTokenLogin(storage, serverName, req, body);
 		}
 

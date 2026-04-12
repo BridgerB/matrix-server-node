@@ -12,7 +12,8 @@ export type LoginType =
 	| "m.login.password"
 	| "m.login.token"
 	| "m.login.sso"
-	| "m.login.application_service";
+	| "m.login.application_service"
+	| "m.oauth";
 
 export type AuthType =
 	| "m.login.password"

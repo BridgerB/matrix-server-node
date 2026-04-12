@@ -1,6 +1,7 @@
 import { MatrixError } from "../errors.ts";
 import { pduToClientEvent } from "../events.ts";
 import { getIgnoredUsers } from "../ignored-users.ts";
+import { getIgnoredInviteSenders } from "../ignored-invites.ts";
 import { evaluatePushRules, getOrInitRules } from "../push-rules.ts";
 import { bundleAggregations } from "../relations.ts";
 import type { Handler } from "../router.ts";
@@ -249,6 +250,7 @@ const buildInitialSync = async (
 	const invite: Record<RoomId, InvitedRoom> = {};
 	const userRules = await getOrInitRules(storage, userId);
 	const ignoredUsers = await getIgnoredUsers(storage, userId);
+	const ignoredInviteSenders = await getIgnoredInviteSenders(storage, userId);
 
 	for (const { roomId, membership } of userRooms) {
 		if (membership === "join") {
@@ -345,7 +347,7 @@ const buildInitialSync = async (
 					(e.content as Record<string, unknown>).membership === "invite",
 			);
 			const inviter = inviterEvent?.sender as UserId | undefined;
-			if (inviter && ignoredUsers.has(inviter)) continue;
+			if (inviter && (ignoredUsers.has(inviter) || ignoredInviteSenders.has(inviter))) continue;
 			invite[roomId] = { invite_state: { events: stripped } };
 		}
 	}
@@ -416,6 +418,7 @@ const buildIncrementalSync = async (
 	const seenUsers = new Set<UserId>();
 	const userRules = await getOrInitRules(storage, userId);
 	const ignoredUsers = await getIgnoredUsers(storage, userId);
+	const ignoredInviteSenders = await getIgnoredInviteSenders(storage, userId);
 
 	for (const { roomId, membership } of userRooms) {
 		if (membership === "join") {
@@ -534,7 +537,7 @@ const buildIncrementalSync = async (
 						(e.content as Record<string, unknown>).membership === "invite",
 				);
 				const inviter = inviterEvent?.sender as UserId | undefined;
-				if (inviter && ignoredUsers.has(inviter)) continue;
+				if (inviter && (ignoredUsers.has(inviter) || ignoredInviteSenders.has(inviter))) continue;
 				invite[roomId] = { invite_state: { events: stripped } };
 			}
 		} else if (membership === "leave" || membership === "ban") {
