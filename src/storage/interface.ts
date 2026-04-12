@@ -1,4 +1,9 @@
-import type { DeviceKeys, OneTimeKey } from "../types/e2ee.ts";
+import type {
+	CrossSigningKey,
+	DeviceKeys,
+	KeyBackupData,
+	OneTimeKey,
+} from "../types/e2ee.ts";
 import type { PresenceState } from "../types/ephemeral.ts";
 import type {
 	PDU,
@@ -282,6 +287,88 @@ export interface Storage {
 		keys: Record<KeyId, string | OneTimeKey>,
 	): Promise<void>;
 	getFallbackKeyTypes(userId: UserId, deviceId: DeviceId): Promise<string[]>;
+
+	// E2EE - Cross-signing keys
+	setCrossSigningKeys(
+		userId: UserId,
+		keys: {
+			master_key?: CrossSigningKey;
+			self_signing_key?: CrossSigningKey;
+			user_signing_key?: CrossSigningKey;
+		},
+	): Promise<void>;
+	getCrossSigningKeys(userId: UserId): Promise<{
+		master_key?: CrossSigningKey;
+		self_signing_key?: CrossSigningKey;
+		user_signing_key?: CrossSigningKey;
+	}>;
+	storeCrossSigningSignatures(
+		userId: UserId,
+		signatures: Record<string, Record<string, JsonObject>>,
+	): Promise<Record<string, Record<string, { errcode: string; error: string }>>>;
+
+	// E2EE - Key backup
+	createKeyBackupVersion(
+		userId: UserId,
+		algorithm: string,
+		authData: JsonObject,
+	): Promise<string>;
+	getKeyBackupVersion(
+		userId: UserId,
+		version?: string,
+	): Promise<
+		| {
+				version: string;
+				algorithm: string;
+				auth_data: JsonObject;
+				count: number;
+				etag: string;
+		  }
+		| undefined
+	>;
+	updateKeyBackupVersion(
+		userId: UserId,
+		version: string,
+		authData: JsonObject,
+	): Promise<boolean>;
+	deleteKeyBackupVersion(userId: UserId, version: string): Promise<boolean>;
+	putKeyBackupKeys(
+		userId: UserId,
+		version: string,
+		roomId: RoomId | undefined,
+		sessionId: string | undefined,
+		keys:
+			| KeyBackupData
+			| { sessions: Record<string, KeyBackupData> }
+			| {
+					rooms: Record<
+						RoomId,
+						{ sessions: Record<string, KeyBackupData> }
+					>;
+			  },
+	): Promise<{ count: number; etag: string } | undefined>;
+	getKeyBackupKeys(
+		userId: UserId,
+		version: string,
+		roomId?: RoomId,
+		sessionId?: string,
+	): Promise<
+		| KeyBackupData
+		| { sessions: Record<string, KeyBackupData> }
+		| {
+				rooms: Record<
+					RoomId,
+					{ sessions: Record<string, KeyBackupData> }
+				>;
+		  }
+		| undefined
+	>;
+	deleteKeyBackupKeys(
+		userId: UserId,
+		version: string,
+		roomId?: RoomId,
+		sessionId?: string,
+	): Promise<{ count: number; etag: string } | undefined>;
 
 	// To-device messages
 	sendToDevice(

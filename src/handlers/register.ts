@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { generateSessionId } from "../crypto.ts";
+import { hashPassword } from "../crypto-utils.ts";
 import {
 	badJson,
 	forbidden,
@@ -93,11 +94,13 @@ export const postRegister =
 		const userId = `@${localpart}:${serverName}`;
 		const now = Date.now();
 
+		const passwordHash = await hashPassword(body.password);
+
 		await storage.createUser({
 			user_id: userId,
 			localpart,
 			server_name: serverName,
-			password_hash: body.password, // TODO: hash with argon2
+			password_hash: passwordHash,
 			account_type: "user",
 			is_deactivated: false,
 			created_at: now,

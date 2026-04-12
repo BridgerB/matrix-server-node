@@ -1,4 +1,4 @@
-import { badJson, forbidden, notFound } from "../errors.ts";
+import { badJson, forbidden, missingParam, notFound } from "../errors.ts";
 import {
 	buildEvent,
 	checkEventAuth,
@@ -9,9 +9,11 @@ import {
 	requireJoinedRoom,
 	selectAuthEvents,
 } from "../events.ts";
+import { getIgnoredUsers } from "../ignored-users.ts";
 import { bundleAggregations, indexRelation } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
+import type { UserId } from "../types/index.ts";
 import type { JsonObject } from "../types/json.ts";
 
 export const putSendEvent =
@@ -115,7 +117,8 @@ export const getMessages =
 	(storage: Storage): Handler =>
 	async (req) => {
 		const roomId = req.params.roomId as string;
-		await requireJoinedRoom(storage, roomId, req.userId as string);
+		const userId = req.userId as UserId;
+		await requireJoinedRoom(storage, roomId, userId);
 
 		const dir = (req.query.get("dir") ?? "f") as "b" | "f";
 		if (dir !== "b" && dir !== "f") throw badJson("dir must be 'b' or 'f'");
@@ -126,10 +129,20 @@ export const getMessages =
 		const limit = Math.min(Math.max(parseInt(limitStr ?? "10", 10), 1), 100);
 
 		const result = await storage.getEventsByRoom(roomId, limit, from, dir);
-		const chunk = result.events.map((e) =>
+		let chunk = result.events.map((e) =>
 			pduToClientEvent(e.event, e.eventId),
 		);
-		await bundleAggregations(storage, chunk, req.userId as string);
+
+		const ignoredUsers = await getIgnoredUsers(storage, userId);
+		if (ignoredUsers.size > 0) {
+			chunk = chunk.filter(
+				(e) =>
+					e.state_key !== undefined ||
+					!ignoredUsers.has(e.sender as UserId),
+			);
+		}
+
+		await bundleAggregations(storage, chunk, userId);
 
 		return {
 			status: 200,
@@ -322,5 +335,80 @@ export const getContext =
 						? String(targetIdx + eventsAfter.length + 1)
 						: undefined,
 			},
+		};
+	};
+
+export const getJoinedMembers =
+	(storage: Storage): Handler =>
+	async (req) => {
+		const roomId = req.params.roomId as string;
+		await requireJoinedRoom(storage, roomId, req.userId as string);
+
+		const entries = await storage.getMemberEvents(roomId);
+		const joined: Record<
+			string,
+			{ display_name: string | null; avatar_url: string | null }
+		> = {};
+
+		for (const entry of entries) {
+			const content = entry.event.content as Record<string, unknown>;
+			if (content.membership !== "join") continue;
+			const userId = entry.event.state_key as string;
+			const profile = await storage.getProfile(userId as UserId);
+			joined[userId] = {
+				display_name: profile?.displayname ?? null,
+				avatar_url: profile?.avatar_url ?? null,
+			};
+		}
+
+		return { status: 200, body: { joined } };
+	};
+
+export const getTimestampToEvent =
+	(storage: Storage): Handler =>
+	async (req) => {
+		const roomId = req.params.roomId as string;
+		await requireJoinedRoom(storage, roomId, req.userId as string);
+
+		const tsStr = req.query.get("ts");
+		if (!tsStr) throw missingParam("Missing 'ts'");
+		const ts = parseInt(tsStr, 10);
+		if (Number.isNaN(ts)) throw badJson("'ts' must be a number");
+
+		const dir = req.query.get("dir");
+		if (dir !== "f" && dir !== "b") throw badJson("'dir' must be 'f' or 'b'");
+
+		// Events are stored in forward chronological order
+		const result = await storage.getEventsByRoom(roomId, 10000, undefined, "f");
+		if (result.events.length === 0) throw notFound("No events in room");
+
+		let best: { eventId: string; originServerTs: number } | undefined;
+
+		if (dir === "f") {
+			// Find first event at or after ts (events are chronological, first match wins)
+			for (const entry of result.events) {
+				const eventTs = entry.event.origin_server_ts;
+				if (eventTs >= ts) {
+					best = { eventId: entry.eventId, originServerTs: eventTs };
+					break;
+				}
+			}
+		} else {
+			// Find last event at or before ts (scan forward, keep updating)
+			for (const entry of result.events) {
+				const eventTs = entry.event.origin_server_ts;
+				if (eventTs <= ts) {
+					best = { eventId: entry.eventId, originServerTs: eventTs };
+				} else {
+					break;
+				}
+			}
+		}
+
+		if (!best) throw notFound("No event found for the given timestamp");
+
+		return {
+			status: 200,
+			body: { event_id: best.eventId, origin_server_ts: best.originServerTs },
 		};
 	};
