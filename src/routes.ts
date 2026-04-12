@@ -109,7 +109,7 @@ import { postReceipt } from "./handlers/receipts.ts";
 import { postRefresh } from "./handlers/refresh.ts";
 import { postRegister } from "./handlers/register.ts";
 import { getRelations } from "./handlers/relations.ts";
-import { postReportEvent } from "./handlers/report.ts";
+import { postReportEvent, postReportRoom } from "./handlers/report.ts";
 import {
 	getAllState,
 	getContext,
@@ -155,7 +155,7 @@ import { postUserDirectorySearch } from "./handlers/user-directory.ts";
 import { getTurnServer } from "./handlers/voip.ts";
 import { requireAuth } from "./middleware/auth.ts";
 import { requireFederationAuth } from "./middleware/federation-auth.ts";
-import type { Router } from "./router.ts";
+import type { Handler, Router } from "./router.ts";
 import type { SigningKey } from "./signing.ts";
 import type { Storage } from "./storage/interface.ts";
 import type { ServerName } from "./types/index.ts";
@@ -506,6 +506,12 @@ export const registerRoutes = (
 		auth,
 	);
 	router.get("/_matrix/client/v3/pushrules", getAllPushRules(storage), auth);
+	router.get("/_matrix/client/v3/pushrules/", getAllPushRules(storage), auth);
+	router.get(
+		"/_matrix/client/v3/pushrules/global/",
+		getGlobalPushRules(storage),
+		auth,
+	);
 
 	router.get("/_matrix/client/v3/pushers", getPushers(storage), auth);
 	router.post("/_matrix/client/v3/pushers/set", postPushersSet(storage), auth);
@@ -526,6 +532,11 @@ export const registerRoutes = (
 	router.post(
 		"/_matrix/client/v3/rooms/:roomId/report/:eventId",
 		postReportEvent(storage),
+		auth,
+	);
+	router.post(
+		"/_matrix/client/v3/rooms/:roomId/report",
+		postReportRoom(storage),
 		auth,
 	);
 
@@ -640,6 +651,19 @@ export const registerRoutes = (
 	router.get(
 		"/_matrix/client/v3/thirdparty/user",
 		getThirdpartyUser(),
+		auth,
+	);
+
+	// Deprecated long-poll events endpoint (replaced by /sync)
+	router.get(
+		"/_matrix/client/v3/events",
+		(() => {
+			const handler: Handler = async () => ({
+				status: 200,
+				body: { chunk: [], start: "", end: "" },
+			});
+			return handler;
+		})(),
 		auth,
 	);
 
