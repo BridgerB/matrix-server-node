@@ -37,6 +37,34 @@ export const postCreateRoom =
 		const roomVersion = body.room_version ?? "10";
 		const v12Plus = isRoomVersion12Plus(roomVersion);
 
+		// Validate room_version is a known version
+		const KNOWN_ROOM_VERSIONS = new Set([
+			"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12",
+		]);
+		if (body.room_version !== undefined && !KNOWN_ROOM_VERSIONS.has(body.room_version)) {
+			throw new MatrixError(
+				"M_UNSUPPORTED_ROOM_VERSION",
+				`Unsupported room version: ${body.room_version}`,
+				400,
+			);
+		}
+
+		// Validate visibility
+		if (
+			body.visibility !== undefined &&
+			body.visibility !== "public" &&
+			body.visibility !== "private"
+		) {
+			throw badJson("visibility must be 'public' or 'private'");
+		}
+
+		// Validate room_alias_name (local part only, no special chars)
+		if (body.room_alias_name !== undefined) {
+			if (!/^[a-zA-Z0-9._=\-/]+$/.test(body.room_alias_name)) {
+				throw badJson("room_alias_name contains invalid characters");
+			}
+		}
+
 		let roomId: string;
 
 		const preset =

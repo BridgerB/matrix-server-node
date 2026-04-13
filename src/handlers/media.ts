@@ -57,6 +57,18 @@ export const getDownload =
 		if (!result) throw notFound("Media not found");
 
 		const { metadata, data } = result;
+
+		// If media was created via POST /media/v1/create but not yet uploaded, return 504
+		if (metadata.file_size === 0) {
+			return {
+				status: 504,
+				body: {
+					errcode: "M_NOT_YET_UPLOADED",
+					error: "Content has not yet been uploaded",
+				},
+			};
+		}
+
 		const headers: Record<string, string> = {
 			"Content-Type": metadata.content_type,
 			"Content-Length": String(data.length),
@@ -81,6 +93,17 @@ export const getThumbnail =
 		if (!result) throw notFound("Media not found");
 
 		const { metadata, data } = result;
+
+		if (metadata.file_size === 0) {
+			return {
+				status: 504,
+				body: {
+					errcode: "M_NOT_YET_UPLOADED",
+					error: "Content has not yet been uploaded",
+				},
+			};
+		}
+
 		return {
 			status: 200,
 			body: data,

@@ -31,6 +31,16 @@ export const putSendEvent =
 		const existing = await storage.getTxnEventId(userId, deviceId, txnId);
 		if (existing) return { status: 200, body: { event_id: existing } };
 
+		// Validate that body is a JSON object (not array, string, number, null, etc.)
+		const content = req.body ?? {};
+		if (
+			typeof content !== "object" ||
+			content === null ||
+			Array.isArray(content)
+		) {
+			throw badJson("Event content must be a JSON object");
+		}
+
 		const room = await requireJoinedRoom(storage, roomId, userId);
 
 		const authEvents = selectAuthEvents(eventType, undefined, room, userId);
@@ -38,7 +48,7 @@ export const putSendEvent =
 			roomId,
 			sender: userId,
 			type: eventType,
-			content: (req.body ?? {}) as JsonObject,
+			content: content as JsonObject,
 			depth: room.depth,
 			prevEvents: [...room.forward_extremities],
 			authEvents,
@@ -75,7 +85,17 @@ export const putStateEvent =
 		const eventType = req.params.eventType as string;
 		const stateKey = req.params.stateKey ?? "";
 		const userId = req.userId as string;
-		const newContent = (req.body ?? {}) as JsonObject;
+
+		// Validate that body is a JSON object
+		const rawContent = req.body ?? {};
+		if (
+			typeof rawContent !== "object" ||
+			rawContent === null ||
+			Array.isArray(rawContent)
+		) {
+			throw badJson("Event content must be a JSON object");
+		}
+		const newContent = rawContent as JsonObject;
 
 		const room = await requireJoinedRoom(storage, roomId, userId);
 
