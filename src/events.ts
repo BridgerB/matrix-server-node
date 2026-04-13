@@ -377,8 +377,13 @@ const checkMembershipAuth = (event: PDU, roomState: RoomState): void => {
 					return;
 				throw forbidden("Cannot leave a room you are not in");
 			}
+			// Kick: sender must be joined
 			if (senderMembership !== "join") {
 				throw forbidden("Sender is not in the room");
+			}
+			// Target must actually be in the room (join or invite) to be kicked
+			if (targetMembership !== "join" && targetMembership !== "invite") {
+				throw forbidden("Cannot kick a user who is not in the room");
 			}
 			const kickPl = pl.kick ?? 50;
 			if (senderPl < kickPl) {
@@ -652,7 +657,17 @@ export const requireJoinedOrWorldReadable = async (
 ): Promise<RoomState> => {
 	const room = await storage.getRoom(roomId);
 	if (!room) throw roomNotFound();
-	if (userId && getMembership(room, userId) === "join") return room;
+	if (userId) {
+		const membership = getMembership(room, userId);
+		if (membership === "join") return room;
+		if (membership === "leave") {
+			const hvEvent = room.state_events.get("m.room.history_visibility\0");
+			const hv = hvEvent
+				? (hvEvent.content as Record<string, unknown>).history_visibility
+				: undefined;
+			if (hv === "shared" || hv === "world_readable") return room;
+		}
+	}
 	if (isWorldReadable(room)) return room;
 	throw notJoined();
 };

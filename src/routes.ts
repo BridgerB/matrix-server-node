@@ -1450,6 +1450,36 @@ export const registerRoutes = (
 		getRegisterAvailable(storage),
 	);
 	router.get("/_matrix/client/r0/account/3pid", getThreePids(storage), auth);
+	router.get(
+		"/_matrix/client/r0/rooms/:roomId/joined_members",
+		getJoinedMembers(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/r0/rooms/:roomId/aliases",
+		getRoomAliases(storage),
+		auth,
+	);
+	router.post(
+		"/_matrix/client/r0/rooms/:roomId/kick",
+		postKick(storage, serverName),
+		auth,
+	);
+	router.post(
+		"/_matrix/client/r0/rooms/:roomId/ban",
+		postBan(storage, serverName),
+		auth,
+	);
+	router.post(
+		"/_matrix/client/r0/rooms/:roomId/unban",
+		postUnban(storage, serverName),
+		auth,
+	);
+	router.post(
+		"/_matrix/client/r0/rooms/:roomId/forget",
+		postForget(storage),
+		auth,
+	);
 
 	// Policy server endpoint — we are not a policy server, return 404
 	router.post("/_matrix/policy/v1/sign", (_req) => ({
