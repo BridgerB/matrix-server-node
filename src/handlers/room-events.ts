@@ -306,7 +306,9 @@ export const postRedact =
 			...redacted.unsigned,
 			redacted_because: pduToClientEvent(event, eventId),
 		};
-		Object.assign(targetEntry.event, redacted);
+		// Replace the target event content entirely (Object.assign would merge, not strip)
+		targetEntry.event.content = redacted.content;
+		targetEntry.event.unsigned = redacted.unsigned;
 
 		await storage.setTxnEventId(userId, deviceId, txnId, eventId);
 		return { status: 200, body: { event_id: eventId } };

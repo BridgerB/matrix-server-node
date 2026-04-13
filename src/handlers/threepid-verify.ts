@@ -186,6 +186,8 @@ export const getRegistrationTokenValidity =
 		return { status: 200, body: { valid: false } };
 	};
 
+const USERNAME_RE = /^[a-z0-9._=\-/]+$/;
+
 /** GET /_matrix/client/v3/register/available */
 export const getRegisterAvailable =
 	(storage: Storage): Handler =>
@@ -194,6 +196,14 @@ export const getRegisterAvailable =
 		if (!username) throw badJson("Missing 'username' query parameter");
 
 		const localpart = username.toLowerCase();
+		if (!USERNAME_RE.test(localpart)) {
+			throw new MatrixError(
+				"M_INVALID_USERNAME",
+				"Username can only contain lowercase letters, digits, and ._=-/",
+				400,
+			);
+		}
+
 		const existing = await storage.getUserByLocalpart(localpart);
 		if (existing) {
 			throw new MatrixError("M_USER_IN_USE", "User ID already taken", 400);
