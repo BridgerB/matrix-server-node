@@ -1,8 +1,32 @@
 import { badJson, forbidden, notFound } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { DeviceId } from "../types/index.ts";
+import type { DeviceId, UserId } from "../types/index.ts";
 import { withUIAA } from "../uiaa.ts";
+
+/**
+ * Account-data type prefix for MSC3890 per-device local notification settings.
+ * The full type is this prefix concatenated with the device ID, e.g.
+ * `org.matrix.msc3890.local_notification_settings.ABCDEF`.
+ */
+const LOCAL_NOTIFICATION_SETTINGS_PREFIX =
+	"org.matrix.msc3890.local_notification_settings.";
+
+/**
+ * MSC3890: when a device is removed, any local notification settings stored in
+ * the user's global account data for that device must also be removed so they
+ * no longer appear in /sync or on the account-data endpoint.
+ */
+const deleteLocalNotificationSettings = async (
+	storage: Storage,
+	userId: string,
+	deviceId: string,
+): Promise<void> => {
+	await storage.deleteGlobalAccountData(
+		userId as UserId,
+		LOCAL_NOTIFICATION_SETTINGS_PREFIX + deviceId,
+	);
+};
 
 /**
  * Extract the localpart from a Matrix user identifier, which may be a full
@@ -91,6 +115,11 @@ export const deleteDevice =
 		if (uiaaResponse) return uiaaResponse;
 
 		await storage.deleteDeviceSession(req.userId as string, deviceId);
+		await deleteLocalNotificationSettings(
+			storage,
+			req.userId as string,
+			deviceId,
+		);
 		return { status: 200, body: {} };
 	};
 
@@ -111,6 +140,11 @@ export const deleteDevices =
 			await storage.deleteDeviceSession(
 				req.userId as string,
 				deviceId as DeviceId,
+			);
+			await deleteLocalNotificationSettings(
+				storage,
+				req.userId as string,
+				deviceId,
 			);
 		}
 		return { status: 200, body: {} };

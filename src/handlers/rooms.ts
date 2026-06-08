@@ -458,6 +458,12 @@ export const postCreateRoom =
 		}
 
 		if (body.invite) {
+			// Mirror synapse (handlers/room.py): when a room is created with
+			// `is_direct: true`, every invite's m.room.member content carries
+			// `is_direct: true` so the invitee can detect a DM in their /sync
+			// invite_state. The flag is only added when truthy.
+			const inviteContent: JsonObject = { membership: "invite" };
+			if (body.is_direct) inviteContent.is_direct = true;
 			for (const invitee of body.invite) {
 				const inviteeServer = invitee.includes(":")
 					? invitee.split(":").slice(1).join(":")
@@ -478,6 +484,8 @@ export const postCreateRoom =
 						roomId as RoomId,
 						userId,
 						invitee as UserId,
+						undefined,
+						body.is_direct === true,
 					);
 					// Re-sync ctx from the room state mutated by performOutboundInvite.
 					ctx.depth = roomState.depth;
@@ -490,9 +498,7 @@ export const postCreateRoom =
 						userId,
 						"m.room.member",
 						invitee,
-						{
-							membership: "invite",
-						},
+						{ ...inviteContent },
 						signingKey,
 					);
 				}
@@ -1024,7 +1030,9 @@ export const postInvite =
 	): Handler =>
 	async (req) => {
 		const roomId = req.params.roomId as string;
-		const body = req.body as { user_id?: string; reason?: string } | undefined;
+		const body = req.body as
+			| { user_id?: string; reason?: string; is_direct?: boolean }
+			| undefined;
 		if (!body?.user_id) throw missingParam("Missing 'user_id'");
 
 		const inviteeServer = body.user_id.includes(":")
@@ -1050,10 +1058,16 @@ export const postInvite =
 				req.userId as string,
 				body.user_id as UserId,
 				body.reason,
+				body.is_direct === true,
 			);
 			return { status: 200, body: {} };
 		}
 
+		// Thread `is_direct` into the invite member content when the caller marks
+		// this as a direct (DM) invite, mirroring synapse so the invitee can detect
+		// the DM in their /sync invite_state.
+		const inviteExtra: JsonObject | undefined =
+			body.is_direct === true ? { is_direct: true } : undefined;
 		await sendMembershipEvent(
 			storage,
 			serverName,
@@ -1062,7 +1076,7 @@ export const postInvite =
 			body.user_id,
 			"invite",
 			body.reason,
-			undefined,
+			inviteExtra,
 			signingKey,
 			federationClient,
 		);
@@ -1087,12 +1101,14 @@ const performOutboundInvite = async (
 	sender: string,
 	targetUserId: UserId,
 	reason?: string,
+	isDirect?: boolean,
 ): Promise<void> => {
 	const room = await storage.getRoom(roomId);
 	if (!room) throw roomNotFound();
 
 	const content: JsonObject = { membership: "invite" };
 	if (reason) content.reason = reason;
+	if (isDirect) content.is_direct = true;
 
 	const authEvents = selectAuthEvents(
 		"m.room.member",

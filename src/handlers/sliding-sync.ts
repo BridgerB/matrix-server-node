@@ -1,5 +1,6 @@
 import { pduToClientEvent } from "../events.ts";
 import { evaluatePushRules, getOrInitRules } from "../push-rules.ts";
+import { getThreadSubscriptionsForSync } from "./thread-subscriptions.ts";
 import { bundleAggregations } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
@@ -38,6 +39,10 @@ interface SlidingSyncRequest {
 		e2ee?: { enabled?: boolean };
 		to_device?: { enabled?: boolean; since?: string };
 		account_data?: { enabled?: boolean };
+		"io.element.msc4308.thread_subscriptions"?: {
+			enabled?: boolean;
+			limit?: number;
+		};
 	};
 }
 
@@ -80,6 +85,12 @@ interface SlidingSyncResponse {
 		};
 		account_data?: {
 			global?: ClientEvent[];
+		};
+		"io.element.msc4308.thread_subscriptions"?: {
+			subscribed?: Record<
+				string,
+				Record<string, { automatic: boolean; bump_stamp: number }>
+			>;
 		};
 	};
 }
@@ -653,6 +664,18 @@ export const slidingSync =
 				response.extensions.account_data = {
 					global: globalEvents,
 				};
+			}
+
+			// MSC4308 thread subscriptions extension
+			if (
+				body.extensions["io.element.msc4308.thread_subscriptions"]
+					?.enabled
+			) {
+				const subscribed = getThreadSubscriptionsForSync(userId, pos);
+				response.extensions[
+					"io.element.msc4308.thread_subscriptions"
+				] =
+					Object.keys(subscribed).length > 0 ? { subscribed } : {};
 			}
 		}
 

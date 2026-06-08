@@ -770,6 +770,13 @@ const buildIncrementalSync = async (
 	const knock: Record<RoomId, KnockedRoom> = {};
 	const leave: Record<RoomId, LeftRoom> = {};
 	const seenUsers = new Set<UserId>();
+	// Users who newly joined/were invited/knocked on a room we share within this
+	// sync window. Per the spec and Synapse's
+	// `DeviceHandler.generate_sync_entry_for_device_list` (Step 1b), these users
+	// must appear in `device_lists.changed` even if they did not upload keys —
+	// the syncing client needs to fetch their device list because it now shares a
+	// room with them. See handlers/device.py:755-762.
+	const newlyJoinedOrInvitedUsers = new Set<UserId>();
 	const userRules = await getOrInitRules(storage, userId);
 	const ignoredUsers = await getIgnoredUsers(storage, userId);
 	const ignoredInviteSenders = await getIgnoredInviteSenders(storage, userId);
@@ -905,6 +912,40 @@ const buildIncrementalSync = async (
 
 			const users = await collectJoinedUsers(storage, roomId);
 			for (const u of users) seenUsers.add(u);
+
+			// Step 1b (Synapse handlers/device.py:755-762): scan this shared room's
+			// membership transitions within the window (since, nextBatch] for users
+			// who newly joined / were invited / are knocking. Their device lists must
+			// be surfaced in `device_lists.changed` so the client fetches their keys,
+			// independent of whether they pushed a device-list update. This covers the
+			// federation room-join case where a remote user joins a room we're in: the
+			// inbound member event lands in this window but the user may never upload
+			// keys to us.
+			const memberWindow = await storage.getEventsByRoomSince(
+				roomId,
+				since,
+				100000,
+			);
+			let selfNewlyJoined = false;
+			for (const { event } of memberWindow.events) {
+				if (event.type !== "m.room.member" || !event.state_key) continue;
+				const m = (event.content as Record<string, unknown>).membership;
+				if (m === "join" || m === "invite" || m === "knock") {
+					newlyJoinedOrInvitedUsers.add(event.state_key as UserId);
+					if (event.state_key === userId && m === "join") {
+						selfNewlyJoined = true;
+					}
+				}
+			}
+			// If WE newly joined this room in this window, every user currently in
+			// the room is a "newly shared" user from our perspective — we must learn
+			// all their device lists. Synapse handlers/device.py:756-758 adds
+			// `get_users_in_room(room_id)` for each `newly_joined_rooms` entry. Their
+			// own member events predate the window, so the per-event scan above would
+			// otherwise miss them.
+			if (selfNewlyJoined) {
+				for (const u of users) newlyJoinedOrInvitedUsers.add(u);
+			}
 		} else if (membership === "invite") {
 			const { events: newEvents } = await storage.getEventsByRoomSince(
 				roomId,
@@ -1007,17 +1048,29 @@ const buildIncrementalSync = async (
 	const otkCounts = await storage.getOneTimeKeyCounts(userId, deviceId);
 	const fallbackKeyTypes = await storage.getFallbackKeyTypes(userId, deviceId);
 
-	// Device-list changes: users whose device keys changed within this window
-	// (since, nextBatch] and who currently share a joined room with the syncer
-	// (excluding the syncer themselves). `seenUsers` holds all users sharing a
-	// joined room with us (it includes self).
+	// Device-list changes (`device_lists.changed`). Per Synapse's
+	// `DeviceHandler.generate_sync_entry_for_device_list` this is the union of:
+	//   1a. users whose device keys changed within this window (since, nextBatch]
+	//       and who currently share a joined room with the syncer; and
+	//   1b. users who newly joined / were invited / knocked on a room we share in
+	//       this window (collected above), regardless of whether their keys
+	//       changed.
+	// The syncer themselves is intentionally NOT excluded: a client must learn of
+	// its own other devices (e.g. a second login), so self is reported when self's
+	// keys changed or self newly joined. `seenUsers` holds every user sharing a
+	// joined room with us (including self).
 	const changedDeviceUsers = await storage.getChangedDeviceUsers(
 		since,
 		nextBatch,
 	);
-	const changedDeviceLists = changedDeviceUsers.filter(
-		(u) => u !== userId && seenUsers.has(u),
-	);
+	const changed = new Set<UserId>();
+	for (const u of changedDeviceUsers) {
+		if (seenUsers.has(u)) changed.add(u);
+	}
+	for (const u of newlyJoinedOrInvitedUsers) {
+		changed.add(u);
+	}
+	const changedDeviceLists = [...changed];
 	const deviceLists: DeviceLists | undefined =
 		changedDeviceLists.length > 0
 			? { changed: changedDeviceLists, left: [] }

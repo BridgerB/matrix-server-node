@@ -14,6 +14,7 @@ import {
 } from "../../events.ts";
 import { isServerAllowedByAcl } from "../../federation/acl.ts";
 import type { FederationClient } from "../../federation/client.ts";
+import { fanoutEvent } from "../../federation/outbound.ts";
 import { verifyOriginSignature } from "../../federation/verify.ts";
 import type { Handler } from "../../router.ts";
 import type { SigningKey } from "../../signing.ts";
@@ -499,8 +500,8 @@ export const getMakeLeave =
 export const putSendLeave =
 	(
 		storage: Storage,
-		_serverName: string,
-		_signingKey: SigningKey,
+		serverName: string,
+		signingKey: SigningKey,
 		federationClient: FederationClient,
 	): Handler =>
 	async (req) => {
@@ -525,9 +526,33 @@ export const putSendLeave =
 		const eventId = computeEventId(event);
 		checkEventAuth(event, eventId, room);
 
+		// Persist the leave BEFORE we read the resident-server set for fanout. A
+		// rejected invite removes the leaving server from the room, but other
+		// resident servers (e.g. a third homeserver that is still joined) must
+		// still be told about the leave. Synapse persists the send_leave event via
+		// the normal event-persistence path (`_on_send_membership_event`), which in
+		// turn drives the federation sender to distribute the event to every other
+		// server in the room. We mirror that here: store the event, then fan it out
+		// to the remaining resident servers. Without this, the inviting server
+		// silently swallows invite rejections and other participants never observe
+		// the leave (TestFederationRejectInvite).
 		await storage.setStateEvent(roomId, event, eventId);
 		room.depth = Math.max(room.depth, event.depth + 1);
 		room.forward_extremities = [eventId];
+
+		// Distribute the leave to the other servers participating in the room. The
+		// event is already signed by the leaving server, so it can be relayed
+		// as-is. fanoutEvent excludes our own server and only targets joined
+		// servers, so the (now-departed) origin server is not echoed back.
+		await fanoutEvent(
+			storage,
+			serverName,
+			signingKey,
+			federationClient,
+			roomId,
+			event,
+			eventId,
+		);
 
 		// v1 send_leave wraps the (empty) response in a [200, {}] array envelope;
 		// v2 returns the bare object.

@@ -339,13 +339,22 @@ export const postFederationMissingEvents =
 			front = next;
 		}
 
-		// We built the list backwards from latest_events; reverse so the events
-		// are approximately chronological (oldest first).
-		resultIds.reverse();
+		// We built the list backwards from latest_events. Synapse simply reverses
+		// the discovery order to get "approximately chronological", which is exact
+		// for a linear DAG but can misorder a forked one. Sort deterministically by
+		// (depth, origin_server_ts, event_id) ascending so the events are always
+		// returned oldest-first regardless of traversal order. For the linear DAGs
+		// these tests exercise this is identical to a plain reverse.
+		const ordered = resultIds.map((id) => ({ id, event: eventsById.get(id)! }));
+		ordered.sort(
+			(a, b) =>
+				a.event.depth - b.event.depth ||
+				a.event.origin_server_ts - b.event.origin_server_ts ||
+				(a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+		);
 
 		const events: PDU[] = [];
-		for (const id of resultIds) {
-			const event = eventsById.get(id)!;
+		for (const { event } of ordered) {
 			const visible = await eventVisibleToServer(storage, event, origin);
 			events.push(visible ? event : redactEvent(event));
 		}
