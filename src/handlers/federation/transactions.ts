@@ -20,6 +20,7 @@ import type {
 	UserId,
 } from "../../types/index.ts";
 import type { RoomState } from "../../types/internal.ts";
+import type { JsonObject } from "../../types/json.ts";
 
 /**
  * Build a synthetic RoomState containing only the events referenced by `pdu`'s
@@ -140,6 +141,7 @@ const processEdu = async (
 	storage: Storage,
 	edu: EDU,
 	origin: ServerName,
+	serverName: ServerName,
 ): Promise<void> => {
 	const content = edu.content as Record<string, unknown>;
 
@@ -256,13 +258,91 @@ const processEdu = async (
 			await storage.recordDeviceKeyChange(user_id);
 			break;
 		}
+		case "m.direct_to_device": {
+			// A remote server is delivering to-device messages addressed to our
+			// local users. Spec content: { sender, type, message_id, messages:
+			//   { user_id: { device_id: content } } }. We store each into the
+			// target's to-device inbox so it surfaces in their /sync to_device.
+			//
+			// Mirrors Synapse handlers/devicemessage.py on_direct_to_device_edu:
+			// it validates the sender's domain == origin, builds per-device
+			// {content,type,sender}, and persists via
+			// add_messages_from_remote_to_device_inbox(origin, message_id, ...)
+			// which dedups by (origin, message_id).
+			const {
+				sender,
+				type,
+				message_id,
+				messages,
+			} = content as {
+				sender?: UserId;
+				type?: string;
+				message_id?: string;
+				messages?: Record<UserId, Record<DeviceId, JsonObject>>;
+			};
+
+			if (!sender || !type || !messages) break;
+
+			// The sending server may only speak for users on its own domain.
+			const senderServer = sender.split(":").slice(1).join(":");
+			if (senderServer !== origin) break;
+
+			// Dedup retried transactions by (origin, message_id). We reuse the
+			// federation-txn store keyed by a message-scoped pseudo txn id so a
+			// resend of the same message_id is ignored. If no message_id is
+			// supplied we skip dedup and process anyway.
+			if (message_id) {
+				const dedupKey = `d2d:${message_id}`;
+				if (await storage.getFederationTxn(origin, dedupKey)) break;
+				await storage.setFederationTxn(origin, dedupKey);
+			}
+
+			for (const [targetUserId, byDevice] of Object.entries(messages)) {
+				// Only accept messages addressed to users on our own server.
+				const targetServer = targetUserId.split(":").slice(1).join(":");
+				if (targetServer !== serverName) continue;
+				if (!byDevice) continue;
+
+				for (const [targetDeviceId, msgContent] of Object.entries(
+					byDevice,
+				)) {
+					if (targetDeviceId === "*") {
+						const allDevices = await storage.getAllDevices(
+							targetUserId as UserId,
+						);
+						for (const device of allDevices) {
+							await storage.sendToDevice(
+								targetUserId as UserId,
+								device.device_id,
+								{
+									type,
+									sender,
+									content: msgContent,
+								},
+							);
+						}
+					} else {
+						await storage.sendToDevice(
+							targetUserId as UserId,
+							targetDeviceId as DeviceId,
+							{
+								type,
+								sender,
+								content: msgContent,
+							},
+						);
+					}
+				}
+			}
+			break;
+		}
 	}
 };
 
 export const putFederationSend =
 	(
 		storage: Storage,
-		_serverName: string,
+		serverName: string,
 		_signingKey: SigningKey,
 		federationClient: FederationClient,
 	): Handler =>
@@ -296,7 +376,12 @@ export const putFederationSend =
 
 		for (const edu of edus) {
 			try {
-				await processEdu(storage, edu, origin);
+				await processEdu(
+					storage,
+					edu,
+					origin,
+					serverName as ServerName,
+				);
 			} catch {}
 		}
 

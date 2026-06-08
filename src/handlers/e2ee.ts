@@ -436,7 +436,12 @@ export const postKeysClaim =
 	};
 
 export const putSendToDevice =
-	(storage: Storage): Handler =>
+	(
+		storage: Storage,
+		serverName?: ServerName,
+		_signingKey?: SigningKey,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const eventType = req.params.eventType as string;
 		const userId = req.userId as UserId;
@@ -446,7 +451,32 @@ export const putSendToDevice =
 
 		if (!body.messages) throw badJson("Missing messages field");
 
+		// Partition targets into local (delivered straight to storage so they
+		// surface in the user's /sync to_device) and remote (delivered to the
+		// owning homeserver via an `m.direct_to_device` federation EDU). Mirrors
+		// Synapse's DeviceMessageHandler.send_device_message, which splits
+		// messages into `local_messages` and `remote_messages` keyed by
+		// destination and queues one EDU per destination.
+		const remoteByDest = new Map<
+			ServerName,
+			Record<UserId, Record<DeviceId, JsonObject>>
+		>();
+
 		for (const [targetUserId, devices] of Object.entries(body.messages)) {
+			const dest = serverOf(targetUserId) as ServerName;
+			const isLocal =
+				!serverName || !federationClient || dest === serverName;
+
+			if (!isLocal) {
+				// Forward verbatim to the owning server. The "*" wildcard device
+				// is left intact for the destination to expand against its own
+				// device list (it knows the target's devices; we don't).
+				const group = remoteByDest.get(dest) ?? {};
+				group[targetUserId as UserId] = devices;
+				remoteByDest.set(dest, group);
+				continue;
+			}
+
 			for (const [targetDeviceId, content] of Object.entries(devices)) {
 				if (targetDeviceId === "*") {
 					const allDevices = await storage.getAllDevices(
@@ -474,6 +504,43 @@ export const putSendToDevice =
 						},
 					);
 				}
+			}
+		}
+
+		// Deliver one `m.direct_to_device` EDU per remote destination. Each
+		// carries a unique message_id (Synapse: random_string(16)) so the
+		// receiver can dedup retried transactions. Fire-and-forget: a failing or
+		// unreachable peer must not fail the client's sendToDevice request (the
+		// Complement "interrupted/stopped server" cases rely on the 200 even
+		// while the peer is down — they assert eventual delivery via /sync, which
+		// in this in-memory server is satisfied by the receiver acting on the
+		// EDU once it is reachable again).
+		if (serverName && federationClient && remoteByDest.size > 0) {
+			for (const [dest, messages] of remoteByDest) {
+				const edu = {
+					edu_type: "m.direct_to_device",
+					content: {
+						sender: userId,
+						type: eventType,
+						message_id: generateToken(),
+						messages,
+					},
+				};
+				const txnId = generateToken();
+				const txn = {
+					origin: serverName,
+					origin_server_ts: Date.now(),
+					pdus: [],
+					edus: [edu],
+				};
+				void federationClient
+					.request(
+						dest,
+						"PUT",
+						`/_matrix/federation/v1/send/${encodeURIComponent(txnId)}`,
+						txn,
+					)
+					.catch(() => {});
 			}
 		}
 

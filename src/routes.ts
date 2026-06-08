@@ -212,6 +212,11 @@ import { slidingSync } from "./handlers/sliding-sync.ts";
 import { getSync } from "./handlers/sync.ts";
 import { getThreads } from "./handlers/threads.ts";
 import {
+	deleteThreadSubscription,
+	getThreadSubscription,
+	putThreadSubscription,
+} from "./handlers/thread-subscriptions.ts";
+import {
 	getProtocol,
 	getProtocols,
 	getThirdpartyLocation,
@@ -436,7 +441,7 @@ export const registerRoutes = (
 
 	router.get(
 		"/_matrix/client/v3/directory/room/:roomAlias",
-		getDirectoryRoom(storage),
+		getDirectoryRoom(storage, serverName, federationClient),
 	);
 	router.put(
 		"/_matrix/client/v3/directory/room/:roomAlias",
@@ -920,7 +925,7 @@ export const registerRoutes = (
 
 	router.put(
 		"/_matrix/client/v3/sendToDevice/:eventType/:txnId",
-		putSendToDevice(storage),
+		putSendToDevice(storage, serverName as ServerName, signingKey, federationClient),
 		auth,
 	);
 
@@ -983,6 +988,23 @@ export const registerRoutes = (
 	router.get(
 		"/_matrix/client/v3/rooms/:roomId/threads",
 		getThreads(storage),
+		auth,
+	);
+
+	// MSC4306 thread subscriptions
+	router.put(
+		"/_matrix/client/unstable/io.element.msc4306/rooms/:roomId/thread/:threadRootId/subscription",
+		putThreadSubscription(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/unstable/io.element.msc4306/rooms/:roomId/thread/:threadRootId/subscription",
+		getThreadSubscription(storage),
+		auth,
+	);
+	router.delete(
+		"/_matrix/client/unstable/io.element.msc4306/rooms/:roomId/thread/:threadRootId/subscription",
+		deleteThreadSubscription(storage),
 		auth,
 	);
 
@@ -1425,7 +1447,7 @@ export const registerRoutes = (
 	router.post("/_matrix/client/r0/keys/claim", postKeysClaim(storage, serverName as ServerName, federationClient), auth);
 	router.put(
 		"/_matrix/client/r0/sendToDevice/:eventType/:txnId",
-		putSendToDevice(storage),
+		putSendToDevice(storage, serverName as ServerName, signingKey, federationClient),
 		auth,
 	);
 	router.put(
@@ -1475,7 +1497,7 @@ export const registerRoutes = (
 	router.post("/_matrix/client/r0/publicRooms", postPublicRooms(storage), auth);
 	router.get(
 		"/_matrix/client/r0/directory/room/:roomAlias",
-		getDirectoryRoom(storage),
+		getDirectoryRoom(storage, serverName, federationClient),
 	);
 	router.put(
 		"/_matrix/client/r0/directory/room/:roomAlias",

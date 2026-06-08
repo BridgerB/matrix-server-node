@@ -15,7 +15,8 @@ import type {
 	PublicRoomEntry,
 	PublicRoomsResponse,
 } from "../types/directory.ts";
-import type { RoomAlias, RoomId, UserId } from "../types/index.ts";
+import type { FederationClient } from "../federation/client.ts";
+import type { RoomAlias, RoomId, ServerName, UserId } from "../types/index.ts";
 import type { JsonObject } from "../types/json.ts";
 
 const MAX_PUBLIC_ROOMS = 100;
@@ -134,9 +135,30 @@ const buildPublicRoomsResponse = async (
 };
 
 export const getDirectoryRoom =
-	(storage: Storage): Handler =>
+	(
+		storage: Storage,
+		serverName?: string,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const roomAlias = req.params.roomAlias as RoomAlias;
+
+		// Remote alias: resolve it over federation.
+		const aliasDomain = roomAlias.slice(roomAlias.indexOf(":") + 1);
+		if (serverName && aliasDomain !== serverName && federationClient) {
+			const { status, body } = await federationClient.request(
+				aliasDomain as ServerName,
+				"GET",
+				`/_matrix/federation/v1/query/directory?room_alias=${encodeURIComponent(roomAlias)}`,
+			);
+			if (status !== 200) throw notFound("Room alias not found");
+			const r = body as { room_id?: string; servers?: string[] };
+			return {
+				status: 200,
+				body: { room_id: r.room_id, servers: r.servers ?? [aliasDomain] },
+			};
+		}
+
 		const result = await storage.getRoomByAlias(roomAlias);
 		if (!result) throw notFound("Room alias not found");
 		return {

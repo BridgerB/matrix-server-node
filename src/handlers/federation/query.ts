@@ -1,7 +1,12 @@
-import { invalidParam, missingParam, notFound } from "../../errors.ts";
+import { badJson, invalidParam, missingParam, notFound } from "../../errors.ts";
 import type { Handler } from "../../router.ts";
 import type { Storage } from "../../storage/interface.ts";
-import type { RoomAlias, Timestamp, UserId } from "../../types/index.ts";
+import type {
+	RoomAlias,
+	ServerName,
+	Timestamp,
+	UserId,
+} from "../../types/index.ts";
 import { buildPublicRoomEntry } from "../directory.ts";
 
 /**
@@ -93,17 +98,34 @@ export const getQueryProfile =
 export const getQueryDirectory =
 	(storage: Storage): Handler =>
 	async (req) => {
+		// `room_alias` arrives URL-decoded here: the router parses the request URL
+		// with `new URL(...)` and exposes `req.query` as URLSearchParams, which
+		// decodes percent-escapes (including multi-byte UTF-8 sequences). So a
+		// unicode alias such as "#老虎🤨:hs1" is already fully decoded by this point.
 		const roomAlias = req.query.get("room_alias") as RoomAlias | null;
-		if (!roomAlias) throw notFound("Missing room_alias");
+		if (!roomAlias) throw badJson("Must supply room alias parameter.");
+
+		// Aliases must be "#localpart:domain". Validate the structure so we reject
+		// malformed input with M_BAD_JSON rather than treating it as a lookup miss.
+		const colonIdx = roomAlias.indexOf(":");
+		if (!roomAlias.startsWith("#") || colonIdx === -1 || colonIdx === 1)
+			throw badJson("Room alias must be in the form '#localpart:domain'");
 
 		const result = await storage.getRoomByAlias(roomAlias);
-		if (!result) throw notFound("Room alias not found");
+		if (!result) throw notFound(`Room alias ${roomAlias} not found`);
+
+		// Ensure our own server name appears in the returned server list so the
+		// requesting homeserver knows it can reach the room via us.
+		const servers =
+			result.servers && result.servers.length > 0
+				? result.servers
+				: [roomAlias.slice(colonIdx + 1) as ServerName];
 
 		return {
 			status: 200,
 			body: {
 				room_id: result.room_id,
-				servers: result.servers,
+				servers,
 			},
 		};
 	};

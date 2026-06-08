@@ -263,6 +263,74 @@ export const getMakeJoin =
 			},
 		};
 	};
+/**
+ * Compute the subset of room state to return for an MSC3706 partial-state
+ * send_join. Mirrors synapse's `_get_event_ids_for_partial_state_join`:
+ *
+ *   1. Every NON-member state event.
+ *   2. The joining user's own current membership event, if any (it is an auth
+ *      event for the new join, so it's cheap to include).
+ *   3. If the room has no name and no canonical alias (i.e. a DM-style room that
+ *      a client would render from its heroes), also include the membership
+ *      events of the room "heroes" so the joining server can display the room.
+ *      Heroes are joined members first, then invited members, excluding the
+ *      joining user, capped at 5 (per the Room Summary rules used by /sync).
+ */
+const buildPartialStateEvents = (
+	room: RoomState,
+	joiningUser: UserId,
+): PDU[] => {
+	const memberPrefix = "m.room.member\0";
+	const result: PDU[] = [];
+
+	// 1. All non-member state events.
+	for (const [key, ev] of room.state_events) {
+		if (!key.startsWith(memberPrefix)) result.push(ev);
+	}
+
+	const memberFor = (userId: string): PDU | undefined =>
+		room.state_events.get(memberPrefix + userId);
+	const added = new Set<string>();
+	const pushMember = (userId: string): void => {
+		if (added.has(userId)) return;
+		const ev = memberFor(userId);
+		if (ev) {
+			result.push(ev);
+			added.add(userId);
+		}
+	};
+
+	// 2. The joining user's current membership (e.g. an outstanding invite).
+	pushMember(joiningUser);
+
+	// 3. Heroes, only when the room has no name / canonical alias.
+	const hasName = room.state_events.has("m.room.name\0");
+	const hasCanonicalAlias = room.state_events.has("m.room.canonical_alias\0");
+	if (!hasName && !hasCanonicalAlias) {
+		const joined: { userId: string; ts: number }[] = [];
+		const invited: { userId: string; ts: number }[] = [];
+		for (const [key, ev] of room.state_events) {
+			if (!key.startsWith(memberPrefix)) continue;
+			const userId = key.slice(memberPrefix.length);
+			if (userId === joiningUser) continue;
+			const membership = (ev.content as Record<string, unknown>).membership;
+			const ts = ev.origin_server_ts ?? 0;
+			if (membership === "join") joined.push({ userId, ts });
+			else if (membership === "invite") invited.push({ userId, ts });
+		}
+		// Approximate synapse's stream-ordering by origin_server_ts, then mxid.
+		const byOrder = (
+			a: { userId: string; ts: number },
+			b: { userId: string; ts: number },
+		): number => a.ts - b.ts || a.userId.localeCompare(b.userId);
+		joined.sort(byOrder);
+		invited.sort(byOrder);
+		const heroes = [...joined, ...invited].slice(0, 5);
+		for (const h of heroes) pushMember(h.userId);
+	}
+
+	return result;
+};
 export const putSendJoin =
 	(
 		storage: Storage,
@@ -331,9 +399,30 @@ export const putSendJoin =
 
 		// Ensure every state event we return carries room_id (v12 create events
 		// derive their room_id from the hash and may lack it in the stored body).
-		const stateEvents = [...room.state_events.values()].map((se) =>
-			se.room_id ? se : ({ ...se, room_id: roomId } as PDU),
-		);
+		const withRoomId = (se: PDU): PDU =>
+			se.room_id ? se : ({ ...se, room_id: roomId } as PDU);
+
+		// MSC3706 / partial-state send_join: if the joining server set the
+		// `omit_members=true` query param (only honoured on the v2 endpoint, which
+		// is where the gomatrixserverlib SendJoinPartialState client sends it), we
+		// may return a PARTIAL response: `members_omitted: true`, the non-member
+		// state events (plus a small set of hero members so DM rooms render), the
+		// servers currently in the room, and the auth_chain. The joining server
+		// then back-fills the omitted member events lazily. Mirrors synapse
+		// federation_server.on_send_join / _get_event_ids_for_partial_state_join.
+		const omitMembers =
+			req.path.includes("/_matrix/federation/v2/send_join/") &&
+			req.query.get("omit_members") === "true";
+
+		let stateEvents: PDU[];
+		if (omitMembers) {
+			stateEvents = buildPartialStateEvents(room, event.state_key as UserId).map(
+				withRoomId,
+			);
+		} else {
+			stateEvents = [...room.state_events.values()].map(withRoomId);
+		}
+
 		const authEventIds = stateEvents.flatMap((se) => se.auth_events);
 
 		let authChain: PDU[];
@@ -359,7 +448,7 @@ export const putSendJoin =
 			state: stateEvents,
 			event: coSigned,
 			servers_in_room: servers,
-			members_omitted: false,
+			members_omitted: omitMembers,
 		};
 
 		// The v1 send_join endpoint wraps the response in a [200, {...}] array
