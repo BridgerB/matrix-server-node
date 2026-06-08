@@ -73,12 +73,123 @@ const buildAuthEventState = async (
 	};
 };
 
+/**
+ * Outbound gap-filling. When an inbound PDU references prev_events we don't have
+ * locally, ask the origin server to divulge the events between our known
+ * forward-extremities and this PDU via POST /get_missing_events, then process
+ * those returned events (oldest first) so the gap is filled before we process
+ * the PDU itself.
+ *
+ * Mirrors Synapse `FederationEventHandler._get_missing_events_for_pdu`
+ * (synapse/handlers/federation_event.py):
+ *   - earliest_events = the events we have already seen (our latest /
+ *     forward-extremities); we send these so the remote doesn't re-send what we
+ *     already know and so it knows where the overlap is. (Synapse: `latest =
+ *     seen | latest_frozen`.)
+ *   - latest_events = [the PDU] — the event whose ancestors we want.
+ *   - limit = 10, min_depth = 0.
+ *   - The returned events are processed oldest-first (by depth), via the same
+ *     verification + auth + persist path as a normal inbound PDU (Synapse
+ *     `_process_pulled_events`).
+ *
+ * This deliberately does NOT fall back to /state or /state_ids: if the gap can
+ * be filled from /get_missing_events we never need a full state snapshot. If
+ * the gap can't be filled, the caller proceeds best-effort against current
+ * room state (and the auth-event-state check rejects events whose auth chain we
+ * can't reconstruct), which is sufficient for the linear-DAG tests.
+ *
+ * Recursion guard: we attempt gap-filling exactly once per top-level inbound
+ * PDU (`allowGapFill` is false for events pulled in during the fill), so a
+ * malicious/looping remote can't drive us into unbounded recursion.
+ */
+const fetchMissingEvents = async (
+	storage: Storage,
+	pdu: PDU,
+	eventId: EventId,
+	origin: ServerName,
+	federationClient: FederationClient,
+	room: RoomState,
+): Promise<void> => {
+	// Which prev_events are we missing locally?
+	const missingPrevs: EventId[] = [];
+	for (const prevId of pdu.prev_events) {
+		const have = await storage.getEvent(prevId as EventId);
+		if (!have) missingPrevs.push(prevId as EventId);
+	}
+	if (missingPrevs.length === 0) return;
+
+	// earliest_events: the events we already have (our forward-extremities) so
+	// the remote knows where the overlap is and doesn't re-send them.
+	const earliestEvents = room.forward_extremities;
+
+	let response: { status: number; body: unknown };
+	try {
+		response = await federationClient.request(
+			origin,
+			"POST",
+			`/_matrix/federation/v1/get_missing_events/${pdu.room_id}`,
+			{
+				earliest_events: earliestEvents,
+				latest_events: [eventId],
+				limit: 10,
+				min_depth: 0,
+			},
+		);
+	} catch {
+		// Couldn't reach the remote / request failed. Safe to ignore: we still
+		// handle the "missing events not returned" case below by proceeding
+		// best-effort. (Synapse logs and returns.)
+		return;
+	}
+
+	if (response.status !== 200) return;
+	const body = (response.body ?? {}) as { events?: PDU[] };
+	const events = Array.isArray(body.events) ? body.events : [];
+	if (events.length === 0) return;
+
+	// Process oldest-first. The remote returns events in reverse-topological
+	// (newest-first) order per the spec, but we don't trust that — sort by depth
+	// ascending so auth/prev dependencies are satisfied before dependents.
+	const sorted = [...events].sort((a, b) => (a.depth ?? 0) - (b.depth ?? 0));
+
+	for (const missing of sorted) {
+		let missingId: EventId;
+		try {
+			missingId = computeEventId(missing);
+		} catch {
+			continue;
+		}
+		// Skip ones we somehow already have, and ignore any that belong to a
+		// different room than the one we're filling.
+		if (missing.room_id !== pdu.room_id) continue;
+		const already = await storage.getEvent(missingId);
+		if (already) continue;
+		try {
+			// allowGapFill = false: do not recurse into another /get_missing_events
+			// while filling a gap (one attempt per top-level PDU).
+			await processPdu(
+				storage,
+				missing,
+				missingId,
+				origin,
+				federationClient,
+				false,
+			);
+		} catch {
+			// A returned event that fails verification/auth (e.g. bad JSON, bad
+			// signature, fails auth) is simply dropped — best effort. Synapse
+			// `_process_pulled_event` swallows per-event failures.
+		}
+	}
+};
+
 const processPdu = async (
 	storage: Storage,
 	pdu: PDU,
 	eventId: EventId,
 	origin: ServerName,
 	federationClient: FederationClient,
+	allowGapFill = true,
 ): Promise<void> => {
 	const expectedHash = computeContentHash(pdu);
 	if (pdu.hashes?.sha256 !== expectedHash) {
@@ -97,6 +208,21 @@ const processPdu = async (
 
 	const room = await storage.getRoom(pdu.room_id);
 	if (!room) throw new Error("Room not found locally");
+
+	// Gap-filling: if this (non-create) event references prev_events we don't
+	// have, fetch and process the missing events from the origin first so the
+	// DAG is contiguous before we persist this event. Only attempt this for
+	// top-level inbound PDUs (allowGapFill) to avoid recursion/loops.
+	if (allowGapFill && pdu.type !== "m.room.create") {
+		await fetchMissingEvents(
+			storage,
+			pdu,
+			eventId,
+			origin,
+			federationClient,
+			room,
+		);
+	}
 
 	// Server ACL: reject PDUs from a server denied by the room's
 	// m.room.server_acl. (TestACLs) Synapse: FederationBase._check_sigs_and_hash

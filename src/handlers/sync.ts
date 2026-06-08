@@ -552,11 +552,8 @@ const buildInitialSync = async (
 				"b",
 			);
 			const timelineEvents = result.events.reverse();
-			const timelineEventIds = new Set(timelineEvents.map((e) => e.eventId));
 
 			const allState = await storage.getAllState(roomId);
-			let stateEntries = allState
-				.filter((e) => !timelineEventIds.has(e.eventId));
 
 			let timelineClientEvents = timelineEvents.map((e) =>
 				pduToClientEvent(e.event, e.eventId),
@@ -569,6 +566,25 @@ const buildInitialSync = async (
 						!ignoredUsers.has(e.sender),
 				);
 			}
+
+			// Apply the timeline filter (types/not_types/senders/contains_url).
+			// State events removed here must still surface in the `state` block, so
+			// the set we exclude from state is computed from the *filtered* timeline
+			// below — not from the raw window. (Matches Synapse `_calculate_state`,
+			// where `state = current_state - timeline_contains` and
+			// `timeline_contains` is the post-filter timeline.)
+			timelineClientEvents = applyTimelineFilter(
+				timelineClientEvents,
+				filter.timelineFilter,
+			);
+
+			// Events still present in the timeline after filtering are already known
+			// to the client, so they are excluded from the `state` block.
+			const timelineEventIds = new Set(
+				timelineClientEvents.map((e) => e.event_id as EventId),
+			);
+			let stateEntries = allState
+				.filter((e) => !timelineEventIds.has(e.eventId));
 
 			// When lazy_load_members is enabled, only include member events
 			// for users who appear in the timeline
@@ -801,6 +817,14 @@ const buildIncrementalSync = async (
 				);
 			}
 
+			// Apply the timeline filter. State events removed by the filter must
+			// still be reported in the `state` block (see Synapse `_calculate_state`),
+			// so the exclusion set below is computed from the filtered timeline.
+			timelineClientEvents = applyTimelineFilter(
+				timelineClientEvents,
+				filter.timelineFilter,
+			);
+
 			await bundleAggregations(storage, timelineClientEvents, userId);
 
 			// MSC4115: stamp the syncing user's membership onto each timeline event.
@@ -813,12 +837,17 @@ const buildIncrementalSync = async (
 				stampMembership(timelineClientEvents, membershipMap);
 			}
 
+			// Event IDs surviving the timeline filter — these are already delivered to
+			// the client and must be excluded from the `state` block.
+			const filteredTimelineIds = new Set(
+				timelineClientEvents.map((e) => e.event_id as EventId),
+			);
+
 			let stateClientEvents: ClientEvent[] = [];
 			if (fullState) {
 				const allState = await storage.getAllState(roomId);
-				const timelineIds = new Set(newEvents.map((e) => e.eventId));
 				let stateEntries = allState
-					.filter((e) => !timelineIds.has(e.eventId));
+					.filter((e) => !filteredTimelineIds.has(e.eventId));
 
 				if (filter.lazyLoadMembers) {
 					const timelineSenders = new Set<string>();
@@ -837,6 +866,25 @@ const buildIncrementalSync = async (
 
 				stateClientEvents = stateEntries
 					.map((e) => pduToClientEvent(e.event, e.eventId));
+			} else {
+				// Incremental (delta) sync: report state events that arrived within
+				// this window (since, nextBatch] but did NOT survive the timeline
+				// filter (e.g. excluded by not_types) or fell outside the limited
+				// timeline tail. Without this, a state change filtered out of the
+				// timeline would silently never reach the client.
+				const windowRes = await storage.getEventsByRoomSince(
+					roomId,
+					since,
+					100000,
+				);
+				const stateDelta = windowRes.events.filter(
+					(e) =>
+						e.event.state_key !== undefined &&
+						!filteredTimelineIds.has(e.eventId),
+				);
+				stateClientEvents = stateDelta.map((e) =>
+					pduToClientEvent(e.event, e.eventId),
+				);
 			}
 
 			const prevBatch =
