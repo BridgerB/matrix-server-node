@@ -166,7 +166,11 @@ import { postReadMarkers } from "./handlers/read-markers.ts";
 import { postReceipt } from "./handlers/receipts.ts";
 import { postRefresh } from "./handlers/refresh.ts";
 import { postRegister } from "./handlers/register.ts";
-import { getRelations, postEventRelationships } from "./handlers/relations.ts";
+import {
+	getRelations,
+	postEventRelationships,
+	postFederationEventRelationships,
+} from "./handlers/relations.ts";
 import {
 	getDelayedEvents,
 	postDelayedEventAction,
@@ -560,7 +564,7 @@ export const registerRoutes = (
 	);
 	router.post(
 		"/_matrix/client/unstable/event_relationships",
-		postEventRelationships(storage),
+		postEventRelationships(storage, serverName as ServerName, federationClient),
 		auth,
 	);
 
@@ -1318,6 +1322,15 @@ export const registerRoutes = (
 		router.get(
 			"/_matrix/federation/v1/hierarchy/:roomId",
 			postFederationHierarchy(storage),
+			fedAuth,
+		);
+		router.post(
+			"/_matrix/federation/unstable/event_relationships",
+			postFederationEventRelationships(
+				storage,
+				serverName as ServerName,
+				federationClient,
+			),
 			fedAuth,
 		);
 

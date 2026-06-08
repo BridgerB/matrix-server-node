@@ -183,9 +183,34 @@ export const getFederationRoomStateIds =
 export const getFederationEventAuth =
 	(storage: Storage): Handler =>
 	async (req) => {
+		const roomId = req.params.roomId as RoomId;
 		const eventId = req.params.eventId as EventId;
+		const origin = req.origin as ServerName;
+
+		// Mirrors Synapse's `FederationServer.on_event_auth`
+		// (federation/federation_server.py) and Dendrite's GetEventAuth
+		// (federationapi/routing/eventauth.go):
+		//   1. The room must exist locally.
+		//   2. The requesting server must be in the room (assert_host_in_room).
+		//   3. The server must not be denied by the room ACL.
+		//   4. Return the auth *chain* for the event: the transitive closure of
+		//      the event's `auth_events`, including those auth events themselves
+		//      (Synapse: `get_auth_chain(..., include_given=True)`), and crucially
+		//      *only* those events — not the auth chain of the whole room state
+		//      (the dendrite #2084 bug this Complement test guards against).
+		const room = await storage.getRoom(roomId);
+		if (!room) throw notFound("Room not found");
+
 		const result = await storage.getEvent(eventId);
-		if (!result) throw notFound("Event not found");
+		if (!result || result.event.room_id !== roomId)
+			throw notFound("Event not found");
+
+		if (!isServerAllowedByAcl(origin, room))
+			throw forbidden("Server is denied by ACL");
+
+		const servers = await storage.getServersInRoom(roomId);
+		if (!servers.includes(origin))
+			throw forbidden("Host not in room");
 
 		const authChain = await storage.getAuthChain(result.event.auth_events);
 

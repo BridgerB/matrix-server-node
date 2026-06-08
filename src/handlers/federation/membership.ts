@@ -752,8 +752,8 @@ export const postThreePidOnBind = (): Handler => (_req) => ({
 export const putSendKnock =
 	(
 		storage: Storage,
-		_serverName: string,
-		_signingKey: SigningKey,
+		serverName: string,
+		signingKey: SigningKey,
 		federationClient: FederationClient,
 	): Handler =>
 	async (req) => {
@@ -797,6 +797,29 @@ export const putSendKnock =
 		await storage.setStateEvent(roomId, event, eventId);
 		room.depth = Math.max(room.depth, event.depth + 1);
 		room.forward_extremities = [eventId];
+
+		// Distribute the knock membership event to the other servers
+		// participating in the room. Synapse's federation_server.on_send_knock_request
+		// persists the knock via the normal event-persistence path, which drives the
+		// federation sender to relay the new event to every other resident server
+		// (handlers/federation.py / FederationSender). We mirror that: store the
+		// event, then fan it out to the remaining joined servers so their members
+		// observe the knock (the "Users in the room see a user's membership update
+		// when they knock" assertion in TestKnocking).
+		//
+		// The knock event is already signed by the knocking server, so it is relayed
+		// as-is. fanoutEvent targets only servers with a *joined* member and excludes
+		// our own server, so the knocking server (whose member is only "knock", not
+		// "join") is never echoed the event back to itself.
+		await fanoutEvent(
+			storage,
+			serverName,
+			signingKey,
+			federationClient,
+			roomId,
+			event,
+			eventId,
+		);
 
 		// Reply with stripped room state so the knocking server's clients can
 		// display room metadata while the knock is pending (synapse

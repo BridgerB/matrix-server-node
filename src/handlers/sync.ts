@@ -73,6 +73,13 @@ interface ResolvedFilter {
 	timelineLimit: number;
 	lazyLoadMembers: boolean;
 	includeLeave: boolean;
+	/**
+	 * MSC3773: when set via `room.timeline.unread_thread_notifications`, joined
+	 * rooms carry a per-thread `unread_thread_notifications` breakdown and
+	 * `unread_notifications` reflects only the main timeline. When unset, the
+	 * thread counts are folded into `unread_notifications`.
+	 */
+	unreadThreadNotifications: boolean;
 	timelineFilter?: RoomEventFilter;
 	stateFilter?: StateFilter;
 }
@@ -86,6 +93,7 @@ const resolveFilter = async (
 		timelineLimit: DEFAULT_TIMELINE_LIMIT,
 		lazyLoadMembers: false,
 		includeLeave: false,
+		unreadThreadNotifications: false,
 	};
 	if (filterParam === null) return defaults;
 
@@ -112,6 +120,8 @@ const resolveFilter = async (
 		lazyLoadMembers:
 			filter.room?.state?.lazy_load_members ?? false,
 		includeLeave: filter.room?.include_leave ?? false,
+		unreadThreadNotifications:
+			filter.room?.timeline?.unread_thread_notifications ?? false,
 		timelineFilter: filter.room?.timeline,
 		stateFilter: filter.room?.state,
 	};
@@ -286,21 +296,123 @@ const buildEphemeralEvents = async (
 	return events;
 };
 
-const computeNotificationCounts = async (
+/**
+ * The "main timeline" thread sentinel (MSC3771). An event that is not part of
+ * any thread belongs to the main timeline; threaded read receipts for it carry
+ * `thread_id: "main"`.
+ */
+const MAIN_TIMELINE = "main";
+
+/**
+ * MSC3771: determine which thread a notifiable event counts towards.
+ *
+ * Mirrors Synapse `RelationsWorkerStore.get_thread_id`: walk *up* the relation
+ * chain from this event towards its root (following `m.relates_to.event_id`). If
+ * any link in that chain is an `m.thread` relation, the event counts towards that
+ * thread (identified by the thread root's event ID — the deepest `m.thread`
+ * parent). Otherwise it belongs to the main timeline.
+ *
+ * `relations` maps an event ID to its parent (the event it relates to) and the
+ * relation type. The walk is depth-bounded (Synapse bounds at depth 3) to avoid
+ * cycles in malformed data.
+ */
+const threadIdForEvent = (
+	eventId: string,
+	relations: Map<string, { parentId: string; relType: string }>,
+): string => {
+	let foundThreadRoot: string | undefined;
+	let currentId = eventId;
+	for (let depth = 0; depth <= 3; depth++) {
+		const rel = relations.get(currentId);
+		if (!rel) break;
+		if (rel.relType === "m.thread") {
+			// Record the thread root; keep walking in case a deeper m.thread exists
+			// (it should not, but matches Synapse's ORDER BY depth DESC preference).
+			foundThreadRoot = rel.parentId;
+		}
+		currentId = rel.parentId;
+	}
+	return foundThreadRoot ?? MAIN_TIMELINE;
+};
+
+interface ThreadedNotifResult {
+	main: UnreadNotificationCounts;
+	/** Per-thread breakdown keyed by thread root event ID (excludes main). */
+	threads: Map<string, UnreadNotificationCounts>;
+}
+
+/**
+ * MSC3771/MSC3773: compute per-thread unread notification counts for a room.
+ *
+ * For each notifiable event (sender !== user, evaluating to `notify`), determine
+ * its thread via {@link threadIdForEvent} and count it only if it is *unread*
+ * relative to the user's read receipts. Following Synapse's
+ * `_get_unread_counts_by_receipt_txn`, an event in thread T is unread iff its
+ * position is strictly after BOTH:
+ *   - the user's threaded receipt for T (if any), and
+ *   - the user's most recent unthreaded receipt (which acts as a floor across
+ *     every thread, including main).
+ *
+ * Event ordering is the room's forward timeline index (a per-room total order),
+ * which is sufficient for "after the receipt" comparisons. The full room timeline
+ * is scanned (not just the sync window) so counts remain correct as history grows.
+ */
+const computeThreadedNotificationCounts = async (
 	storage: Storage,
 	roomId: RoomId,
 	userId: UserId,
 	userRules: PushRulesContent,
-	timelineEvents: { event: PDU; eventId: string }[],
-): Promise<UnreadNotificationCounts> => {
+	ignoredUsers: Set<UserId>,
+): Promise<ThreadedNotifResult> => {
+	const all = await storage.getEventsByRoom(roomId, 100000, undefined, "f");
+	const ordered = all.events;
+
+	// Forward-timeline index per event ID — our per-room total ordering.
+	const orderOf = new Map<string, number>();
+	// Relation graph: child event ID -> { parent, relType }.
+	const relations = new Map<string, { parentId: string; relType: string }>();
+	for (let i = 0; i < ordered.length; i++) {
+		const { event, eventId } = ordered[i]!;
+		orderOf.set(eventId, i);
+		const relatesTo = (event.content as Record<string, unknown>)[
+			"m.relates_to"
+		] as { rel_type?: string; event_id?: string } | undefined;
+		if (relatesTo?.rel_type && relatesTo.event_id) {
+			relations.set(eventId, {
+				parentId: relatesTo.event_id,
+				relType: relatesTo.rel_type,
+			});
+		}
+	}
+
+	// Receipt cutoffs. `threadReceiptPos` maps a thread ID (root event ID or
+	// "main") to the ordering of that thread's threaded read receipt.
+	// `unthreadedReceiptPos` is the ordering of the most recent unthreaded read
+	// receipt, applied as a floor across all threads.
+	const receipts = await storage.getReceipts(roomId);
+	const threadReceiptPos = new Map<string, number>();
+	let unthreadedReceiptPos = -1;
+	for (const r of receipts) {
+		if (r.userId !== userId) continue;
+		if (r.receiptType !== "m.read" && r.receiptType !== "m.read.private")
+			continue;
+		const pos = orderOf.get(r.eventId);
+		if (pos === undefined) continue;
+		if (r.threadId === undefined) {
+			if (pos > unthreadedReceiptPos) unthreadedReceiptPos = pos;
+		} else {
+			const existing = threadReceiptPos.get(r.threadId);
+			if (existing === undefined || pos > existing)
+				threadReceiptPos.set(r.threadId, pos);
+		}
+	}
+
 	const profile = await storage.getProfile(userId);
 	const displayName = profile?.displayname ?? undefined;
-
 	const memberEvents = await storage.getMemberEvents(roomId);
 	const memberCount = memberEvents.filter(
 		(m) => (m.event.content as Record<string, unknown>).membership === "join",
 	).length;
-
 	const plEvent = await storage.getStateEvent(
 		roomId,
 		"m.room.power_levels",
@@ -309,35 +421,108 @@ const computeNotificationCounts = async (
 	const powerLevels = plEvent
 		? (plEvent.event.content as unknown as RoomPowerLevelsContent)
 		: undefined;
-
 	const getSenderPl = (sender: UserId): number => {
 		if (!powerLevels) return 0;
 		return powerLevels.users?.[sender] ?? powerLevels.users_default ?? 0;
 	};
 
-	const { notification_count, highlight_count } = timelineEvents
-		.filter(({ event }) => event.sender !== userId)
-		.reduce(
-			(counts, { event }) => {
-				const result = evaluatePushRules(userRules, {
-					event,
-					userId,
-					displayName,
-					memberCount,
-					powerLevels,
-					senderPowerLevel: getSenderPl(event.sender),
-				});
-				if (result.notify) {
-					counts.notification_count++;
-					if (result.highlight) counts.highlight_count++;
-				}
-				return counts;
-			},
-			{ notification_count: 0, highlight_count: 0 },
-		);
+	const main: UnreadNotificationCounts = {
+		notification_count: 0,
+		highlight_count: 0,
+	};
+	const threads = new Map<string, UnreadNotificationCounts>();
 
-	return { notification_count, highlight_count };
+	for (const { event, eventId } of ordered) {
+		if (event.sender === userId) continue;
+		if (ignoredUsers.has(event.sender as UserId)) continue;
+		const pos = orderOf.get(eventId)!;
+		const threadId = threadIdForEvent(eventId, relations);
+		const threadReceipt = threadReceiptPos.get(threadId) ?? -1;
+		// Unread iff strictly after both the thread receipt and the unthreaded floor.
+		if (pos <= threadReceipt || pos <= unthreadedReceiptPos) continue;
+
+		const result = evaluatePushRules(userRules, {
+			event,
+			userId,
+			displayName,
+			memberCount,
+			powerLevels,
+			senderPowerLevel: getSenderPl(event.sender),
+		});
+		if (!result.notify) continue;
+
+		const bucket =
+			threadId === MAIN_TIMELINE
+				? main
+				: (threads.get(threadId) ??
+					(() => {
+						const c: UnreadNotificationCounts = {
+							notification_count: 0,
+							highlight_count: 0,
+						};
+						threads.set(threadId, c);
+						return c;
+					})());
+		bucket.notification_count = (bucket.notification_count ?? 0) + 1;
+		if (result.highlight)
+			bucket.highlight_count = (bucket.highlight_count ?? 0) + 1;
+	}
+
+	return { main, threads };
 };
+
+/**
+ * Apply the MSC3771/MSC3773 threaded notification breakdown to a joined-room
+ * object, replacing the legacy single `unread_notifications` block.
+ *
+ * - When the client requested `unread_thread_notifications` (via the sync
+ *   filter), `unread_notifications` reflects only the main timeline and a
+ *   per-thread `unread_thread_notifications` map (excluding empty threads) is
+ *   attached.
+ * - Otherwise the thread counts are folded into `unread_notifications` so the
+ *   single block reflects the whole room (Synapse handlers/sync.py).
+ */
+const applyThreadedNotifications = (
+	room: JoinedRoom,
+	counts: ThreadedNotifResult,
+	wantThreadBreakdown: boolean,
+): void => {
+	const mainNotif = counts.main.notification_count ?? 0;
+	const mainHl = counts.main.highlight_count ?? 0;
+
+	if (wantThreadBreakdown) {
+		room.unread_notifications = {
+			notification_count: mainNotif,
+			highlight_count: mainHl,
+		};
+		const threadMap: Record<string, UnreadNotificationCounts> = {};
+		for (const [threadId, c] of counts.threads) {
+			if ((c.notification_count ?? 0) === 0 && (c.highlight_count ?? 0) === 0)
+				continue;
+			threadMap[threadId] = {
+				notification_count: c.notification_count ?? 0,
+				highlight_count: c.highlight_count ?? 0,
+			};
+		}
+		// Only attach the field when at least one thread has notifications, so a
+		// fully-read room reports no `unread_thread_notifications` at all.
+		if (Object.keys(threadMap).length > 0) {
+			room.unread_thread_notifications = threadMap;
+		}
+	} else {
+		let notif = mainNotif;
+		let hl = mainHl;
+		for (const c of counts.threads.values()) {
+			notif += c.notification_count ?? 0;
+			hl += c.highlight_count ?? 0;
+		}
+		room.unread_notifications = {
+			notification_count: notif,
+			highlight_count: hl,
+		};
+	}
+};
+
 const buildRoomSummary = async (
 	storage: Storage,
 	roomId: RoomId,
@@ -634,13 +819,6 @@ const buildInitialSync = async (
 					? String(result.end)
 					: String(await storage.getStreamPosition());
 
-			const notifEvents =
-				ignoredUsers.size > 0
-					? timelineEvents.filter(
-							(e) => !ignoredUsers.has(e.event.sender as UserId),
-						)
-					: timelineEvents;
-
 			const summary = await buildRoomSummary(storage, roomId, userId);
 
 			join[roomId] = {
@@ -651,14 +829,24 @@ const buildInitialSync = async (
 					limited: limited || undefined,
 					prev_batch: prevBatch,
 				},
-				unread_notifications: await computeNotificationCounts(
-					storage,
-					roomId,
-					userId,
-					userRules,
-					notifEvents,
-				),
 			};
+
+			// MSC3771/MSC3773: compute per-thread unread notification counts over
+			// the full room timeline relative to the user's read receipts, then
+			// attach either a folded `unread_notifications` block or the per-thread
+			// breakdown depending on the sync filter.
+			const threadedCounts = await computeThreadedNotificationCounts(
+				storage,
+				roomId,
+				userId,
+				userRules,
+				ignoredUsers,
+			);
+			applyThreadedNotifications(
+				join[roomId] as JoinedRoom,
+				threadedCounts,
+				filter.unreadThreadNotifications,
+			);
 
 			if (useStateAfter) {
 				// MSC4222 initial sync: state_after is the full current room state
@@ -899,19 +1087,6 @@ const buildIncrementalSync = async (
 				stateClientEvents.length > 0 ||
 				ephemeralEvents.length > 0
 			) {
-				const recentResult = await storage.getEventsByRoom(
-					roomId,
-					filter.timelineLimit,
-					undefined,
-					"b",
-				);
-				let recentEvents = recentResult.events.reverse();
-				if (ignoredUsers.size > 0) {
-					recentEvents = recentEvents.filter(
-						(e) => !ignoredUsers.has(e.event.sender),
-					);
-				}
-
 				const summary = await buildRoomSummary(storage, roomId, userId);
 
 				join[roomId] = {
@@ -926,14 +1101,22 @@ const buildIncrementalSync = async (
 						prev_batch: prevBatch,
 					},
 					ephemeral: { events: ephemeralEvents },
-					unread_notifications: await computeNotificationCounts(
-						storage,
-						roomId,
-						userId,
-						userRules,
-						recentEvents,
-					),
 				};
+
+				// MSC3771/MSC3773: per-thread unread notification counts, computed
+				// over the full room timeline relative to read receipts.
+				const threadedCounts = await computeThreadedNotificationCounts(
+					storage,
+					roomId,
+					userId,
+					userRules,
+					ignoredUsers,
+				);
+				applyThreadedNotifications(
+					join[roomId] as JoinedRoom,
+					threadedCounts,
+					filter.unreadThreadNotifications,
+				);
 
 				if (useStateAfter) {
 					// MSC4222 incremental sync: state_after is the set of state events
