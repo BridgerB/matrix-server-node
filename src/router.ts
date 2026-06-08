@@ -203,15 +203,23 @@ export class Router {
 		};
 
 		if (!matchedRoute) {
-			const notFoundHandler: Handler = () => ({
-				status: 404,
+			// Distinguish "path exists but wrong method" (405) from "unknown path"
+			// (404). If any registered route matches the path segments regardless
+			// of method, the endpoint is known but the method is not allowed.
+			const pathKnown = this.routes.some(
+				(route) => matchRoute(route.segments, pathSegments) !== null,
+			);
+			const status = pathKnown ? 405 : 404;
+
+			const fallbackHandler: Handler = () => ({
+				status,
 				body: { errcode: "M_UNRECOGNIZED", error: "Unrecognized request" },
 			});
 
 			try {
 				const response = await this.compose(
 					this.globalMiddleware,
-					notFoundHandler,
+					fallbackHandler,
 				)(routerReq);
 				this.respond(res, response);
 			} catch (err) {

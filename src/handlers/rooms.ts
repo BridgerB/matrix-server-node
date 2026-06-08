@@ -13,7 +13,10 @@ import {
 	computeRoomIdV12,
 	type EventContext,
 	getMembership,
+	getPowerLevels,
+	getUserPowerLevel,
 	isRoomVersion12Plus,
+	selectAuthEvents,
 	sendStateEvent,
 } from "../events.ts";
 import type { FederationClient } from "../federation/client.ts";
@@ -23,7 +26,7 @@ import type { SigningKey } from "../signing.ts";
 import { signEvent } from "../signing.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { PDU } from "../types/events.ts";
-import type { EventId, RoomId, ServerName } from "../types/index.ts";
+import type { EventId, RoomId, ServerName, UserId } from "../types/index.ts";
 import type { RoomState } from "../types/internal.ts";
 import type { JsonObject } from "../types/json.ts";
 import type { CreateRoomRequest } from "../types/room-operations.ts";
@@ -41,6 +44,12 @@ export const postCreateRoom =
 		const KNOWN_ROOM_VERSIONS = new Set([
 			"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12",
 		]);
+		if (
+			body.room_version !== undefined &&
+			typeof body.room_version !== "string"
+		) {
+			throw badJson("room_version must be a string");
+		}
 		if (body.room_version !== undefined && !KNOWN_ROOM_VERSIONS.has(body.room_version)) {
 			throw new MatrixError(
 				"M_UNSUPPORTED_ROOM_VERSION",
@@ -71,9 +80,16 @@ export const postCreateRoom =
 			body.preset ??
 			(body.visibility === "public" ? "public_chat" : "private_chat");
 
+		// `room_version` and `creator` in creation_content are ignored — the server
+		// sets them authoritatively (spec: POST /createRoom creation_content).
+		const {
+			room_version: _ignoredVersion,
+			creator: _ignoredCreator,
+			...creationContentRest
+		} = (body.creation_content ?? {}) as JsonObject;
 		const createContent: JsonObject = {
+			...creationContentRest,
 			room_version: roomVersion,
-			...body.creation_content,
 		};
 
 		// Room versions before 11 require "creator" in create event content
@@ -370,11 +386,15 @@ const sendMembershipEvent = async (
 	targetUserId: string,
 	membership: string,
 	reason?: string,
+	extraContent?: JsonObject,
 ): Promise<string> => {
 	const room = await storage.getRoom(roomId);
 	if (!room) throw roomNotFound();
 
-	const content: JsonObject = { membership };
+	// Merge any client-supplied content first, then force the
+	// server-controlled fields (membership and reason) on top so they
+	// can never be overridden to an invalid value.
+	const content: JsonObject = { ...(extraContent ?? {}), membership };
 	if (reason) content.reason = reason;
 
 	const ctx: EventContext = {
@@ -416,6 +436,17 @@ export const postJoin =
 
 		const userId = req.userId as string;
 
+		// The request body may carry arbitrary fields to merge into the
+		// resulting m.room.member (join) event content (e.g. a custom key).
+		// `reason` is pulled out and applied as the standard membership reason;
+		// `membership` is stripped so it can't override the forced "join".
+		const joinBody = (req.body ?? {}) as JsonObject;
+		const {
+			reason: joinReason,
+			membership: _ignoredMembership,
+			...extraJoinContent
+		} = joinBody;
+
 		// Check if room exists locally
 		const room = await storage.getRoom(roomId);
 		if (room) {
@@ -427,6 +458,8 @@ export const postJoin =
 				userId,
 				userId,
 				"join",
+				typeof joinReason === "string" ? joinReason : undefined,
+				extraJoinContent,
 			);
 			return { status: 200, body: { room_id: roomId } };
 		}
@@ -667,18 +700,56 @@ export const postUnban =
 
 		const room = await storage.getRoom(roomId);
 		if (!room) throw roomNotFound();
-		const currentMembership = getMembership(room, body.user_id);
+		const sender = req.userId as string;
+		const targetUserId = body.user_id;
+		const currentMembership = getMembership(room, targetUserId);
 		if (currentMembership !== "ban") throw forbidden("User is not banned");
 
-		await sendMembershipEvent(
-			storage,
-			serverName,
-			roomId,
-			req.userId as string,
-			body.user_id,
-			"leave",
-			body.reason,
+		// Unban is a `leave` event sent by another user against a banned target.
+		// The shared auth check (checkMembershipAuth in src/events.ts, "leave" case)
+		// rejects this because it treats every leave-against-another-user as a kick
+		// and requires the target to currently be join/invite. Per the spec, an unban
+		// (leave where the target is banned) is valid when the sender is joined and has
+		// the ban power level. We therefore perform the unban authorization here and
+		// store the resulting leave event directly, bypassing the kick-only check.
+		const senderMembership = getMembership(room, sender);
+		if (senderMembership !== "join") {
+			throw forbidden("Sender is not in the room");
+		}
+		const pl = getPowerLevels(room);
+		const banPl = pl.ban ?? 50;
+		const senderPl = getUserPowerLevel(sender, room);
+		if (senderPl < banPl) {
+			throw forbidden(
+				`Insufficient power level to unban: need ${banPl}, have ${senderPl}`,
+			);
+		}
+
+		const content: JsonObject = { membership: "leave" };
+		if (body.reason) content.reason = body.reason;
+
+		const authEvents = selectAuthEvents(
+			"m.room.member",
+			targetUserId,
+			room,
+			sender as UserId,
 		);
+		const { event, eventId } = buildEvent({
+			roomId: room.room_id as RoomId,
+			sender: sender as UserId,
+			type: "m.room.member",
+			content,
+			stateKey: targetUserId,
+			depth: room.depth,
+			prevEvents: [...room.forward_extremities],
+			authEvents,
+			serverName: serverName as ServerName,
+		});
+
+		await storage.setStateEvent(room.room_id, event, eventId);
+		room.depth = room.depth + 1;
+		room.forward_extremities = [eventId];
+
 		return { status: 200, body: {} };
 	};
 

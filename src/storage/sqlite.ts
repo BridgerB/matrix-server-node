@@ -2,7 +2,16 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
 import { computeEventId } from "../events.ts";
-import type { CrossSigningKey, DeviceKeys, KeyBackupData, OneTimeKey } from "../types/e2ee.ts";
+import {
+	eventMatchesSearchTerm,
+	paginateSearchMatches,
+} from "../search-match.ts";
+import type {
+	CrossSigningKey,
+	DeviceKeys,
+	KeyBackupData,
+	OneTimeKey,
+} from "../types/e2ee.ts";
 import type {
 	PDU,
 	StrippedStateEvent,
@@ -33,6 +42,7 @@ import {
 	eventToStrippedState,
 	INVITE_STATE_TYPES,
 } from "./ephemeral.ts";
+import { collapseReceiptsMsc4102 } from "./interface.ts";
 import type { Storage, StoredSession } from "./interface.ts";
 import { rowToSession, rowToUser } from "./sql-helpers.ts";
 
@@ -148,6 +158,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				user_id TEXT NOT NULL,
 				type TEXT NOT NULL,
 				content TEXT NOT NULL,
+				stream_pos INTEGER NOT NULL DEFAULT 0,
 				PRIMARY KEY (user_id, type)
 			);
 
@@ -156,6 +167,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				room_id TEXT NOT NULL,
 				type TEXT NOT NULL,
 				content TEXT NOT NULL,
+				stream_pos INTEGER NOT NULL DEFAULT 0,
 				PRIMARY KEY (user_id, room_id, type)
 			);
 
@@ -165,7 +177,8 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				event_id TEXT NOT NULL,
 				receipt_type TEXT NOT NULL,
 				ts INTEGER NOT NULL,
-				PRIMARY KEY (room_id, user_id, receipt_type)
+				thread_id TEXT NOT NULL DEFAULT '',
+				PRIMARY KEY (room_id, user_id, receipt_type, thread_id)
 			);
 
 			CREATE TABLE IF NOT EXISTS media (
@@ -195,6 +208,12 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				keys_json TEXT NOT NULL,
 				PRIMARY KEY (user_id, device_id)
 			);
+
+			CREATE TABLE IF NOT EXISTS device_list_stream (
+				user_id TEXT NOT NULL,
+				stream_pos INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_device_list_stream ON device_list_stream(stream_pos);
 
 			CREATE TABLE IF NOT EXISTS one_time_keys (
 				user_id TEXT NOT NULL,
@@ -306,7 +325,14 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		`);
 
 		const maxPos = this.db
-			.prepare("SELECT MAX(stream_pos) as m FROM events")
+			.prepare(
+				`SELECT MAX(m) as m FROM (
+					SELECT MAX(stream_pos) as m FROM events
+					UNION ALL SELECT MAX(stream_pos) FROM global_account_data
+					UNION ALL SELECT MAX(stream_pos) FROM room_account_data
+					UNION ALL SELECT MAX(stream_pos) FROM device_list_stream
+				)`,
+			)
 			.get() as { m: number | null } | undefined;
 		this.streamCounter = maxPos?.m ?? 0;
 
@@ -579,6 +605,12 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			JSON.stringify(event),
 		);
 		this.wakeWaiters();
+	}
+
+	async updateEvent(eventId: EventId, event: PDU): Promise<void> {
+		this.db
+			.prepare("UPDATE events SET event_json = ? WHERE event_id = ?")
+			.run(JSON.stringify(event), eventId);
 	}
 
 	async getEvent(
@@ -971,9 +1003,10 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 	): Promise<void> {
 		this.db
 			.prepare(
-				"INSERT OR REPLACE INTO global_account_data (user_id, type, content) VALUES (?, ?, ?)",
+				"INSERT OR REPLACE INTO global_account_data (user_id, type, content, stream_pos) VALUES (?, ?, ?, ?)",
 			)
-			.run(userId, type, JSON.stringify(content));
+			.run(userId, type, JSON.stringify(content), ++this.streamCounter);
+		this.wakeWaiters();
 	}
 
 	async getAllGlobalAccountData(
@@ -981,9 +1014,23 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 	): Promise<{ type: string; content: JsonObject }[]> {
 		const rows = this.db
 			.prepare(
-				"SELECT type, content FROM global_account_data WHERE user_id = ?",
+				// Exclude MSC3391 deletion tombstones (content '{}') from initial sync.
+				"SELECT type, content FROM global_account_data WHERE user_id = ? AND content != '{}'",
 			)
 			.all(userId) as { type: string; content: string }[];
+		return rows.map((r) => ({ type: r.type, content: JSON.parse(r.content) }));
+	}
+
+	async getGlobalAccountDataSince(
+		userId: UserId,
+		since: number,
+	): Promise<{ type: string; content: JsonObject }[]> {
+		const rows = this.db
+			.prepare(
+				// Include tombstones so incremental sync surfaces deletions.
+				"SELECT type, content FROM global_account_data WHERE user_id = ? AND stream_pos > ?",
+			)
+			.all(userId, since) as { type: string; content: string }[];
 		return rows.map((r) => ({ type: r.type, content: JSON.parse(r.content) }));
 	}
 
@@ -1008,9 +1055,32 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 	): Promise<void> {
 		this.db
 			.prepare(
-				"INSERT OR REPLACE INTO room_account_data (user_id, room_id, type, content) VALUES (?, ?, ?, ?)",
+				"INSERT OR REPLACE INTO room_account_data (user_id, room_id, type, content, stream_pos) VALUES (?, ?, ?, ?, ?)",
 			)
-			.run(userId, roomId, type, JSON.stringify(content));
+			.run(userId, roomId, type, JSON.stringify(content), ++this.streamCounter);
+		this.wakeWaiters();
+	}
+	async deleteGlobalAccountData(userId: UserId, type: string): Promise<void> {
+		// MSC3391: leave a tombstone (content '{}') with a fresh stream position
+		// rather than removing the row, so incremental sync can surface it.
+		this.db
+			.prepare(
+				"INSERT OR REPLACE INTO global_account_data (user_id, type, content, stream_pos) VALUES (?, ?, '{}', ?)",
+			)
+			.run(userId, type, ++this.streamCounter);
+		this.wakeWaiters();
+	}
+	async deleteRoomAccountData(
+		userId: UserId,
+		roomId: RoomId,
+		type: string,
+	): Promise<void> {
+		this.db
+			.prepare(
+				"INSERT OR REPLACE INTO room_account_data (user_id, room_id, type, content, stream_pos) VALUES (?, ?, ?, '{}', ?)",
+			)
+			.run(userId, roomId, type, ++this.streamCounter);
+		this.wakeWaiters();
 	}
 
 	async getAllRoomAccountData(
@@ -1019,10 +1089,32 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 	): Promise<{ type: string; content: JsonObject }[]> {
 		const rows = this.db
 			.prepare(
-				"SELECT type, content FROM room_account_data WHERE user_id = ? AND room_id = ?",
+				// Exclude MSC3391 deletion tombstones from initial sync.
+				"SELECT type, content FROM room_account_data WHERE user_id = ? AND room_id = ? AND content != '{}'",
 			)
 			.all(userId, roomId) as { type: string; content: string }[];
 		return rows.map((r) => ({ type: r.type, content: JSON.parse(r.content) }));
+	}
+
+	async getRoomAccountDataSince(
+		userId: UserId,
+		since: number,
+	): Promise<{ roomId: RoomId; type: string; content: JsonObject }[]> {
+		const rows = this.db
+			.prepare(
+				// Include tombstones so incremental sync surfaces deletions.
+				"SELECT room_id, type, content FROM room_account_data WHERE user_id = ? AND stream_pos > ?",
+			)
+			.all(userId, since) as {
+			room_id: string;
+			type: string;
+			content: string;
+		}[];
+		return rows.map((r) => ({
+			roomId: r.room_id as RoomId,
+			type: r.type,
+			content: JSON.parse(r.content),
+		}));
 	}
 
 	async setReceipt(
@@ -1031,19 +1123,24 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		eventId: EventId,
 		receiptType: string,
 		ts: Timestamp,
+		threadId?: string,
 	): Promise<void> {
 		this.db
 			.prepare(
-				"INSERT OR REPLACE INTO receipts (room_id, user_id, event_id, receipt_type, ts) VALUES (?, ?, ?, ?, ?)",
+				"INSERT OR REPLACE INTO receipts (room_id, user_id, event_id, receipt_type, ts, thread_id) VALUES (?, ?, ?, ?, ?, ?)",
 			)
-			.run(roomId, userId, eventId, receiptType, ts);
+			.run(roomId, userId, eventId, receiptType, ts, threadId ?? "");
 		this.wakeWaiters();
 	}
 
-	async getReceipts(
-		roomId: RoomId,
-	): Promise<
-		{ eventId: EventId; receiptType: string; userId: UserId; ts: Timestamp }[]
+	async getReceipts(roomId: RoomId): Promise<
+		{
+			eventId: EventId;
+			receiptType: string;
+			userId: UserId;
+			ts: Timestamp;
+			threadId?: string;
+		}[]
 	> {
 		const rows = this.db
 			.prepare("SELECT * FROM receipts WHERE room_id = ?")
@@ -1052,13 +1149,18 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			receipt_type: string;
 			user_id: string;
 			ts: number;
+			thread_id: string | null;
 		}[];
-		return rows.map((r) => ({
-			eventId: r.event_id as EventId,
-			receiptType: r.receipt_type,
-			userId: r.user_id as UserId,
-			ts: r.ts,
-		}));
+		return collapseReceiptsMsc4102(
+			rows.map((r) => ({
+				eventId: r.event_id as EventId,
+				receiptType: r.receipt_type,
+				userId: r.user_id as UserId,
+				ts: r.ts,
+				threadId:
+					r.thread_id === null || r.thread_id === "" ? undefined : r.thread_id,
+			})),
+		);
 	}
 
 	async storeMedia(media: StoredMedia, data: Buffer): Promise<void> {
@@ -1123,7 +1225,15 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			.prepare(
 				"UPDATE media SET content_type = ?, upload_name = ?, file_size = ?, content_hash = ?, data = ? WHERE origin = ? AND media_id = ?",
 			)
-			.run(contentType, fileName ?? null, data.length, hash, data, serverName, mediaId);
+			.run(
+				contentType,
+				fileName ?? null,
+				data.length,
+				hash,
+				data,
+				serverName,
+				mediaId,
+			);
 		return true;
 	}
 
@@ -1159,6 +1269,25 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				"INSERT OR REPLACE INTO device_keys (user_id, device_id, keys_json) VALUES (?, ?, ?)",
 			)
 			.run(userId, deviceId, JSON.stringify(keys));
+		await this.recordDeviceKeyChange(userId);
+	}
+
+	async recordDeviceKeyChange(userId: UserId): Promise<void> {
+		this.db
+			.prepare(
+				"INSERT INTO device_list_stream (user_id, stream_pos) VALUES (?, ?)",
+			)
+			.run(userId, ++this.streamCounter);
+		this.wakeWaiters();
+	}
+
+	async getChangedDeviceUsers(since: number, until: number): Promise<UserId[]> {
+		const rows = this.db
+			.prepare(
+				"SELECT DISTINCT user_id FROM device_list_stream WHERE stream_pos > ? AND stream_pos <= ?",
+			)
+			.all(since, until) as { user_id: string }[];
+		return rows.map((r) => r.user_id as UserId);
 	}
 
 	async getDeviceKeys(
@@ -1210,7 +1339,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 	): Promise<{ keyId: KeyId; key: string | OneTimeKey } | undefined> {
 		const row = this.db
 			.prepare(
-				"SELECT key_id, key_json FROM one_time_keys WHERE user_id = ? AND device_id = ? AND algorithm = ? LIMIT 1",
+				"SELECT key_id, key_json FROM one_time_keys WHERE user_id = ? AND device_id = ? AND algorithm = ? ORDER BY rowid ASC LIMIT 1",
 			)
 			.get(userId, deviceId, algorithm) as
 			| { key_id: string; key_json: string }
@@ -1362,11 +1491,8 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		> = {};
 		for (const [targetUserId, keyMap] of Object.entries(signatures)) {
 			for (const [keyId, signedObject] of Object.entries(keyMap)) {
-				const signedSigs = (
-					signedObject as Record<string, unknown>
-				).signatures as
-					| Record<string, Record<string, string>>
-					| undefined;
+				const signedSigs = (signedObject as Record<string, unknown>)
+					.signatures as Record<string, Record<string, string>> | undefined;
 				if (!signedSigs) {
 					failures[targetUserId] ??= {};
 					(
@@ -1386,21 +1512,14 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 					.prepare(
 						"SELECT keys_json FROM device_keys WHERE user_id = ? AND device_id = ?",
 					)
-					.get(targetUserId, keyId) as
-					| { keys_json: string }
-					| undefined;
+					.get(targetUserId, keyId) as { keys_json: string } | undefined;
 				if (dkRow) {
-					const deviceKeys = JSON.parse(
-						dkRow.keys_json,
-					) as DeviceKeys;
+					const deviceKeys = JSON.parse(dkRow.keys_json) as DeviceKeys;
 					if (!deviceKeys.signatures) deviceKeys.signatures = {};
 					for (const [signer, sigs] of Object.entries(signedSigs)) {
 						deviceKeys.signatures[signer] ??= {};
 						Object.assign(
-							deviceKeys.signatures[signer] as Record<
-								string,
-								string
-							>,
+							deviceKeys.signatures[signer] as Record<string, string>,
 							sigs,
 						);
 					}
@@ -1408,11 +1527,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 						.prepare(
 							"UPDATE device_keys SET keys_json = ? WHERE user_id = ? AND device_id = ?",
 						)
-						.run(
-							JSON.stringify(deviceKeys),
-							targetUserId,
-							keyId,
-						);
+						.run(JSON.stringify(deviceKeys), targetUserId, keyId);
 					continue;
 				}
 
@@ -1427,25 +1542,17 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				}[];
 				let matched = false;
 				for (const csRow of csRows) {
-					const key = JSON.parse(
-						csRow.key_json,
-					) as CrossSigningKey;
+					const key = JSON.parse(csRow.key_json) as CrossSigningKey;
 					if (
 						Object.keys(key.keys).some(
-							(k) =>
-								k === keyId || k.endsWith(`:${keyId}`),
+							(k) => k === keyId || k.endsWith(`:${keyId}`),
 						)
 					) {
 						if (!key.signatures) key.signatures = {};
-						for (const [signer, sigs] of Object.entries(
-							signedSigs,
-						)) {
+						for (const [signer, sigs] of Object.entries(signedSigs)) {
 							key.signatures[signer] ??= {};
 							Object.assign(
-								key.signatures[signer] as Record<
-									string,
-									string
-								>,
+								key.signatures[signer] as Record<string, string>,
 								sigs,
 							);
 						}
@@ -1453,11 +1560,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 							.prepare(
 								"UPDATE cross_signing_keys SET key_json = ? WHERE user_id = ? AND key_type = ?",
 							)
-							.run(
-								JSON.stringify(key),
-								targetUserId,
-								csRow.key_type,
-							);
+							.run(JSON.stringify(key), targetUserId, csRow.key_type);
 						matched = true;
 						break;
 					}
@@ -1506,7 +1609,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				auth_data: JsonObject;
 				count: number;
 				etag: string;
-			}
+		  }
 		| undefined
 	> {
 		let row:
@@ -1571,9 +1674,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			.run(userId, version);
 		if (result.changes === 0) return false;
 		this.db
-			.prepare(
-				"DELETE FROM key_backup_data WHERE user_id = ? AND version = ?",
-			)
+			.prepare("DELETE FROM key_backup_data WHERE user_id = ? AND version = ?")
 			.run(userId, version);
 		return true;
 	}
@@ -1587,11 +1688,8 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			| KeyBackupData
 			| { sessions: Record<string, KeyBackupData> }
 			| {
-					rooms: Record<
-						RoomId,
-						{ sessions: Record<string, KeyBackupData> }
-					>;
-				},
+					rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
+			  },
 	): Promise<{ count: number; etag: string } | undefined> {
 		// Verify version is current
 		const latest = this.db
@@ -1617,15 +1715,10 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			}
 		} else {
 			const allKeys = keys as {
-				rooms: Record<
-					RoomId,
-					{ sessions: Record<string, KeyBackupData> }
-				>;
+				rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
 			};
 			for (const [rid, roomData] of Object.entries(allKeys.rooms)) {
-				for (const [sid, data] of Object.entries(
-					roomData.sessions,
-				)) {
+				for (const [sid, data] of Object.entries(roomData.sessions)) {
 					entries.push([rid as RoomId, sid, data]);
 				}
 			}
@@ -1638,39 +1731,21 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 					.prepare(
 						"SELECT key_json FROM key_backup_data WHERE user_id = ? AND version = ? AND room_id = ? AND session_id = ?",
 					)
-					.get(userId, version, rid, sid) as
-					| { key_json: string }
-					| undefined;
+					.get(userId, version, rid, sid) as { key_json: string } | undefined;
 				if (existing) {
-					const old = JSON.parse(
-						existing.key_json,
-					) as KeyBackupData;
+					const old = JSON.parse(existing.key_json) as KeyBackupData;
 					if (
 						(data.is_verified && !old.is_verified) ||
 						(data.is_verified === old.is_verified &&
-							data.first_message_index <
-								old.first_message_index) ||
+							data.first_message_index < old.first_message_index) ||
 						(data.is_verified === old.is_verified &&
-							data.first_message_index ===
-								old.first_message_index &&
+							data.first_message_index === old.first_message_index &&
 							data.forwarded_count < old.forwarded_count)
 					) {
-						upsert.run(
-							userId,
-							version,
-							rid,
-							sid,
-							JSON.stringify(data),
-						);
+						upsert.run(userId, version, rid, sid, JSON.stringify(data));
 					}
 				} else {
-					upsert.run(
-						userId,
-						version,
-						rid,
-						sid,
-						JSON.stringify(data),
-					);
+					upsert.run(userId, version, rid, sid, JSON.stringify(data));
 				}
 			}
 		})();
@@ -1692,11 +1767,8 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		| KeyBackupData
 		| { sessions: Record<string, KeyBackupData> }
 		| {
-				rooms: Record<
-					RoomId,
-					{ sessions: Record<string, KeyBackupData> }
-				>;
-			}
+				rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
+		  }
 		| undefined
 	> {
 		if (roomId && sessionId) {
@@ -1731,10 +1803,8 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				session_id: string;
 				key_json: string;
 			}[];
-			const rooms: Record<
-				RoomId,
-				{ sessions: Record<string, KeyBackupData> }
-			> = {};
+			const rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }> =
+				{};
 			for (const row of rows) {
 				const rid = row.room_id as RoomId;
 				if (!rooms[rid]) rooms[rid] = { sessions: {} };
@@ -2172,51 +2242,26 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		from?: string,
 	): Promise<{
 		events: { event: PDU; eventId: EventId; streamPos: number }[];
+		count: number;
 		nextBatch?: string;
 	}> {
-		if (roomIds.length === 0) return { events: [] };
+		if (roomIds.length === 0) return { events: [], count: 0 };
 
 		const placeholders = roomIds.map(() => "?").join(",");
-		let sql = `SELECT event_id, event_json, stream_pos FROM events WHERE room_id IN (${placeholders})`;
-		const params: unknown[] = [...roomIds];
+		const sql = `SELECT event_id, event_json, stream_pos FROM events WHERE room_id IN (${placeholders}) ORDER BY stream_pos DESC`;
 
-		if (from) {
-			sql += " AND stream_pos < ?";
-			params.push(parseInt(from, 10));
-		}
-
-		sql += " ORDER BY stream_pos DESC";
-
-		const rows = this.db.prepare(sql).all(...params) as {
+		const rows = this.db.prepare(sql).all(...roomIds) as {
 			event_id: string;
 			event_json: string;
 			stream_pos: number;
 		}[];
 
-		const term = searchTerm.toLowerCase();
-		const results: { event: PDU; eventId: EventId; streamPos: number }[] = [];
-
+		const allMatches: { event: PDU; eventId: EventId; streamPos: number }[] =
+			[];
 		for (const row of rows) {
-			if (results.length >= limit) break;
 			const event = JSON.parse(row.event_json) as PDU;
-			const content = event.content as Record<string, unknown>;
-			let matched = false;
-			for (const key of keys) {
-				const field =
-					key === "content.body"
-						? content.body
-						: key === "content.name"
-							? content.name
-							: key === "content.topic"
-								? content.topic
-								: undefined;
-				if (typeof field === "string" && field.toLowerCase().includes(term)) {
-					matched = true;
-					break;
-				}
-			}
-			if (matched) {
-				results.push({
+			if (eventMatchesSearchTerm(event, keys, searchTerm)) {
+				allMatches.push({
 					event,
 					eventId: row.event_id as EventId,
 					streamPos: row.stream_pos,
@@ -2224,12 +2269,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			}
 		}
 
-		const nextBatch =
-			results.length === limit && results.length > 0
-				? String(results[results.length - 1]?.streamPos)
-				: undefined;
-
-		return { events: results, nextBatch };
+		return paginateSearchMatches(allMatches, limit, from);
 	}
 
 	async storeServerKeys(
@@ -2362,9 +2402,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		this.verificationSessions.set(sessionId, { ...data });
 	}
 
-	async getVerificationSession(
-		sessionId: string,
-	): Promise<
+	async getVerificationSession(sessionId: string): Promise<
 		| {
 				medium: string;
 				address: string;

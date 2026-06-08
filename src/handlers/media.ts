@@ -7,6 +7,38 @@ import type { StoredMedia } from "../types/internal.ts";
 
 const MAX_UPLOAD_SIZE = 52428800; // 50 MB
 
+/** True if every character is printable US-ASCII (safe to put in an HTTP header). */
+const isAsciiPrintable = (name: string): boolean =>
+	[...name].every((ch) => {
+		const c = ch.codePointAt(0) ?? 0;
+		return c >= 0x20 && c < 0x7f;
+	});
+
+/** Percent-encode a string as UTF-8 per RFC 5987 (value-chars / attr-char only). */
+const rfc5987Encode = (name: string): string =>
+	[...Buffer.from(name, "utf-8")]
+		.map((b) => {
+			const ch = String.fromCharCode(b);
+			return /[A-Za-z0-9!#$&+\-.^_`|~]/.test(ch)
+				? ch
+				: `%${b.toString(16).toUpperCase().padStart(2, "0")}`;
+		})
+		.join("");
+
+/**
+ * Build a Content-Disposition header value that is always a valid ASCII header.
+ * ASCII filenames use the quoted form; names with non-ASCII characters use the
+ * RFC 5987 `filename*=UTF-8''…` extended form so they round-trip without throwing
+ * ERR_INVALID_CHAR when written to the response.
+ */
+const contentDisposition = (fileName: string): string => {
+	if (isAsciiPrintable(fileName)) {
+		const escaped = fileName.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+		return `inline; filename="${escaped}"`;
+	}
+	return `inline; filename*=UTF-8''${rfc5987Encode(fileName)}`;
+};
+
 export const postUpload =
 	(storage: Storage, serverName: string): Handler =>
 	async (req) => {
@@ -77,7 +109,7 @@ export const getDownload =
 
 		const fileName = req.params.fileName ?? metadata.upload_name;
 		if (fileName) {
-			headers["Content-Disposition"] = `inline; filename="${fileName}"`;
+			headers["Content-Disposition"] = contentDisposition(fileName);
 		}
 
 		return { status: 200, body: data, headers };

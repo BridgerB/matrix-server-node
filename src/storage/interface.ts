@@ -82,6 +82,11 @@ export interface Storage {
 
 	// Events
 	storeEvent(event: PDU, eventId: EventId): Promise<void>;
+	/**
+	 * Overwrite the stored JSON of an existing event in place, without changing
+	 * its stream position. Used to persist redactions and other in-place edits.
+	 */
+	updateEvent(eventId: EventId, event: PDU): Promise<void>;
 	getEvent(
 		eventId: EventId,
 	): Promise<{ event: PDU; eventId: EventId } | undefined>;
@@ -184,8 +189,19 @@ export interface Storage {
 		type: string,
 		content: JsonObject,
 	): Promise<void>;
+	/** Remove a global account-data entry (MSC3391). No-op if absent. */
+	deleteGlobalAccountData(userId: UserId, type: string): Promise<void>;
 	getAllGlobalAccountData(
 		userId: UserId,
+	): Promise<{ type: string; content: JsonObject }[]>;
+	/**
+	 * Global account-data entries changed since the given stream position
+	 * (stream_pos > since), INCLUDING MSC3391 deletion tombstones (content `{}`).
+	 * Used by incremental sync.
+	 */
+	getGlobalAccountDataSince(
+		userId: UserId,
+		since: number,
 	): Promise<{ type: string; content: JsonObject }[]>;
 	getRoomAccountData(
 		userId: UserId,
@@ -198,10 +214,25 @@ export interface Storage {
 		type: string,
 		content: JsonObject,
 	): Promise<void>;
+	/** Remove a room account-data entry (MSC3391). No-op if absent. */
+	deleteRoomAccountData(
+		userId: UserId,
+		roomId: RoomId,
+		type: string,
+	): Promise<void>;
 	getAllRoomAccountData(
 		userId: UserId,
 		roomId: RoomId,
 	): Promise<{ type: string; content: JsonObject }[]>;
+	/**
+	 * Room account-data entries changed since the given stream position
+	 * (stream_pos > since), INCLUDING MSC3391 deletion tombstones (content `{}`).
+	 * Used by incremental sync.
+	 */
+	getRoomAccountDataSince(
+		userId: UserId,
+		since: number,
+	): Promise<{ roomId: RoomId; type: string; content: JsonObject }[]>;
 
 	// Typing
 	setTyping(
@@ -219,11 +250,16 @@ export interface Storage {
 		eventId: EventId,
 		receiptType: string,
 		ts: Timestamp,
+		threadId?: string,
 	): Promise<void>;
-	getReceipts(
-		roomId: RoomId,
-	): Promise<
-		{ eventId: EventId; receiptType: string; userId: UserId; ts: Timestamp }[]
+	getReceipts(roomId: RoomId): Promise<
+		{
+			eventId: EventId;
+			receiptType: string;
+			userId: UserId;
+			ts: Timestamp;
+			threadId?: string;
+		}[]
 	>;
 
 	// Presence
@@ -272,6 +308,10 @@ export interface Storage {
 	): Promise<DeviceKeys | undefined>;
 	getAllDeviceKeys(userId: UserId): Promise<Record<DeviceId, DeviceKeys>>;
 
+	// E2EE - Device key change stream
+	recordDeviceKeyChange(userId: UserId): Promise<void>;
+	getChangedDeviceUsers(since: number, until: number): Promise<UserId[]>;
+
 	// E2EE - One-time keys
 	addOneTimeKeys(
 		userId: UserId,
@@ -313,7 +353,9 @@ export interface Storage {
 	storeCrossSigningSignatures(
 		userId: UserId,
 		signatures: Record<string, Record<string, JsonObject>>,
-	): Promise<Record<string, Record<string, { errcode: string; error: string }>>>;
+	): Promise<
+		Record<string, Record<string, { errcode: string; error: string }>>
+	>;
 
 	// E2EE - Key backup
 	createKeyBackupVersion(
@@ -349,10 +391,7 @@ export interface Storage {
 			| KeyBackupData
 			| { sessions: Record<string, KeyBackupData> }
 			| {
-					rooms: Record<
-						RoomId,
-						{ sessions: Record<string, KeyBackupData> }
-					>;
+					rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
 			  },
 	): Promise<{ count: number; etag: string } | undefined>;
 	getKeyBackupKeys(
@@ -364,10 +403,7 @@ export interface Storage {
 		| KeyBackupData
 		| { sessions: Record<string, KeyBackupData> }
 		| {
-				rooms: Record<
-					RoomId,
-					{ sessions: Record<string, KeyBackupData> }
-				>;
+				rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
 		  }
 		| undefined
 	>;
@@ -492,6 +528,7 @@ export interface Storage {
 		from?: string,
 	): Promise<{
 		events: { event: PDU; eventId: EventId; streamPos: number }[];
+		count: number;
 		nextBatch?: string;
 	}>;
 
@@ -527,9 +564,7 @@ export interface Storage {
 			userId?: string;
 		},
 	): Promise<void>;
-	getVerificationSession(
-		sessionId: string,
-	): Promise<
+	getVerificationSession(sessionId: string): Promise<
 		| {
 				medium: string;
 				address: string;
@@ -541,10 +576,7 @@ export interface Storage {
 		  }
 		| undefined
 	>;
-	validateVerificationToken(
-		sessionId: string,
-		token: string,
-	): Promise<boolean>;
+	validateVerificationToken(sessionId: string, token: string): Promise<boolean>;
 
 	// Login tokens (single-use tokens for m.login.token)
 	storeLoginToken(
@@ -564,4 +596,42 @@ export interface Storage {
 		stateEvents: PDU[],
 		authChain: PDU[],
 	): Promise<void>;
+}
+
+/**
+ * Receipt record as returned by {@link Storage.getReceipts}.
+ */
+export interface ReceiptRecord {
+	eventId: EventId;
+	receiptType: string;
+	userId: UserId;
+	ts: Timestamp;
+	threadId?: string;
+}
+
+/**
+ * Apply the MSC4102 read-receipt preference rule.
+ *
+ * Receipts are persisted per (userId, receiptType, threadId) so threaded and
+ * unthreaded receipts coexist in storage. When surfacing receipts to clients
+ * we must collapse to a single record per (userId, receiptType, eventId):
+ * if both an unthreaded receipt and a threaded receipt exist for that triple,
+ * the UNTHREADED one wins (its emitted content carries no `thread_id`).
+ */
+export function collapseReceiptsMsc4102(
+	rows: ReceiptRecord[],
+): ReceiptRecord[] {
+	const byKey = new Map<string, ReceiptRecord>();
+	for (const row of rows) {
+		const key = `${row.userId}\0${row.receiptType}\0${row.eventId}`;
+		const existing = byKey.get(key);
+		// Prefer the unthreaded record; otherwise keep the first seen.
+		if (
+			!existing ||
+			(existing.threadId !== undefined && row.threadId === undefined)
+		) {
+			byKey.set(key, row);
+		}
+	}
+	return [...byKey.values()];
 }

@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import { computeEventId } from "../events.ts";
+import {
+	eventMatchesSearchTerm,
+	paginateSearchMatches,
+} from "../search-match.ts";
 import type {
 	CrossSigningKey,
 	DeviceKeys,
@@ -36,7 +40,13 @@ import {
 	eventToStrippedState,
 	INVITE_STATE_TYPES,
 } from "./ephemeral.ts";
+import { collapseReceiptsMsc4102 } from "./interface.ts";
 import type { Storage, StoredSession } from "./interface.ts";
+
+/** True for an empty JSON object `{}` (MSC3391 account-data tombstone). */
+function isEmptyJsonObject(content: JsonObject): boolean {
+	return Object.keys(content).length === 0;
+}
 
 export class MemoryStorage extends EphemeralMixin implements Storage {
 	private users = new Map<string, UserAccount>();
@@ -56,11 +66,17 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		{ room_id: RoomId; servers: ServerName[]; creator: UserId }
 	>();
 	private publicRooms = new Set<RoomId>();
-	private globalAccountData = new Map<UserId, Map<string, JsonObject>>();
-	private roomAccountDataMap = new Map<string, Map<string, JsonObject>>();
+	private globalAccountData = new Map<
+		UserId,
+		Map<string, { content: JsonObject; streamPos: number }>
+	>();
+	private roomAccountDataMap = new Map<
+		string,
+		Map<string, { content: JsonObject; streamPos: number }>
+	>();
 	private receiptsMap = new Map<
 		RoomId,
-		Map<string, { eventId: EventId; ts: Timestamp }>
+		Map<string, { eventId: EventId; ts: Timestamp; threadId?: string }>
 	>();
 	private mediaStore = new Map<
 		string,
@@ -68,6 +84,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 	>();
 	private filters = new Map<UserId, Map<string, JsonObject>>();
 	private deviceKeysMap = new Map<string, DeviceKeys>();
+	private deviceListStream: { userId: UserId; streamPos: number }[] = [];
 	private oneTimeKeysMap = new Map<string, Map<KeyId, string | OneTimeKey>>();
 	private fallbackKeysMap = new Map<string, Map<KeyId, string | OneTimeKey>>();
 	private crossSigningKeysMap = new Map<
@@ -289,6 +306,10 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			timeline.push({ eventId, streamPos: this.streamCounter });
 		}
 		this.wakeWaiters();
+	}
+
+	async updateEvent(eventId: EventId, event: PDU): Promise<void> {
+		this.events.set(eventId, event);
 	}
 
 	async getEvent(
@@ -588,7 +609,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		userId: UserId,
 		type: string,
 	): Promise<JsonObject | undefined> {
-		return this.globalAccountData.get(userId)?.get(type);
+		return this.globalAccountData.get(userId)?.get(type)?.content;
 	}
 
 	async setGlobalAccountData(
@@ -601,7 +622,8 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			userMap = new Map();
 			this.globalAccountData.set(userId, userMap);
 		}
-		userMap.set(type, content);
+		userMap.set(type, { content, streamPos: ++this.streamCounter });
+		this.wakeWaiters();
 	}
 
 	async getAllGlobalAccountData(
@@ -609,7 +631,22 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 	): Promise<{ type: string; content: JsonObject }[]> {
 		const userMap = this.globalAccountData.get(userId);
 		if (!userMap) return [];
-		return [...userMap.entries()].map(([type, content]) => ({ type, content }));
+		// Exclude MSC3391 deletion tombstones (empty content) from initial sync.
+		return [...userMap.entries()]
+			.filter(([, v]) => !isEmptyJsonObject(v.content))
+			.map(([type, v]) => ({ type, content: v.content }));
+	}
+
+	async getGlobalAccountDataSince(
+		userId: UserId,
+		since: number,
+	): Promise<{ type: string; content: JsonObject }[]> {
+		const userMap = this.globalAccountData.get(userId);
+		if (!userMap) return [];
+		// Include tombstones so incremental sync surfaces deletions.
+		return [...userMap.entries()]
+			.filter(([, v]) => v.streamPos > since)
+			.map(([type, v]) => ({ type, content: v.content }));
 	}
 
 	async getRoomAccountData(
@@ -617,7 +654,8 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		roomId: RoomId,
 		type: string,
 	): Promise<JsonObject | undefined> {
-		return this.roomAccountDataMap.get(`${userId}\0${roomId}`)?.get(type);
+		return this.roomAccountDataMap.get(`${userId}\0${roomId}`)?.get(type)
+			?.content;
 	}
 
 	async setRoomAccountData(
@@ -632,7 +670,33 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			dataMap = new Map();
 			this.roomAccountDataMap.set(key, dataMap);
 		}
-		dataMap.set(type, content);
+		dataMap.set(type, { content, streamPos: ++this.streamCounter });
+		this.wakeWaiters();
+	}
+	async deleteGlobalAccountData(userId: UserId, type: string): Promise<void> {
+		// MSC3391: leave a tombstone (empty content) with a fresh stream position
+		// rather than removing the entry, so incremental sync can surface it.
+		let userMap = this.globalAccountData.get(userId);
+		if (!userMap) {
+			userMap = new Map();
+			this.globalAccountData.set(userId, userMap);
+		}
+		userMap.set(type, { content: {}, streamPos: ++this.streamCounter });
+		this.wakeWaiters();
+	}
+	async deleteRoomAccountData(
+		userId: UserId,
+		roomId: RoomId,
+		type: string,
+	): Promise<void> {
+		const key = `${userId}\0${roomId}`;
+		let dataMap = this.roomAccountDataMap.get(key);
+		if (!dataMap) {
+			dataMap = new Map();
+			this.roomAccountDataMap.set(key, dataMap);
+		}
+		dataMap.set(type, { content: {}, streamPos: ++this.streamCounter });
+		this.wakeWaiters();
 	}
 
 	async getAllRoomAccountData(
@@ -641,7 +705,26 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 	): Promise<{ type: string; content: JsonObject }[]> {
 		const dataMap = this.roomAccountDataMap.get(`${userId}\0${roomId}`);
 		if (!dataMap) return [];
-		return [...dataMap.entries()].map(([type, content]) => ({ type, content }));
+		// Exclude MSC3391 deletion tombstones from initial sync.
+		return [...dataMap.entries()]
+			.filter(([, v]) => !isEmptyJsonObject(v.content))
+			.map(([type, v]) => ({ type, content: v.content }));
+	}
+
+	async getRoomAccountDataSince(
+		userId: UserId,
+		since: number,
+	): Promise<{ roomId: RoomId; type: string; content: JsonObject }[]> {
+		const prefix = `${userId}\0`;
+		const out: { roomId: RoomId; type: string; content: JsonObject }[] = [];
+		for (const [key, dataMap] of this.roomAccountDataMap.entries()) {
+			if (!key.startsWith(prefix)) continue;
+			const roomId = key.slice(prefix.length) as RoomId;
+			for (const [type, v] of dataMap.entries()) {
+				if (v.streamPos > since) out.push({ roomId, type, content: v.content });
+			}
+		}
+		return out;
 	}
 
 	async setReceipt(
@@ -650,27 +733,46 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		eventId: EventId,
 		receiptType: string,
 		ts: Timestamp,
+		threadId?: string,
 	): Promise<void> {
 		let roomReceipts = this.receiptsMap.get(roomId);
 		if (!roomReceipts) {
 			roomReceipts = new Map();
 			this.receiptsMap.set(roomId, roomReceipts);
 		}
-		roomReceipts.set(`${userId}\0${receiptType}`, { eventId, ts });
+		// Key by (userId, receiptType, threadId) so an unthreaded receipt and
+		// receipts in distinct threads coexist as separate entries. Empty string
+		// is the sentinel for "no thread".
+		roomReceipts.set(`${userId}\0${receiptType}\0${threadId ?? ""}`, {
+			eventId,
+			ts,
+			threadId,
+		});
 		this.wakeWaiters();
 	}
 
-	async getReceipts(
-		roomId: RoomId,
-	): Promise<
-		{ eventId: EventId; receiptType: string; userId: UserId; ts: Timestamp }[]
+	async getReceipts(roomId: RoomId): Promise<
+		{
+			eventId: EventId;
+			receiptType: string;
+			userId: UserId;
+			ts: Timestamp;
+			threadId?: string;
+		}[]
 	> {
 		const roomReceipts = this.receiptsMap.get(roomId);
 		if (!roomReceipts) return [];
-		return [...roomReceipts.entries()].map(([key, value]) => {
+		const rows = [...roomReceipts.entries()].map(([key, value]) => {
 			const [userId, receiptType] = key.split("\0") as [UserId, string];
-			return { eventId: value.eventId, receiptType, userId, ts: value.ts };
+			return {
+				eventId: value.eventId,
+				receiptType,
+				userId,
+				ts: value.ts,
+				threadId: value.threadId,
+			};
 		});
+		return collapseReceiptsMsc4102(rows);
 	}
 
 	async storeMedia(media: StoredMedia, data: Buffer): Promise<void> {
@@ -737,6 +839,22 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		keys: DeviceKeys,
 	): Promise<void> {
 		this.deviceKeysMap.set(`${userId}\0${deviceId}`, keys);
+		await this.recordDeviceKeyChange(userId);
+	}
+
+	async recordDeviceKeyChange(userId: UserId): Promise<void> {
+		this.deviceListStream.push({ userId, streamPos: ++this.streamCounter });
+		this.wakeWaiters();
+	}
+
+	async getChangedDeviceUsers(since: number, until: number): Promise<UserId[]> {
+		const seen = new Set<UserId>();
+		for (const entry of this.deviceListStream) {
+			if (entry.streamPos > since && entry.streamPos <= until) {
+				seen.add(entry.userId);
+			}
+		}
+		return [...seen];
 	}
 
 	async getDeviceKeys(
@@ -851,7 +969,8 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 	): Promise<void> {
 		const existing = this.crossSigningKeysMap.get(userId) ?? {};
 		if (keys.master_key) existing.master_key = keys.master_key;
-		if (keys.self_signing_key) existing.self_signing_key = keys.self_signing_key;
+		if (keys.self_signing_key)
+			existing.self_signing_key = keys.self_signing_key;
 		if (keys.user_signing_key)
 			existing.user_signing_key = keys.user_signing_key;
 		this.crossSigningKeysMap.set(userId, existing);
@@ -878,9 +997,8 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		> = {};
 		for (const [targetUserId, keyMap] of Object.entries(signatures)) {
 			for (const [keyId, signedObject] of Object.entries(keyMap)) {
-				const signedSigs = (
-					signedObject as Record<string, unknown>
-				).signatures as Record<string, Record<string, string>> | undefined;
+				const signedSigs = (signedObject as Record<string, unknown>)
+					.signatures as Record<string, Record<string, string>> | undefined;
 				if (!signedSigs) {
 					failures[targetUserId] ??= {};
 					(
@@ -938,9 +1056,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 				}
 
 				// Try updating cross-signing keys
-				const crossKeys = this.crossSigningKeysMap.get(
-					targetUserId as UserId,
-				);
+				const crossKeys = this.crossSigningKeysMap.get(targetUserId as UserId);
 				if (crossKeys) {
 					let matched = false;
 					for (const key of [
@@ -949,7 +1065,11 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 						crossKeys.user_signing_key,
 					]) {
 						if (!key) continue;
-						if (Object.keys(key.keys).some((k) => k === keyId || k.endsWith(`:${keyId}`))) {
+						if (
+							Object.keys(key.keys).some(
+								(k) => k === keyId || k.endsWith(`:${keyId}`),
+							)
+						) {
 							if (!key.signatures) key.signatures = {};
 							for (const [signer, sigs] of Object.entries(signedSigs)) {
 								key.signatures[signer] ??= {};
@@ -1085,10 +1205,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			| KeyBackupData
 			| { sessions: Record<string, KeyBackupData> }
 			| {
-					rooms: Record<
-						RoomId,
-						{ sessions: Record<string, KeyBackupData> }
-					>;
+					rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
 			  },
 	): Promise<{ count: number; etag: string } | undefined> {
 		const versions = this.keyBackupVersions.get(userId);
@@ -1116,10 +1233,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		} else {
 			// All rooms
 			const allKeys = keys as {
-				rooms: Record<
-					RoomId,
-					{ sessions: Record<string, KeyBackupData> }
-				>;
+				rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
 			};
 			for (const [rid, roomData] of Object.entries(allKeys.rooms)) {
 				for (const [sid, data] of Object.entries(roomData.sessions)) {
@@ -1171,10 +1285,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		| KeyBackupData
 		| { sessions: Record<string, KeyBackupData> }
 		| {
-				rooms: Record<
-					RoomId,
-					{ sessions: Record<string, KeyBackupData> }
-				>;
+				rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
 		  }
 		| undefined
 	> {
@@ -1618,41 +1729,21 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		from?: string,
 	): Promise<{
 		events: { event: PDU; eventId: EventId; streamPos: number }[];
+		count: number;
 		nextBatch?: string;
 	}> {
-		const term = searchTerm.toLowerCase();
-		const results: { event: PDU; eventId: EventId; streamPos: number }[] = [];
-		const fromPos = from ? parseInt(from, 10) : undefined;
-
-		const allEntries = roomIds.flatMap((roomId) => {
-			const timeline = this.roomTimeline.get(roomId) ?? [];
-			return fromPos !== undefined
-				? timeline.filter((entry) => entry.streamPos < fromPos)
-				: timeline;
-		});
+		const allEntries = roomIds.flatMap(
+			(roomId) => this.roomTimeline.get(roomId) ?? [],
+		);
 		allEntries.sort((a, b) => b.streamPos - a.streamPos);
 
+		const allMatches: { event: PDU; eventId: EventId; streamPos: number }[] =
+			[];
 		for (const entry of allEntries) {
-			if (results.length >= limit) break;
-
 			const event = this.events.get(entry.eventId);
 			if (!event) continue;
-
-			const content = event.content as Record<string, unknown>;
-			const matched = keys.some((key) => {
-				const field =
-					key === "content.body"
-						? content.body
-						: key === "content.name"
-							? content.name
-							: key === "content.topic"
-								? content.topic
-								: undefined;
-				return typeof field === "string" && field.toLowerCase().includes(term);
-			});
-
-			if (matched) {
-				results.push({
+			if (eventMatchesSearchTerm(event, keys, searchTerm)) {
+				allMatches.push({
 					event,
 					eventId: entry.eventId,
 					streamPos: entry.streamPos,
@@ -1660,12 +1751,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			}
 		}
 
-		const nextBatch =
-			results.length === limit && results.length > 0
-				? String(results[results.length - 1]?.streamPos)
-				: undefined;
-
-		return { events: results, nextBatch };
+		return paginateSearchMatches(allMatches, limit, from);
 	}
 
 	async storeServerKeys(
@@ -1764,9 +1850,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		this.verificationSessions.set(sessionId, { ...data });
 	}
 
-	async getVerificationSession(
-		sessionId: string,
-	): Promise<
+	async getVerificationSession(sessionId: string): Promise<
 		| {
 				medium: string;
 				address: string;

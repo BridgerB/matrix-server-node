@@ -8,7 +8,9 @@ export const getPushers =
 	async (req) => {
 		const userId = req.userId as string;
 		const pushers = await storage.getPushers(userId);
-		return { status: 200, body: { pushers } };
+		// access_token is an internal field and must not be exposed to clients
+		const sanitized = pushers.map(({ access_token: _token, ...rest }) => rest);
+		return { status: 200, body: { pushers: sanitized } };
 	};
 
 export const postPushersSet =
@@ -48,6 +50,7 @@ export const postPushersSet =
 			lang: body.lang,
 			data: body.data,
 			profile_tag: body.profile_tag,
+			access_token: req.accessToken,
 		};
 
 		if (!body.append) {

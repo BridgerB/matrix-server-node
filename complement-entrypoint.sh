@@ -57,6 +57,8 @@ export PORT
 export STORAGE=sqlite
 export DATABASE_PATH=/tmp/matrix.db
 export DISABLE_RATE_LIMIT=1
+# Complement serves previewed pages from private Docker IPs; allow URL-preview fetches.
+export URL_PREVIEW_ALLOW_PRIVATE_IPS=1
 
 # Start the server
 exec node src/index.ts

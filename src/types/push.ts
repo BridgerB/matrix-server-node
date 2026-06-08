@@ -56,6 +56,12 @@ export interface Pusher {
 		brand?: string; // for email
 	};
 	append?: boolean;
+	/**
+	 * Internal: the access token that created this pusher. Used to delete pushers
+	 * belonging to logged-out sessions on password change. Never sent to clients
+	 * (stripped in the GET /pushers handler).
+	 */
+	access_token?: string;
 }
 
 export interface PushNotification {

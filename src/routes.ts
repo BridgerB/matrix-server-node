@@ -16,6 +16,8 @@ import {
 	putAdminSuspend,
 } from "./handlers/admin.ts";
 import {
+	deleteGlobalAccountData,
+	deleteRoomAccountData,
 	deleteTag,
 	getGlobalAccountData,
 	getRoomAccountData,
@@ -631,6 +633,17 @@ export const registerRoutes = (
 		putRoomAccountData(storage),
 		auth,
 	);
+	// MSC3391: account-data deletion (unstable prefix)
+	router.delete(
+		"/_matrix/client/unstable/org.matrix.msc3391/user/:userId/account_data/:type",
+		deleteGlobalAccountData(storage),
+		auth,
+	);
+	router.delete(
+		"/_matrix/client/unstable/org.matrix.msc3391/user/:userId/rooms/:roomId/account_data/:type",
+		deleteRoomAccountData(storage),
+		auth,
+	);
 
 	router.get(
 		"/_matrix/client/v3/user/:userId/rooms/:roomId/tags",
@@ -726,12 +739,12 @@ export const registerRoutes = (
 
 	router.get(
 		"/_matrix/client/v1/media/preview_url",
-		getUrlPreview(),
+		getUrlPreview(storage, serverName),
 		auth,
 	);
 	router.get(
 		"/_matrix/media/v3/preview_url",
-		getUrlPreview(),
+		getUrlPreview(storage, serverName),
 		auth,
 	);
 

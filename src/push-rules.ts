@@ -139,6 +139,19 @@ export const getDefaultRules = (userId: UserId): PushRulesContent => ({
 				],
 				actions: ["notify", { set_tweak: "highlight" }],
 			},
+			{
+				rule_id: ".org.matrix.msc3930.rule.poll_response",
+				default: true,
+				enabled: true,
+				conditions: [
+					{
+						kind: "event_match",
+						key: "type",
+						pattern: "org.matrix.msc3381.poll.response",
+					},
+				],
+				actions: [],
+			},
 		],
 		content: [
 			{
@@ -200,6 +213,60 @@ export const getDefaultRules = (userId: UserId): PushRulesContent => ({
 				enabled: true,
 				conditions: [
 					{ kind: "event_match", key: "type", pattern: "m.room.encrypted" },
+				],
+				actions: ["notify"],
+			},
+			{
+				rule_id: ".org.matrix.msc3930.rule.poll_start_one_to_one",
+				default: true,
+				enabled: true,
+				conditions: [
+					{ kind: "room_member_count", is: "2" },
+					{
+						kind: "event_match",
+						key: "type",
+						pattern: "org.matrix.msc3381.poll.start",
+					},
+				],
+				actions: ["notify", { set_tweak: "sound", value: "default" }],
+			},
+			{
+				rule_id: ".org.matrix.msc3930.rule.poll_start",
+				default: true,
+				enabled: true,
+				conditions: [
+					{
+						kind: "event_match",
+						key: "type",
+						pattern: "org.matrix.msc3381.poll.start",
+					},
+				],
+				actions: ["notify"],
+			},
+			{
+				rule_id: ".org.matrix.msc3930.rule.poll_end_one_to_one",
+				default: true,
+				enabled: true,
+				conditions: [
+					{ kind: "room_member_count", is: "2" },
+					{
+						kind: "event_match",
+						key: "type",
+						pattern: "org.matrix.msc3381.poll.end",
+					},
+				],
+				actions: ["notify", { set_tweak: "sound", value: "default" }],
+			},
+			{
+				rule_id: ".org.matrix.msc3930.rule.poll_end",
+				default: true,
+				enabled: true,
+				conditions: [
+					{
+						kind: "event_match",
+						key: "type",
+						pattern: "org.matrix.msc3381.poll.end",
+					},
 				],
 				actions: ["notify"],
 			},

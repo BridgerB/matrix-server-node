@@ -27,6 +27,18 @@ export const postKeysUpload =
 					"device_keys user_id/device_id must match authenticated user",
 				);
 			}
+			// algorithms, keys and signatures are required fields.
+			if (
+				!Array.isArray(body.device_keys.algorithms) ||
+				typeof body.device_keys.keys !== "object" ||
+				body.device_keys.keys === null ||
+				typeof body.device_keys.signatures !== "object" ||
+				body.device_keys.signatures === null
+			) {
+				throw badJson(
+					"device_keys must include algorithms, keys and signatures",
+				);
+			}
 			await storage.setDeviceKeys(userId, deviceId, body.device_keys);
 		}
 
@@ -47,18 +59,25 @@ export const queryDeviceKeys = async (
 ): Promise<Record<UserId, Record<DeviceId, DeviceKeys>>> => {
 	const deviceKeys: Record<UserId, Record<DeviceId, DeviceKeys>> = {};
 	for (const [targetUserId, deviceIds] of Object.entries(deviceKeysRequest)) {
+		if (!Array.isArray(deviceIds)) {
+			throw badJson(
+				`device_keys for ${targetUserId} must be an array of device IDs`,
+			);
+		}
+		// Every queried user appears in the response, with an empty object when
+		// they have no device keys (spec: "query for user with no keys returns
+		// empty key dict").
 		if (deviceIds.length === 0) {
-			const allKeys = await storage.getAllDeviceKeys(targetUserId as UserId);
-			if (Object.keys(allKeys).length > 0)
-				deviceKeys[targetUserId as UserId] = allKeys;
+			deviceKeys[targetUserId as UserId] = await storage.getAllDeviceKeys(
+				targetUserId as UserId,
+			);
 		} else {
 			const userDeviceKeys: Record<DeviceId, DeviceKeys> = {};
 			for (const did of deviceIds) {
 				const keys = await storage.getDeviceKeys(targetUserId as UserId, did);
 				if (keys) userDeviceKeys[did] = keys;
 			}
-			if (Object.keys(userDeviceKeys).length > 0)
-				deviceKeys[targetUserId as UserId] = userDeviceKeys;
+			deviceKeys[targetUserId as UserId] = userDeviceKeys;
 		}
 	}
 	return deviceKeys;
@@ -201,15 +220,33 @@ export const getKeysChanges =
 	async (req) => {
 		const userId = req.userId as UserId;
 
-		// Get all rooms the requesting user is in
+		// `from` and `to` are sync tokens (stringified stream positions) that
+		// bound the window of interest. The spec requires both.
+		const fromParam = req.query.get("from");
+		const toParam = req.query.get("to");
+		if (fromParam === null) throw badJson("Missing 'from' query parameter");
+		if (toParam === null) throw badJson("Missing 'to' query parameter");
+
+		const from = Number.parseInt(fromParam, 10);
+		const to = Number.parseInt(toParam, 10);
+		if (Number.isNaN(from) || Number.isNaN(to)) {
+			throw badJson("'from' and 'to' must be valid sync tokens");
+		}
+
+		// Query the device-key-change stream for users whose keys changed in
+		// the window (from, to], then keep only those who currently share a
+		// joined room with the requester (excluding the requester themselves).
+		const changedInWindow = new Set<UserId>(
+			await storage.getChangedDeviceUsers(from, to),
+		);
+
 		const roomMemberships =
 			await storage.getRoomsForUserWithMembership(userId);
 		const joinedRoomIds = roomMemberships
 			.filter((r) => r.membership === "join")
 			.map((r) => r.roomId);
 
-		// Collect all users in those rooms who have device keys
-		const changedUsers = new Set<UserId>();
+		const sharedUsers = new Set<UserId>();
 		for (const roomId of joinedRoomIds) {
 			const members = await storage.getMemberEvents(roomId);
 			for (const { event } of members) {
@@ -222,18 +259,17 @@ export const getKeysChanges =
 					membership === "join" &&
 					memberUserId !== userId
 				) {
-					const keys = await storage.getAllDeviceKeys(memberUserId);
-					if (Object.keys(keys).length > 0) {
-						changedUsers.add(memberUserId);
-					}
+					sharedUsers.add(memberUserId);
 				}
 			}
 		}
 
+		const changed = [...changedInWindow].filter((u) => sharedUsers.has(u));
+
 		return {
 			status: 200,
 			body: {
-				changed: [...changedUsers],
+				changed,
 				left: [],
 			},
 		};

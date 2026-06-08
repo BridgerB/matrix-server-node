@@ -42,6 +42,18 @@ export const postChangePassword =
 					await storage.deleteSession(session.access_token);
 				}
 			}
+			// Pushers created by the now-logged-out sessions are removed; the
+			// pusher created with the current access token is retained.
+			const pushers = await storage.getPushers(req.userId as string);
+			for (const pusher of pushers) {
+				if (pusher.access_token && pusher.access_token !== currentToken) {
+					await storage.deletePusher(
+						req.userId as string,
+						pusher.app_id,
+						pusher.pushkey,
+					);
+				}
+			}
 		}
 
 		return { status: 200, body: {} };

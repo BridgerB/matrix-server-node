@@ -6,6 +6,16 @@ import type { JsonObject } from "../types/json.ts";
 
 const FORBIDDEN_TYPES = new Set(["m.fully_read", "m.push_rules"]);
 
+/** True if the parsed body is an empty JSON object `{}`. */
+function isEmptyObject(body: unknown): boolean {
+	return (
+		typeof body === "object" &&
+		body !== null &&
+		!Array.isArray(body) &&
+		Object.keys(body as Record<string, unknown>).length === 0
+	);
+}
+
 export const getGlobalAccountData =
 	(storage: Storage): Handler =>
 	async (req) => {
@@ -15,7 +25,9 @@ export const getGlobalAccountData =
 
 		const type = req.params.type as string;
 		const data = await storage.getGlobalAccountData(userId, type);
-		if (!data) throw notFound("Account data not found");
+		// MSC3391: a deleted entry is stored as an empty-object tombstone; treat it
+		// as absent for GET (404).
+		if (!data || isEmptyObject(data)) throw notFound("Account data not found");
 		return { status: 200, body: data };
 	};
 
@@ -31,7 +43,28 @@ export const putGlobalAccountData =
 			throw badJson(`Cannot set ${type} via this endpoint`);
 
 		const content = req.body as JsonObject;
+		// MSC3391: PUT with an empty content dictionary is equivalent to deleting
+		// the account data type, so a subsequent GET returns 404.
+		if (isEmptyObject(content)) {
+			await storage.deleteGlobalAccountData(userId, type);
+			return { status: 200, body: {} };
+		}
 		await storage.setGlobalAccountData(userId, type, content);
+		return { status: 200, body: {} };
+	};
+
+export const deleteGlobalAccountData =
+	(storage: Storage): Handler =>
+	async (req) => {
+		const userId = req.params.userId as UserId;
+		if (req.userId !== userId)
+			throw forbidden("Cannot delete another user's account data");
+
+		const type = req.params.type as string;
+		if (FORBIDDEN_TYPES.has(type))
+			throw badJson(`Cannot delete ${type} via this endpoint`);
+
+		await storage.deleteGlobalAccountData(userId, type);
 		return { status: 200, body: {} };
 	};
 
@@ -45,7 +78,9 @@ export const getRoomAccountData =
 		const roomId = req.params.roomId as RoomId;
 		const type = req.params.type as string;
 		const data = await storage.getRoomAccountData(userId, roomId, type);
-		if (!data) throw notFound("Account data not found");
+		// MSC3391: a deleted entry is stored as an empty-object tombstone; treat it
+		// as absent for GET (404).
+		if (!data || isEmptyObject(data)) throw notFound("Account data not found");
 		return { status: 200, body: data };
 	};
 
@@ -62,7 +97,33 @@ export const putRoomAccountData =
 			throw badJson(`Cannot set ${type} via this endpoint`);
 
 		const content = req.body as JsonObject;
+		// MSC3391: PUT with an empty content dictionary deletes the account data
+		// type, so a subsequent GET returns 404.
+		if (isEmptyObject(content)) {
+			await storage.deleteRoomAccountData(
+				userId,
+				roomId,
+				type,
+			);
+			return { status: 200, body: {} };
+		}
 		await storage.setRoomAccountData(userId, roomId, type, content);
+		return { status: 200, body: {} };
+	};
+
+export const deleteRoomAccountData =
+	(storage: Storage): Handler =>
+	async (req) => {
+		const userId = req.params.userId as UserId;
+		if (req.userId !== userId)
+			throw forbidden("Cannot delete another user's account data");
+
+		const roomId = req.params.roomId as RoomId;
+		const type = req.params.type as string;
+		if (FORBIDDEN_TYPES.has(type))
+			throw badJson(`Cannot delete ${type} via this endpoint`);
+
+		await storage.deleteRoomAccountData(userId, roomId, type);
 		return { status: 200, body: {} };
 	};
 

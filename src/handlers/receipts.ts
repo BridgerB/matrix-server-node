@@ -9,7 +9,16 @@ export const postReceipt =
 		const receiptType = req.params.receiptType as string;
 		const eventId = req.params.eventId as EventId;
 		const userId = req.userId as string;
+		const threadId = (req.body as { thread_id?: string } | undefined)
+			?.thread_id;
 
-		await storage.setReceipt(roomId, userId, eventId, receiptType, Date.now());
+		await storage.setReceipt(
+			roomId,
+			userId,
+			eventId,
+			receiptType,
+			Date.now(),
+			threadId,
+		);
 		return { status: 200, body: {} };
 	};

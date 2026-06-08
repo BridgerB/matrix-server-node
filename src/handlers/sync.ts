@@ -1,4 +1,5 @@
 import { MatrixError } from "../errors.ts";
+import { matchesRoomEventFilter } from "../event-filter.ts";
 import { pduToClientEvent } from "../events.ts";
 import { getIgnoredUsers } from "../ignored-users.ts";
 import { getIgnoredInviteSenders } from "../ignored-invites.ts";
@@ -7,11 +8,16 @@ import { bundleAggregations } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { ClientEvent, PDU } from "../types/events.ts";
-import type { SyncFilter } from "../types/filters.ts";
-import type { DeviceId, RoomId, UserId } from "../types/index.ts";
+import type {
+	RoomEventFilter,
+	StateFilter,
+	SyncFilter,
+} from "../types/filters.ts";
+import type { DeviceId, EventId, RoomId, UserId } from "../types/index.ts";
 import type { PushRulesContent } from "../types/push.ts";
 import type { RoomPowerLevelsContent } from "../types/state-events.ts";
 import type {
+	DeviceLists,
 	InvitedRoom,
 	JoinedRoom,
 	LeftRoom,
@@ -26,6 +32,9 @@ const MAX_TIMEOUT = 30000;
 interface ResolvedFilter {
 	timelineLimit: number;
 	lazyLoadMembers: boolean;
+	includeLeave: boolean;
+	timelineFilter?: RoomEventFilter;
+	stateFilter?: StateFilter;
 }
 
 const resolveFilter = async (
@@ -36,6 +45,7 @@ const resolveFilter = async (
 	const defaults: ResolvedFilter = {
 		timelineLimit: DEFAULT_TIMELINE_LIMIT,
 		lazyLoadMembers: false,
+		includeLeave: false,
 	};
 	if (filterParam === null) return defaults;
 
@@ -61,7 +71,76 @@ const resolveFilter = async (
 			filter.room?.timeline?.limit ?? DEFAULT_TIMELINE_LIMIT,
 		lazyLoadMembers:
 			filter.room?.state?.lazy_load_members ?? false,
+		includeLeave: filter.room?.include_leave ?? false,
+		timelineFilter: filter.room?.timeline,
+		stateFilter: filter.room?.state,
 	};
+};
+
+/**
+ * Apply a sync timeline filter to a list of timeline events. `limit` is handled
+ * separately by the caller; this only applies type/sender/url predicates.
+ */
+const applyTimelineFilter = (
+	events: ClientEvent[],
+	filter: RoomEventFilter | undefined,
+): ClientEvent[] => {
+	if (!filter) return events;
+	return events.filter((e) => matchesRoomEventFilter(e, filter));
+};
+
+/**
+ * MSC4115: compute the syncing user's membership as of each event in the room.
+ *
+ * Walks the room's full forward-ordered timeline tracking the user's membership.
+ * Returns a map from eventId -> the user's membership "at" that event. For the
+ * user's own membership events, the membership reflects the state *after* the
+ * event is applied (so the user's own join event reports "join"). For all other
+ * events it reflects the membership in effect immediately before the event.
+ *
+ * Defaults to "leave" before the user has any membership in the room.
+ */
+const computeMembershipMap = async (
+	storage: Storage,
+	roomId: RoomId,
+	userId: UserId,
+): Promise<Map<EventId, string>> => {
+	const all = await storage.getEventsByRoom(roomId, 100000, undefined, "f");
+	const map = new Map<EventId, string>();
+	let current = "leave";
+	for (const { event, eventId } of all.events) {
+		if (
+			event.type === "m.room.member" &&
+			event.state_key === userId
+		) {
+			// The user's own membership transition: the new membership applies to
+			// this event and all subsequent events.
+			const membership = (event.content as Record<string, unknown>)
+				.membership;
+			if (typeof membership === "string") current = membership;
+			map.set(eventId, current);
+		} else {
+			map.set(eventId, current);
+		}
+	}
+	return map;
+};
+
+/**
+ * Stamp `unsigned.membership` (MSC4115) onto each client event using a precomputed
+ * membership map. Events not present in the map (should not happen) default to
+ * "leave".
+ */
+const stampMembership = (
+	events: ClientEvent[],
+	membershipMap: Map<EventId, string>,
+): void => {
+	for (const ev of events) {
+		const membership = membershipMap.get(ev.event_id as EventId) ?? "leave";
+		const unsigned = (ev.unsigned ?? {}) as Record<string, unknown>;
+		unsigned.membership = membership;
+		(ev as { unsigned?: unknown }).unsigned = unsigned;
+	}
 };
 
 const collectJoinedUsers = async (
@@ -99,28 +178,44 @@ const buildPresenceEvents = async (
 	return events;
 };
 
+interface ReceiptRecord {
+	eventId: string;
+	receiptType: string;
+	userId: string;
+	ts: number;
+	/**
+	 * MSC4102/threaded receipts: the thread root event ID, or the literal
+	 * "main" for the main timeline. Absent for unthreaded receipts. Storage may
+	 * not yet persist this field (see report), in which case it is undefined and
+	 * the receipt is emitted unthreaded.
+	 */
+	threadId?: string;
+}
+
 const buildReceiptContent = (
-	receipts: {
-		eventId: string;
-		receiptType: string;
-		userId: string;
-		ts: number;
-	}[],
+	receipts: ReceiptRecord[],
 ): Record<string, unknown> => {
 	const content: Record<
 		string,
-		Record<string, Record<string, { ts: number }>>
+		Record<string, Record<string, { ts: number; thread_id?: string }>>
 	> = {};
-	for (const { eventId, receiptType, userId, ts } of receipts) {
+	for (const { eventId, receiptType, userId, ts, threadId } of receipts) {
 		if (!content[eventId]) content[eventId] = {};
 		const eventContent = content[eventId] as Record<
 			string,
-			Record<string, { ts: number }>
+			Record<string, { ts: number; thread_id?: string }>
 		>;
 		if (!eventContent[receiptType]) eventContent[receiptType] = {};
-		(eventContent[receiptType] as Record<string, { ts: number }>)[userId] = {
-			ts,
-		};
+		const receipt: { ts: number; thread_id?: string } = { ts };
+		// Per MSC4102, a threaded receipt carries `thread_id` (a thread root event
+		// ID or "main"); an unthreaded receipt omits it entirely.
+		if (threadId !== undefined) receipt.thread_id = threadId;
+		(
+			eventContent[receiptType] as Record<
+				string,
+				{ ts: number; thread_id?: string }
+			>
+		)[userId] = receipt;
 	}
 	return content;
 };
@@ -237,6 +332,129 @@ const buildRoomSummary = async (
 	};
 };
 
+/**
+ * Build the `rooms.leave` entry for a room the user has left or been banned
+ * from. Archived rooms must only contain history from before the user left,
+ * so we reconstruct the room state as of the user's leave event and only
+ * include timeline events up to (and including) that point.
+ *
+ * Returns undefined when there is nothing to report (e.g. the leave event is
+ * not yet visible, or — for incremental sync — the leave did not happen in
+ * this sync window).
+ */
+const buildLeaveRoom = async (
+	storage: Storage,
+	roomId: RoomId,
+	userId: UserId,
+	filter: ResolvedFilter,
+	/**
+	 * For incremental sync, only emit the room if the user's leave/ban event is
+	 * newer than this stream position. Pass undefined for initial sync.
+	 */
+	since: number | undefined,
+): Promise<LeftRoom | undefined> => {
+	// Pull the full forward-ordered event list for the room. Archived rooms in
+	// this server are small, so reading the whole timeline is acceptable.
+	const all = await storage.getEventsByRoom(roomId, 100000, undefined, "f");
+	const ordered = all.events;
+
+	// Find the user's own leave/ban membership event (the most recent one).
+	let leaveIdx = -1;
+	for (let i = 0; i < ordered.length; i++) {
+		const ev = ordered[i]!.event;
+		if (ev.type === "m.room.member" && ev.state_key === userId) {
+			const membership = (ev.content as Record<string, unknown>).membership;
+			if (membership === "leave" || membership === "ban") {
+				leaveIdx = i;
+			}
+		}
+	}
+	if (leaveIdx === -1) return undefined;
+
+	const leaveEventId = ordered[leaveIdx]!.eventId;
+	// For incremental sync, only report rooms where the leave event is new in
+	// this sync window. getEventsByRoomSince returns events with stream_pos >
+	// since, so if the leave event appears there it happened during the window.
+	let sinceEventIds: Set<EventId> | undefined;
+	if (since !== undefined) {
+		const sinceRes = await storage.getEventsByRoomSince(roomId, since, 100000);
+		sinceEventIds = new Set(sinceRes.events.map((e) => e.eventId));
+		if (!sinceEventIds.has(leaveEventId)) return undefined;
+	}
+
+	// Events up to and including the user's leave.
+	const upToLeave = ordered.slice(0, leaveIdx + 1);
+
+	// Reconstruct state as of the leave point by folding all state events from
+	// the room's history up to the leave.
+	const stateAtLeave = new Map<string, { event: PDU; eventId: EventId }>();
+	for (const entry of upToLeave) {
+		if (entry.event.state_key !== undefined) {
+			const key = `${entry.event.type}\0${entry.event.state_key}`;
+			stateAtLeave.set(key, entry);
+		}
+	}
+
+	// Timeline candidates: events up to the leave. For incremental sync, only
+	// include events that are new in this window (stream_pos > since); for
+	// initial sync, include the whole history up to the leave.
+	const timelineCandidates =
+		sinceEventIds === undefined
+			? upToLeave
+			: upToLeave.filter((e) => sinceEventIds!.has(e.eventId));
+
+	// Timeline: tail of the candidates, limited, then type-filtered.
+	const tail = timelineCandidates.slice(
+		Math.max(0, timelineCandidates.length - filter.timelineLimit),
+	);
+	const limited = timelineCandidates.length > filter.timelineLimit;
+	let timelineClientEvents = tail.map((e) =>
+		pduToClientEvent(e.event, e.eventId),
+	);
+	timelineClientEvents = applyTimelineFilter(
+		timelineClientEvents,
+		filter.timelineFilter,
+	);
+	const timelineIds = new Set(tail.map((e) => e.eventId));
+
+	// State section.
+	//  - Initial sync: the full room state as of the leave point, minus what is
+	//    already in the timeline.
+	//  - Incremental sync: only the state changes within this window (i.e. state
+	//    events newer than `since`) that fell outside the limited timeline. This
+	//    keeps incremental responses to a delta, matching Synapse.
+	const stateCandidates =
+		sinceEventIds === undefined
+			? [...stateAtLeave.values()]
+			: [...stateAtLeave.values()].filter((e) =>
+					sinceEventIds!.has(e.eventId),
+				);
+	let stateEntries = stateCandidates.filter(
+		(e) => !timelineIds.has(e.eventId),
+	);
+	if (filter.stateFilter) {
+		stateEntries = stateEntries.filter((e) =>
+			matchesRoomEventFilter(
+				pduToClientEvent(e.event, e.eventId),
+				filter.stateFilter,
+			),
+		);
+	}
+	const stateClientEvents = stateEntries.map((e) =>
+		pduToClientEvent(e.event, e.eventId),
+	);
+
+	const room: LeftRoom = {
+		state:
+			stateClientEvents.length > 0 ? { events: stateClientEvents } : undefined,
+		timeline: {
+			events: timelineClientEvents,
+			limited: limited || undefined,
+		},
+	};
+	return room;
+};
+
 const buildInitialSync = async (
 	storage: Storage,
 	userId: UserId,
@@ -248,6 +466,7 @@ const buildInitialSync = async (
 
 	const join: Record<RoomId, JoinedRoom> = {};
 	const invite: Record<RoomId, InvitedRoom> = {};
+	const leave: Record<RoomId, LeftRoom> = {};
 	const userRules = await getOrInitRules(storage, userId);
 	const ignoredUsers = await getIgnoredUsers(storage, userId);
 	const ignoredInviteSenders = await getIgnoredInviteSenders(storage, userId);
@@ -302,6 +521,14 @@ const buildInitialSync = async (
 
 			await bundleAggregations(storage, timelineClientEvents, userId);
 
+			// MSC4115: stamp the syncing user's membership onto each timeline event.
+			const membershipMap = await computeMembershipMap(
+				storage,
+				roomId,
+				userId,
+			);
+			stampMembership(timelineClientEvents, membershipMap);
+
 			const totalEvents = await storage.getEventsByRoom(
 				roomId,
 				filter.timelineLimit + 1,
@@ -310,8 +537,14 @@ const buildInitialSync = async (
 			);
 			const limited = totalEvents.events.length > filter.timelineLimit;
 
+			// prev_batch is always present. For a limited timeline it points at the
+			// start of the window (so /messages?dir=b backfills older events); for an
+			// unlimited timeline it is the current stream position, which also serves
+			// as a valid `at` token for GET /members?at=… (state as of this sync).
 			const prevBatch =
-				limited && result.end !== undefined ? String(result.end) : undefined;
+				limited && result.end !== undefined
+					? String(result.end)
+					: String(await storage.getStreamPosition());
 
 			const notifEvents =
 				ignoredUsers.size > 0
@@ -349,6 +582,18 @@ const buildInitialSync = async (
 			const inviter = inviterEvent?.sender as UserId | undefined;
 			if (inviter && (ignoredUsers.has(inviter) || ignoredInviteSenders.has(inviter))) continue;
 			invite[roomId] = { invite_state: { events: stripped } };
+		} else if (
+			(membership === "leave" || membership === "ban") &&
+			filter.includeLeave
+		) {
+			const leftRoom = await buildLeaveRoom(
+				storage,
+				roomId,
+				userId,
+				filter,
+				undefined,
+			);
+			if (leftRoom) leave[roomId] = leftRoom;
 		}
 	}
 
@@ -360,12 +605,13 @@ const buildInitialSync = async (
 	const seenUsers = new Set<UserId>();
 	for (const roomId of Object.keys(join)) {
 		const roomData = await storage.getAllRoomAccountData(userId, roomId);
-		if (roomData.length > 0) {
-			const roomDataEvents = roomData.map(
+		// Always emit account_data.events (even empty) so clients can rely on the
+		// path existing for a joined room.
+		(join[roomId] as JoinedRoom).account_data = {
+			events: roomData.map(
 				(d) => ({ type: d.type, content: d.content }) as unknown as ClientEvent,
-			);
-			(join[roomId] as JoinedRoom).account_data = { events: roomDataEvents };
-		}
+			),
+		};
 
 		(join[roomId] as JoinedRoom).ephemeral = {
 			events: await buildEphemeralEvents(storage, roomId as RoomId, userId),
@@ -394,6 +640,7 @@ const buildInitialSync = async (
 		rooms: {
 			join: Object.keys(join).length > 0 ? join : undefined,
 			invite: Object.keys(invite).length > 0 ? invite : undefined,
+			leave: Object.keys(leave).length > 0 ? leave : undefined,
 		},
 		to_device:
 			toDeviceEvents.length > 0 ? { events: toDeviceEvents } : undefined,
@@ -441,6 +688,16 @@ const buildIncrementalSync = async (
 			}
 
 			await bundleAggregations(storage, timelineClientEvents, userId);
+
+			// MSC4115: stamp the syncing user's membership onto each timeline event.
+			if (timelineClientEvents.length > 0) {
+				const membershipMap = await computeMembershipMap(
+					storage,
+					roomId,
+					userId,
+				);
+				stampMembership(timelineClientEvents, membershipMap);
+			}
 
 			let stateClientEvents: ClientEvent[] = [];
 			if (fullState) {
@@ -541,26 +798,62 @@ const buildIncrementalSync = async (
 				invite[roomId] = { invite_state: { events: stripped } };
 			}
 		} else if (membership === "leave" || membership === "ban") {
-			const { events: newEvents, limited } = await storage.getEventsByRoomSince(
+			// Emit a leave room when the user newly left within this sync window.
+			// buildLeaveRoom only returns a value when the user's leave/ban event
+			// is newer than `since`, which matches the "newly left" semantics —
+			// so this fires for both include_leave filters and the default case.
+			const leftRoom = await buildLeaveRoom(
+				storage,
 				roomId,
+				userId,
+				filter,
 				since,
-				filter.timelineLimit,
 			);
-			const membershipChanged = newEvents.some(
-				(e) => e.event.type === "m.room.member" && e.event.state_key === userId,
-			);
-			if (membershipChanged) {
-				const timelineClientEvents = newEvents.map((e) =>
-					pduToClientEvent(e.event, e.eventId),
-				);
-				leave[roomId] = {
-					timeline: {
-						events: timelineClientEvents,
-						limited: limited || undefined,
-					},
-				};
-			}
+			if (leftRoom) leave[roomId] = leftRoom;
 		}
+	}
+
+	// Account data changed within this sync window. Global entries go to the
+	// top-level account_data; room entries attach to the joined room (creating a
+	// minimal join entry if the room is not otherwise present in this response).
+	// Tombstones (content `{}`, MSC3391 deletions) are included by the *Since
+	// methods so clients can clear deleted account data.
+	const globalAccountDataSince = await storage.getGlobalAccountDataSince(
+		userId,
+		since,
+	);
+	const accountDataEvents = globalAccountDataSince.map(
+		(d) => ({ type: d.type, content: d.content }) as unknown as ClientEvent,
+	);
+
+	const joinedRoomIds = new Set(
+		userRooms
+			.filter((r) => r.membership === "join")
+			.map((r) => r.roomId),
+	);
+	const roomAccountDataSince = await storage.getRoomAccountDataSince(
+		userId,
+		since,
+	);
+	const roomAccountDataByRoom = new Map<RoomId, ClientEvent[]>();
+	for (const d of roomAccountDataSince) {
+		// Only surface room account-data for rooms the user is currently joined to.
+		if (!joinedRoomIds.has(d.roomId)) continue;
+		let list = roomAccountDataByRoom.get(d.roomId);
+		if (!list) {
+			list = [];
+			roomAccountDataByRoom.set(d.roomId, list);
+		}
+		list.push({ type: d.type, content: d.content } as unknown as ClientEvent);
+	}
+	for (const [roomId, events] of roomAccountDataByRoom) {
+		let room = join[roomId];
+		if (!room) {
+			// Room has only account-data changes in this window; still surface it.
+			room = {} as JoinedRoom;
+			join[roomId] = room;
+		}
+		room.account_data = { events };
 	}
 
 	const presenceEvents = await buildPresenceEvents(storage, seenUsers);
@@ -573,8 +866,27 @@ const buildIncrementalSync = async (
 	const otkCounts = await storage.getOneTimeKeyCounts(userId, deviceId);
 	const fallbackKeyTypes = await storage.getFallbackKeyTypes(userId, deviceId);
 
+	// Device-list changes: users whose device keys changed within this window
+	// (since, nextBatch] and who currently share a joined room with the syncer
+	// (excluding the syncer themselves). `seenUsers` holds all users sharing a
+	// joined room with us (it includes self).
+	const changedDeviceUsers = await storage.getChangedDeviceUsers(
+		since,
+		nextBatch,
+	);
+	const changedDeviceLists = changedDeviceUsers.filter(
+		(u) => u !== userId && seenUsers.has(u),
+	);
+	const deviceLists: DeviceLists | undefined =
+		changedDeviceLists.length > 0
+			? { changed: changedDeviceLists, left: [] }
+			: undefined;
+
 	return {
 		next_batch: String(nextBatch),
+		device_lists: deviceLists,
+		account_data:
+			accountDataEvents.length > 0 ? { events: accountDataEvents } : undefined,
 		presence:
 			presenceEvents.length > 0 ? { events: presenceEvents } : undefined,
 		rooms: {
