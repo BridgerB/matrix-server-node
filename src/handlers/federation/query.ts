@@ -1,19 +1,81 @@
-import { notFound } from "../../errors.ts";
+import { invalidParam, missingParam, notFound } from "../../errors.ts";
 import type { Handler } from "../../router.ts";
 import type { Storage } from "../../storage/interface.ts";
 import type { RoomAlias, Timestamp, UserId } from "../../types/index.ts";
 import { buildPublicRoomEntry } from "../directory.ts";
 
+/**
+ * Validates that a string is a well-formed Matrix server name:
+ * a hostname (DNS name, IPv4, or [IPv6]) with an optional numeric port.
+ * Per the spec, a port — if present — must be a decimal number (1-65535).
+ * e.g. "localhost", "example.com:8448" are valid; "localhost:http" is not.
+ */
+function isValidServerName(serverName: string): boolean {
+	if (serverName.length === 0) return false;
+
+	let host = serverName;
+	let port: string | undefined;
+
+	if (serverName.startsWith("[")) {
+		// IPv6 literal: [::1] or [::1]:8448
+		const closeIdx = serverName.indexOf("]");
+		if (closeIdx === -1) return false;
+		host = serverName.slice(1, closeIdx);
+		const rest = serverName.slice(closeIdx + 1);
+		if (rest.length > 0) {
+			if (!rest.startsWith(":")) return false;
+			port = rest.slice(1);
+		}
+		if (host.length === 0) return false;
+	} else {
+		const colonIdx = serverName.lastIndexOf(":");
+		if (colonIdx !== -1) {
+			host = serverName.slice(0, colonIdx);
+			port = serverName.slice(colonIdx + 1);
+		}
+		if (host.length === 0) return false;
+		// Hostname / IPv4: allow letters, digits, '-', '.'
+		if (!/^[a-zA-Z0-9.-]+$/.test(host)) return false;
+	}
+
+	if (port !== undefined) {
+		if (!/^[0-9]+$/.test(port)) return false;
+		const portNum = Number(port);
+		if (portNum < 1 || portNum > 65535) return false;
+	}
+
+	return true;
+}
+
 export const getQueryProfile =
 	(storage: Storage): Handler =>
 	async (req) => {
-		const userId = req.query.get("user_id") as UserId | null;
-		if (!userId) throw notFound("Missing user_id");
+		const userId = req.query.get("user_id");
+		if (!userId)
+			throw missingParam(
+				"The request body did not contain required argument 'user_id'.",
+			);
 
-		const profile = await storage.getProfile(userId);
-		if (!profile) throw notFound("User not found");
+		// User IDs are "@localpart:server_name". Validate the structure and
+		// that the server_name portion is well-formed (e.g. reject non-numeric
+		// ports like "@user:localhost:http").
+		const colonIdx = userId.indexOf(":");
+		if (!userId.startsWith("@") || colonIdx === -1)
+			throw invalidParam(`Invalid user ID: ${userId}`);
+		const serverName = userId.slice(colonIdx + 1);
+		if (!isValidServerName(serverName))
+			throw invalidParam(`Invalid user ID: ${userId}`);
+
+		const profile = await storage.getProfile(userId as UserId);
+		if (!profile)
+			throw notFound("The user does not exist or does not have a profile.");
 
 		const field = req.query.get("field");
+		if (field !== null && field !== "displayname" && field !== "avatar_url")
+			throw invalidParam(
+				"The request body did not contain an allowed value of argument 'field'. Allowed values are either: 'avatar_url', 'displayname'.",
+			);
+
 		if (field === "displayname")
 			return { status: 200, body: { displayname: profile.displayname } };
 		if (field === "avatar_url")

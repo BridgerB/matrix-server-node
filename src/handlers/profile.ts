@@ -1,8 +1,9 @@
 import { badJson, forbidden, notFound } from "../errors.ts";
 import { buildEvent, checkEventAuth, selectAuthEvents } from "../events.ts";
+import type { FederationClient } from "../federation/client.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { UserId } from "../types/index.ts";
+import type { ServerName, UserId } from "../types/index.ts";
 import type { JsonObject } from "../types/json.ts";
 
 const MAX_DISPLAYNAME_BYTES = 256;
@@ -71,9 +72,37 @@ const getExtendedFields = (userId: UserId): Record<string, unknown> => {
 };
 
 export const getProfile =
-	(storage: Storage): Handler =>
+	(
+		storage: Storage,
+		serverName?: string,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const userId = req.params.userId as UserId;
+
+		// Remote user: fetch their profile over federation.
+		const userServer = userId.slice(userId.indexOf(":") + 1);
+		if (serverName && userServer !== serverName && federationClient) {
+			try {
+				const res = await federationClient.request(
+					userServer as ServerName,
+					"GET",
+					`/_matrix/federation/v1/query/profile?user_id=${encodeURIComponent(userId)}`,
+				);
+				if (res.status !== 200) throw notFound("User not found");
+				const p = res.body as {
+					displayname?: string;
+					avatar_url?: string;
+				};
+				return {
+					status: 200,
+					body: { displayname: p.displayname, avatar_url: p.avatar_url },
+				};
+			} catch {
+				throw notFound("User not found");
+			}
+		}
+
 		const profile = await storage.getProfile(userId);
 		if (!profile) throw notFound("User not found");
 		const extended = getExtendedFields(userId);

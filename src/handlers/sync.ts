@@ -7,7 +7,11 @@ import { evaluatePushRules, getOrInitRules } from "../push-rules.ts";
 import { bundleAggregations } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { ClientEvent, PDU } from "../types/events.ts";
+import type {
+	ClientEvent,
+	PDU,
+	StrippedStateEvent,
+} from "../types/events.ts";
 import type {
 	RoomEventFilter,
 	StateFilter,
@@ -20,11 +24,47 @@ import type {
 	DeviceLists,
 	InvitedRoom,
 	JoinedRoom,
+	KnockedRoom,
 	LeftRoom,
 	RoomSummary,
 	SyncResponse,
 	UnreadNotificationCounts,
 } from "../types/sync.ts";
+
+/**
+ * Build the `rooms.knock` entry for a room the user has knocked on. Prefers the
+ * stripped state stashed on the knock event's `unsigned.knock_room_state` (set
+ * for federated knocks); otherwise falls back to the room's stripped state, and
+ * always ensures the knocking user's own member event (carrying the knock
+ * `reason`) is present.
+ */
+const buildKnockRoom = async (
+	storage: Storage,
+	roomId: RoomId,
+	userId: UserId,
+): Promise<KnockedRoom> => {
+	const memberEvt = await storage.getStateEvent(roomId, "m.room.member", userId);
+	const knockRoomState = (
+		memberEvt?.event.unsigned as Record<string, unknown> | undefined
+	)?.knock_room_state as StrippedStateEvent[] | undefined;
+	const events: StrippedStateEvent[] =
+		knockRoomState && knockRoomState.length > 0
+			? [...knockRoomState]
+			: await storage.getStrippedState(roomId);
+	if (
+		memberEvt &&
+		!events.some((e) => e.type === "m.room.member" && e.state_key === userId)
+	) {
+		const pdu = memberEvt.event;
+		events.push({
+			content: pdu.content,
+			sender: pdu.sender,
+			state_key: pdu.state_key ?? userId,
+			type: pdu.type,
+		});
+	}
+	return { knock_state: { events } };
+};
 
 const DEFAULT_TIMELINE_LIMIT = 20;
 const MAX_TIMEOUT = 30000;
@@ -455,23 +495,55 @@ const buildLeaveRoom = async (
 	return room;
 };
 
+/**
+ * MSC4222: attach the `state_after` block (both the stable `state_after` key and
+ * the unstable `org.matrix.msc4222.state_after` key) to a joined-room object, and
+ * blank out the legacy `state` block (MSC4222 replaces it when use_state_after is
+ * set). `JoinedRoom` does not declare these unstable keys, so we cast.
+ */
+const attachStateAfter = (
+	room: JoinedRoom,
+	stateAfterEvents: ClientEvent[],
+): void => {
+	const block = { events: stateAfterEvents };
+	const r = room as JoinedRoom & {
+		state_after?: { events: ClientEvent[] };
+		"org.matrix.msc4222.state_after"?: { events: ClientEvent[] };
+	};
+	// MSC4222 replaces `state` with `state_after`; omit the legacy block.
+	r.state = undefined;
+	r.state_after = block;
+	r["org.matrix.msc4222.state_after"] = block;
+};
+
 const buildInitialSync = async (
 	storage: Storage,
 	userId: UserId,
 	deviceId: DeviceId,
 	nextBatch: number,
 	filter: ResolvedFilter,
+	useStateAfter: boolean,
 ): Promise<SyncResponse> => {
 	const userRooms = await storage.getRoomsForUserWithMembership(userId);
 
 	const join: Record<RoomId, JoinedRoom> = {};
 	const invite: Record<RoomId, InvitedRoom> = {};
+	const knock: Record<RoomId, KnockedRoom> = {};
 	const leave: Record<RoomId, LeftRoom> = {};
 	const userRules = await getOrInitRules(storage, userId);
 	const ignoredUsers = await getIgnoredUsers(storage, userId);
 	const ignoredInviteSenders = await getIgnoredInviteSenders(storage, userId);
 
 	for (const { roomId, membership } of userRooms) {
+		// A forgotten room must not appear in an initial sync at all.
+		const forgottenMarker = await storage.getRoomAccountData(
+			userId,
+			roomId,
+			"m.internal.forgotten",
+		);
+		if ((forgottenMarker as { forgotten?: boolean } | undefined)?.forgotten) {
+			continue;
+		}
 		if (membership === "join") {
 			const result = await storage.getEventsByRoom(
 				roomId,
@@ -571,6 +643,36 @@ const buildInitialSync = async (
 					notifEvents,
 				),
 			};
+
+			if (useStateAfter) {
+				// MSC4222 initial sync: state_after is the full current room state
+				// (the state *after* the returned timeline batch). Unlike the legacy
+				// `state` block, timeline state events are NOT excluded — state_after
+				// must reflect the complete post-timeline state.
+				let stateAfterEntries = allState;
+				if (filter.lazyLoadMembers) {
+					// Keep member events only for senders/targets present in the
+					// timeline (mirrors the lazy-load behaviour of the legacy block).
+					const timelineSenders = new Set<string>();
+					for (const ev of timelineClientEvents) {
+						timelineSenders.add(ev.sender);
+						if (ev.type === "m.room.member" && ev.state_key) {
+							timelineSenders.add(ev.state_key);
+						}
+					}
+					stateAfterEntries = stateAfterEntries.filter(
+						(e) =>
+							e.event.type !== "m.room.member" ||
+							timelineSenders.has(e.event.state_key ?? ""),
+					);
+				}
+				attachStateAfter(
+					join[roomId] as JoinedRoom,
+					stateAfterEntries.map((e) =>
+						pduToClientEvent(e.event, e.eventId),
+					),
+				);
+			}
 		} else if (membership === "invite") {
 			const stripped = await storage.getStrippedState(roomId);
 			const inviterEvent = stripped.find(
@@ -582,6 +684,8 @@ const buildInitialSync = async (
 			const inviter = inviterEvent?.sender as UserId | undefined;
 			if (inviter && (ignoredUsers.has(inviter) || ignoredInviteSenders.has(inviter))) continue;
 			invite[roomId] = { invite_state: { events: stripped } };
+		} else if (membership === "knock") {
+			knock[roomId] = await buildKnockRoom(storage, roomId as RoomId, userId);
 		} else if (
 			(membership === "leave" || membership === "ban") &&
 			filter.includeLeave
@@ -640,6 +744,7 @@ const buildInitialSync = async (
 		rooms: {
 			join: Object.keys(join).length > 0 ? join : undefined,
 			invite: Object.keys(invite).length > 0 ? invite : undefined,
+			knock: Object.keys(knock).length > 0 ? knock : undefined,
 			leave: Object.keys(leave).length > 0 ? leave : undefined,
 		},
 		to_device:
@@ -656,11 +761,13 @@ const buildIncrementalSync = async (
 	nextBatch: number,
 	fullState: boolean,
 	filter: ResolvedFilter,
+	useStateAfter: boolean,
 ): Promise<SyncResponse> => {
 	const userRooms = await storage.getRoomsForUserWithMembership(userId);
 
 	const join: Record<RoomId, JoinedRoom> = {};
 	const invite: Record<RoomId, InvitedRoom> = {};
+	const knock: Record<RoomId, KnockedRoom> = {};
 	const leave: Record<RoomId, LeftRoom> = {};
 	const seenUsers = new Set<UserId>();
 	const userRules = await getOrInitRules(storage, userId);
@@ -772,6 +879,28 @@ const buildIncrementalSync = async (
 						recentEvents,
 					),
 				};
+
+				if (useStateAfter) {
+					// MSC4222 incremental sync: state_after is the set of state events
+					// that changed within this window (since, nextBatch]. Critically,
+					// this INCLUDES state events that also appear in the timeline — e.g.
+					// a delayed state event that fires arrives as a timeline event on the
+					// waking long-poll and must also surface in state_after. We pull the
+					// full window (not just the limited timeline tail) and keep events
+					// carrying a state_key.
+					const windowRes = await storage.getEventsByRoomSince(
+						roomId,
+						since,
+						100000,
+					);
+					const stateDelta = windowRes.events.filter(
+						(e) => e.event.state_key !== undefined,
+					);
+					attachStateAfter(
+						join[roomId] as JoinedRoom,
+						stateDelta.map((e) => pduToClientEvent(e.event, e.eventId)),
+					);
+				}
 			}
 
 			const users = await collectJoinedUsers(storage, roomId);
@@ -796,6 +925,18 @@ const buildIncrementalSync = async (
 				const inviter = inviterEvent?.sender as UserId | undefined;
 				if (inviter && (ignoredUsers.has(inviter) || ignoredInviteSenders.has(inviter))) continue;
 				invite[roomId] = { invite_state: { events: stripped } };
+			}
+		} else if (membership === "knock") {
+			const { events: newEvents } = await storage.getEventsByRoomSince(
+				roomId,
+				since,
+				filter.timelineLimit,
+			);
+			const membershipChanged = newEvents.some(
+				(e) => e.event.type === "m.room.member" && e.event.state_key === userId,
+			);
+			if (membershipChanged) {
+				knock[roomId] = await buildKnockRoom(storage, roomId as RoomId, userId);
 			}
 		} else if (membership === "leave" || membership === "ban") {
 			// Emit a leave room when the user newly left within this sync window.
@@ -892,6 +1033,7 @@ const buildIncrementalSync = async (
 		rooms: {
 			join: Object.keys(join).length > 0 ? join : undefined,
 			invite: Object.keys(invite).length > 0 ? invite : undefined,
+			knock: Object.keys(knock).length > 0 ? knock : undefined,
 			leave: Object.keys(leave).length > 0 ? leave : undefined,
 		},
 		to_device:
@@ -912,7 +1054,24 @@ export const getSync =
 			MAX_TIMEOUT,
 		);
 		const fullState = req.query.get("full_state") === "true";
+		// MSC4222: clients opt in via `use_state_after=true` (stable) or the unstable
+		// `org.matrix.msc4222.use_state_after=true`. When set, joined rooms carry a
+		// `state_after` block (and the unstable key) instead of `state`.
+		const useStateAfter =
+			req.query.get("use_state_after") === "true" ||
+			req.query.get("org.matrix.msc4222.use_state_after") === "true";
 		const filterParam = req.query.get("filter");
+
+		// `set_presence` lets a client set its presence as a side effect of /sync.
+		// Only act when explicitly provided (omitting it must not clobber presence).
+		const setPresence = req.query.get("set_presence");
+		if (
+			setPresence === "online" ||
+			setPresence === "unavailable" ||
+			setPresence === "offline"
+		) {
+			await storage.setPresence(userId, setPresence);
+		}
 
 		// Validate since token
 		if (since !== undefined) {
@@ -933,7 +1092,14 @@ export const getSync =
 
 		const response: SyncResponse =
 			since === undefined
-				? await buildInitialSync(storage, userId, deviceId, nextBatch, filter)
+				? await buildInitialSync(
+						storage,
+						userId,
+						deviceId,
+						nextBatch,
+						filter,
+						useStateAfter,
+					)
 				: await buildIncrementalSync(
 						storage,
 						userId,
@@ -942,6 +1108,7 @@ export const getSync =
 						nextBatch,
 						fullState,
 						filter,
+						useStateAfter,
 					);
 
 		return { status: 200, body: response };

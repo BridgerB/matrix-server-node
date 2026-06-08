@@ -9,8 +9,15 @@ import { verifyOriginSignature } from "../../federation/verify.ts";
 import type { Handler } from "../../router.ts";
 import type { SigningKey } from "../../signing.ts";
 import type { Storage } from "../../storage/interface.ts";
+import type { DeviceKeys } from "../../types/e2ee.ts";
 import type { EDU, PDU } from "../../types/events.ts";
-import type { EventId, RoomId, ServerName, UserId } from "../../types/index.ts";
+import type {
+	DeviceId,
+	EventId,
+	RoomId,
+	ServerName,
+	UserId,
+} from "../../types/index.ts";
 
 const processPdu = async (
 	storage: Storage,
@@ -59,7 +66,7 @@ const processPdu = async (
 const processEdu = async (
 	storage: Storage,
 	edu: EDU,
-	_origin: ServerName,
+	origin: ServerName,
 ): Promise<void> => {
 	const content = edu.content as Record<string, unknown>;
 
@@ -109,6 +116,48 @@ const processEdu = async (
 					}
 				}
 			}
+			break;
+		}
+		case "m.device_list_update": {
+			// A remote server is telling us one of its users' device list
+			// changed. Record the change so local syncers sharing a room with
+			// that user see them in `device_lists.changed`, and cache the
+			// device keys so `/keys/query` returns them without a round-trip.
+			//
+			// Spec content: { user_id, device_id, stream_id, prev_id?,
+			//   deleted?, device_display_name?, keys? }
+			const { user_id, device_id, deleted, keys } = content as {
+				user_id?: UserId;
+				device_id?: DeviceId;
+				stream_id?: number;
+				prev_id?: number[];
+				deleted?: boolean;
+				device_display_name?: string;
+				keys?: DeviceKeys;
+			};
+
+			if (!user_id || !device_id) break;
+
+			// Only trust updates for users that actually live on the origin
+			// server — a server may not speak for users on other servers.
+			const userServer = user_id.split(":").slice(1).join(":");
+			if (userServer !== origin) break;
+
+			if (!deleted && keys) {
+				// Cache the advertised device keys. Normalise the embedded
+				// user_id/device_id to the EDU's authoritative values.
+				await storage.setDeviceKeys(user_id, device_id, {
+					...keys,
+					user_id,
+					device_id,
+				});
+			}
+
+			// Record the change on the device-key-change stream regardless of
+			// whether keys were embedded, so the user shows up in
+			// `device_lists.changed`. (setDeviceKeys also records a change, so
+			// this primarily covers the deleted / keyless case.)
+			await storage.recordDeviceKeyChange(user_id);
 			break;
 		}
 	}

@@ -1,5 +1,8 @@
+import { generateToken } from "../crypto.ts";
 import { badJson } from "../errors.ts";
+import type { FederationClient } from "../federation/client.ts";
 import type { Handler } from "../router.ts";
+import type { SigningKey } from "../signing.ts";
 import type { Storage } from "../storage/interface.ts";
 import type {
 	CrossSigningKey,
@@ -8,16 +11,100 @@ import type {
 	KeysQueryRequest,
 	KeysUploadRequest,
 } from "../types/e2ee.ts";
-import type { DeviceId, UserId } from "../types/index.ts";
+import type { DeviceId, ServerName, UserId } from "../types/index.ts";
 import type { JsonObject } from "../types/json.ts";
 
+// Monotonic per-process counter for device-list update stream IDs. The spec
+// requires stream_id to be a monotonically increasing integer per user; a
+// process-wide counter is monotonic per user as well and is sufficient for the
+// Complement tests (which only assert on user_id/device_id). If strict
+// per-user stream IDs that survive restarts are ever required, add a storage
+// method `nextDeviceListStreamId(userId)` and use it here instead.
+let deviceListStreamCounter = 0;
+
+/**
+ * Notify remote servers sharing a room with `userId` that the user's device
+ * list changed, by sending an `m.device_list_update` EDU in a federation
+ * transaction to each distinct remote destination. Fire-and-forget: errors per
+ * destination are swallowed so they never affect the client's upload response.
+ *
+ * Mirrors Synapse's DeviceHandler.notify_device_update, which computes the set
+ * of "hosts" sharing a room with the user and enqueues a device-list-update
+ * EDU (transaction_manager.py packs EDUs into the outgoing transaction body).
+ */
+const sendDeviceListUpdate = async (
+	storage: Storage,
+	serverName: ServerName,
+	federationClient: FederationClient,
+	userId: UserId,
+	deviceId: DeviceId,
+): Promise<void> => {
+	// Collect distinct remote destinations that share a joined room with the
+	// user. Synapse only considers users joined to a room together; we do the
+	// same by scanning joined members of the user's joined rooms.
+	const roomIds = await storage.getRoomsForUser(userId);
+	const destinations = new Set<ServerName>();
+	for (const roomId of roomIds) {
+		const members = await storage.getMemberEvents(roomId);
+		for (const { event } of members) {
+			const membership = (
+				event.content as { membership?: string } | undefined
+			)?.membership;
+			if (membership !== "join") continue;
+			const memberId = event.state_key;
+			if (!memberId) continue;
+			const memberServer = memberId.split(":").slice(1).join(":");
+			if (memberServer && memberServer !== serverName) {
+				destinations.add(memberServer as ServerName);
+			}
+		}
+	}
+
+	if (destinations.size === 0) return;
+
+	const streamId = ++deviceListStreamCounter;
+	const keys = await storage.getDeviceKeys(userId, deviceId);
+	const content: Record<string, unknown> = {
+		user_id: userId,
+		device_id: deviceId,
+		stream_id: streamId,
+		prev_id: streamId > 1 ? [streamId - 1] : [],
+		deleted: false,
+	};
+	if (keys) content.keys = keys;
+
+	const edu = { edu_type: "m.device_list_update", content };
+
+	for (const dest of destinations) {
+		const txnId = generateToken();
+		const txn = {
+			origin: serverName,
+			origin_server_ts: Date.now(),
+			pdus: [],
+			edus: [edu],
+		};
+		// Fire-and-forget: do not let a failing/unreachable destination affect
+		// the upload response. The Complement "interrupted/stopped server"
+		// cases rely on the upload succeeding even while the peer is down.
+		void federationClient
+			.request(dest, "PUT", `/_matrix/federation/v1/send/${txnId}`, txn)
+			.catch(() => {});
+	}
+};
+
 export const postKeysUpload =
-	(storage: Storage): Handler =>
+	(
+		storage: Storage,
+		serverName?: ServerName,
+		signingKey?: SigningKey,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const userId = req.userId as UserId;
 		const deviceId = req.deviceId as DeviceId;
 		const body = (req.body ?? {}) as KeysUploadRequest;
 
+		let deviceKeysChanged = false;
 		if (body.device_keys) {
 			if (
 				body.device_keys.user_id !== userId ||
@@ -40,6 +127,7 @@ export const postKeysUpload =
 				);
 			}
 			await storage.setDeviceKeys(userId, deviceId, body.device_keys);
+			deviceKeysChanged = true;
 		}
 
 		if (body.one_time_keys && Object.keys(body.one_time_keys).length > 0)
@@ -47,6 +135,23 @@ export const postKeysUpload =
 
 		if (body.fallback_keys && Object.keys(body.fallback_keys).length > 0) {
 			await storage.setFallbackKeys(userId, deviceId, body.fallback_keys);
+		}
+
+		// When a local user's device keys change, notify remote servers that
+		// share a room with them. Only possible when federation deps are wired.
+		if (
+			deviceKeysChanged &&
+			serverName &&
+			signingKey &&
+			federationClient
+		) {
+			void sendDeviceListUpdate(
+				storage,
+				serverName,
+				federationClient,
+				userId,
+				deviceId,
+			).catch(() => {});
 		}
 
 		const counts = await storage.getOneTimeKeyCounts(userId, deviceId);

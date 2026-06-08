@@ -1,5 +1,6 @@
 import {
 	forbidden,
+	MatrixError,
 	notFound,
 	unableToAuthoriseJoin,
 } from "../../errors.ts";
@@ -7,6 +8,8 @@ import {
 	checkEventAuth,
 	computeEventId,
 	getMembership,
+	getPowerLevels,
+	getUserPowerLevel,
 	selectAuthEvents,
 } from "../../events.ts";
 import { isServerAllowedByAcl } from "../../federation/acl.ts";
@@ -16,10 +19,109 @@ import type { Handler } from "../../router.ts";
 import type { SigningKey } from "../../signing.ts";
 import { signEvent } from "../../signing.ts";
 import type { Storage } from "../../storage/interface.ts";
-import type { PDU } from "../../types/events.ts";
-import type { RoomId, ServerName, UserId } from "../../types/index.ts";
+import type { PDU, StrippedStateEvent } from "../../types/events.ts";
+import type { EventId, RoomId, ServerName, UserId } from "../../types/index.ts";
+import type { RoomState } from "../../types/internal.ts";
+import type { RoomVersion } from "../../types/room-versions.ts";
+
+/**
+ * Domain (server name) portion of a Matrix identifier such as a user ID
+ * (`@alice:example.com`) or room ID (`!abc:example.com`) — everything after the
+ * first colon.
+ */
+const domainOf = (id: string): string => {
+	const idx = id.indexOf(":");
+	return idx === -1 ? "" : id.slice(idx + 1);
+};
+
+/**
+ * Coerce an arbitrary value (from request body or event unsigned) into an array
+ * of well-formed stripped state events. Anything malformed is dropped so a bad
+ * `invite_room_state` can never crash the handler.
+ */
+const toStrippedState = (value: unknown): StrippedStateEvent[] => {
+	if (!Array.isArray(value)) return [];
+	const out: StrippedStateEvent[] = [];
+	for (const entry of value) {
+		if (!entry || typeof entry !== "object") continue;
+		const e = entry as Record<string, unknown>;
+		if (typeof e.type !== "string") continue;
+		if (typeof e.sender !== "string") continue;
+		if (typeof e.state_key !== "string") continue;
+		if (!e.content || typeof e.content !== "object") continue;
+		out.push({
+			content: e.content as StrippedStateEvent["content"],
+			sender: e.sender as StrippedStateEvent["sender"],
+			state_key: e.state_key,
+			type: e.type,
+		});
+	}
+	return out;
+};
+
+/**
+ * For a restricted (or knock_restricted) room, find a LOCAL user who is joined
+ * to this room and has permission to issue invites. This user is placed in the
+ * joining member event's `content.join_authorised_via_users_server` so that the
+ * resulting join event passes auth on every server. Returns undefined if no such
+ * local user exists (the caller should then fail the make_join so the requesting
+ * server can fail over to another resident server).
+ */
+const findAuthorisingLocalUser = (
+	room: RoomState,
+	localServerName: string,
+): UserId | undefined => {
+	const pl = getPowerLevels(room);
+	const invitePl = pl.invite ?? 0;
+
+	for (const [key, event] of room.state_events) {
+		if (!key.startsWith("m.room.member\0")) continue;
+		const membership = (event.content as Record<string, unknown>)
+			.membership as string | undefined;
+		if (membership !== "join") continue;
+
+		const memberId = key.slice("m.room.member\0".length) as UserId;
+		// Only local users can authorise a local-style join on this server.
+		const memberServer = memberId.split(":").slice(1).join(":");
+		if (memberServer !== localServerName) continue;
+
+		if (getUserPowerLevel(memberId, room) >= invitePl) {
+			return memberId;
+		}
+	}
+	return undefined;
+};
+
+/**
+ * Determine whether `userId` satisfies a restricted room's allow conditions,
+ * i.e. they are joined to one of the rooms listed under
+ * m.room.join_rules content.allow with type "m.room_membership".
+ */
+const userSatisfiesRestrictedAllow = async (
+	storage: Storage,
+	room: RoomState,
+	userId: UserId,
+): Promise<boolean> => {
+	const joinRulesEvent = room.state_events.get("m.room.join_rules\0");
+	if (!joinRulesEvent) return false;
+	const allow = (joinRulesEvent.content as Record<string, unknown>).allow;
+	if (!Array.isArray(allow)) return false;
+
+	for (const entry of allow) {
+		if (!entry || typeof entry !== "object") continue;
+		const e = entry as Record<string, unknown>;
+		if (e.type !== "m.room_membership") continue;
+		const allowedRoomId = e.room_id;
+		if (typeof allowedRoomId !== "string") continue;
+
+		const allowedRoom = await storage.getRoom(allowedRoomId as RoomId);
+		if (!allowedRoom) continue;
+		if (getMembership(allowedRoom, userId) === "join") return true;
+	}
+	return false;
+};
 export const getMakeJoin =
-	(storage: Storage, _serverName: string): Handler =>
+	(storage: Storage, serverName: string): Handler =>
 	async (req) => {
 		const roomId = req.params.roomId as RoomId;
 		const userId = req.params.userId as UserId;
@@ -45,14 +147,49 @@ export const getMakeJoin =
 		const currentMembership = getMembership(room, userId);
 		if (currentMembership === "ban") throw forbidden("User is banned");
 
-		if (joinRule !== "public" && currentMembership !== "invite")
-			throw unableToAuthoriseJoin("Room is not public and user is not invited");
+		const content: Record<string, unknown> = { membership: "join" };
+
+		const isRestricted =
+			joinRule === "restricted" || joinRule === "knock_restricted";
+
+		if (joinRule !== "public" && currentMembership !== "invite") {
+			// A rejoin (already joined) is always allowed for any join rule.
+			if (currentMembership !== "join") {
+				if (isRestricted) {
+					// The user must be a member of one of the allowed rooms.
+					const satisfies = await userSatisfiesRestrictedAllow(
+						storage,
+						room,
+						userId,
+					);
+					if (!satisfies) {
+						throw unableToAuthoriseJoin(
+							"User is not a member of any room in the allow list",
+						);
+					}
+					// We must vouch for the join via a local user who can invite.
+					// If we have no such local user, fail so the requesting server
+					// can fail over to another resident server.
+					const authoriser = findAuthorisingLocalUser(room, serverName);
+					if (!authoriser) {
+						throw unableToAuthoriseJoin(
+							"No local user able to authorise this join",
+						);
+					}
+					content.join_authorised_via_users_server = authoriser;
+				} else {
+					throw unableToAuthoriseJoin(
+						"Room is not public and user is not invited",
+					);
+				}
+			}
+		}
 
 		const authEvents = selectAuthEvents("m.room.member", userId, room, userId);
 
 		const template: Partial<PDU> = {
 			auth_events: authEvents,
-			content: { membership: "join" },
+			content: content as PDU["content"],
 			depth: room.depth,
 			origin_server_ts: Date.now(),
 			prev_events: [...room.forward_extremities],
@@ -85,20 +222,90 @@ export const putSendJoin =
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
 
-		await verifyOriginSignature(event, origin, storage, federationClient);
+		// The join event must carry the room_id so it can be stored and so that
+		// auth/state computations work consistently. v12 templates already include
+		// room_id (we put it there in make_join); but be defensive for any client.
+		if (!event.room_id) {
+			(event as unknown as Record<string, unknown>).room_id = roomId;
+		}
 
-		const eventId = computeEventId(event);
+		if (event.type !== "m.room.member") {
+			throw new MatrixError(
+				"M_BAD_JSON",
+				"send_join event must be an m.room.member event",
+				400,
+			);
+		}
+		if ((event.content as Record<string, unknown>)?.membership !== "join") {
+			throw new MatrixError(
+				"M_BAD_JSON",
+				"send_join event must have membership 'join'",
+				400,
+			);
+		}
+
+		try {
+			await verifyOriginSignature(event, origin, storage, federationClient);
+		} catch (err) {
+			if (err instanceof MatrixError) throw err;
+			throw forbidden(
+				`Could not verify join event signature: ${(err as Error).message}`,
+			);
+		}
+
+		let eventId: EventId;
+		try {
+			eventId = computeEventId(event);
+		} catch (err) {
+			throw new MatrixError(
+				"M_BAD_JSON",
+				`Could not compute event ID: ${(err as Error).message}`,
+				400,
+			);
+		}
+
+		// Auth check. For restricted joins, checkMembershipAuth verifies the
+		// join_authorised_via_users_server user is a joined member here.
 		checkEventAuth(event, eventId, room);
 
-		const coSigned = signEvent(event, serverName as ServerName, signingKey);
+		let coSigned: PDU;
+		try {
+			coSigned = signEvent(event, serverName as ServerName, signingKey);
+		} catch (err) {
+			throw new MatrixError(
+				"M_UNKNOWN",
+				`Could not sign join event: ${(err as Error).message}`,
+				500,
+			);
+		}
+
 		await storage.setStateEvent(roomId, coSigned, eventId);
 		room.depth = Math.max(room.depth, event.depth + 1);
 		room.forward_extremities = [eventId];
 
-		const stateEvents = [...room.state_events.values()];
+		// Ensure every state event we return carries room_id (v12 create events
+		// derive their room_id from the hash and may lack it in the stored body).
+		const stateEvents = [...room.state_events.values()].map((se) =>
+			se.room_id ? se : ({ ...se, room_id: roomId } as PDU),
+		);
 		const authEventIds = stateEvents.flatMap((se) => se.auth_events);
-		const authChain = await storage.getAuthChain(authEventIds);
-		const servers = await storage.getServersInRoom(roomId);
+
+		let authChain: PDU[];
+		try {
+			authChain = await storage.getAuthChain(authEventIds);
+		} catch {
+			authChain = [];
+		}
+		authChain = authChain.map((ae) =>
+			ae.room_id ? ae : ({ ...ae, room_id: roomId } as PDU),
+		);
+
+		let servers: ServerName[];
+		try {
+			servers = await storage.getServersInRoom(roomId);
+		} catch {
+			servers = [serverName as ServerName];
+		}
 
 		return {
 			status: 200,
@@ -184,32 +391,98 @@ export const putFederationInvite =
 	async (req) => {
 		const body = req.body as {
 			room_version?: string;
-			event: PDU;
+			event?: PDU;
 			invite_room_state?: unknown[];
 		};
 
-		const { event } = body;
+		const event = body.event;
 		const origin = req.origin as string;
 
-		const targetServer = (event.state_key as string)
-			.split(":")
-			.slice(1)
-			.join(":");
+		// Structural validation, mirroring synapse on_invite_request /
+		// FederationHandler.on_invite_request: the body must carry an
+		// m.room.member invite event with a state key for a local user, sent by
+		// the requesting (origin) server.
+		if (!event || typeof event !== "object") {
+			throw new MatrixError("M_BAD_JSON", "Missing invite event", 400);
+		}
+		if (typeof event.state_key !== "string") {
+			throw new MatrixError(
+				"M_BAD_JSON",
+				"The invite event did not have a state key",
+				400,
+			);
+		}
+		if (event.type !== "m.room.member") {
+			throw new MatrixError(
+				"M_BAD_JSON",
+				"The event was not an m.room.member invite event",
+				400,
+			);
+		}
+		if ((event.content as Record<string, unknown>)?.membership !== "invite") {
+			throw new MatrixError(
+				"M_BAD_JSON",
+				"The event was not an m.room.member invite event",
+				400,
+			);
+		}
+
+		const targetServer = domainOf(event.state_key);
 		if (targetServer !== serverName)
 			throw forbidden("Invited user is not on this server");
 
 		await verifyOriginSignature(event, origin, storage, federationClient);
 
+		// Co-sign the invite so the inviting server (and the invitee's client)
+		// have our signature vouching that the invite was received here.
 		const coSigned = signEvent(event, serverName as ServerName, signingKey);
 		const eventId = computeEventId(coSigned);
 
+		// The inviting server provides stripped room state so the invitee can see
+		// room metadata (name, join_rules, ...) before joining. It may be sent
+		// either as a top-level `invite_room_state` field or inside the event's
+		// `unsigned.invite_room_state` (synapse uses the latter). Stash it on the
+		// stored event's unsigned and seed the room's state from it so /sync's
+		// invite_state and GET .../state both reflect it.
+		const unsigned = (coSigned.unsigned ?? {}) as Record<string, unknown>;
+		const strippedState = toStrippedState(
+			body.invite_room_state ?? unsigned.invite_room_state,
+		);
+		unsigned.invite_room_state = strippedState;
+		coSigned.unsigned = unsigned as PDU["unsigned"];
+
 		const room = await storage.getRoom(event.room_id);
 		if (!room) {
+			// We are not resident in this room. Seed a minimal room from the
+			// stripped state (create/join_rules/name/...) plus the invite member
+			// event, so getStrippedState() returns full invite metadata and the
+			// invitee's membership resolves to "invite".
+			const seedState: PDU[] = [];
+			for (const s of strippedState) {
+				// Skip a stray member event for the invitee — the authoritative,
+				// co-signed invite member event is appended last below.
+				if (s.type === "m.room.member" && s.state_key === event.state_key)
+					continue;
+				seedState.push({
+					auth_events: [],
+					content: s.content,
+					depth: 0,
+					hashes: { sha256: "" },
+					origin_server_ts: event.origin_server_ts,
+					prev_events: [],
+					room_id: event.room_id,
+					sender: s.sender as PDU["sender"],
+					signatures: {},
+					state_key: s.state_key,
+					type: s.type,
+				} as PDU);
+			}
+			seedState.push(coSigned);
+
 			await storage.importRoomState(
 				event.room_id,
-				(body.room_version ??
-					"10") as import("../../types/room-versions.ts").RoomVersion,
-				[coSigned],
+				(body.room_version ?? "10") as RoomVersion,
+				seedState,
 				[],
 			);
 		} else {
@@ -228,6 +501,12 @@ export const getMakeKnock =
 	async (req) => {
 		const roomId = req.params.roomId as RoomId;
 		const userId = req.params.userId as UserId;
+
+		// The knocking user must belong to the requesting (verified) origin server
+		// (synapse on_make_knock_request).
+		const userServer = userId.split(":").slice(1).join(":");
+		if (userServer !== req.origin)
+			throw forbidden("User does not belong to the requesting server");
 
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
@@ -249,6 +528,10 @@ export const getMakeKnock =
 
 		const currentMembership = getMembership(room, userId);
 		if (currentMembership === "ban") throw forbidden("User is banned");
+		if (currentMembership === "join")
+			throw forbidden("User is already in the room");
+		if (currentMembership === "invite")
+			throw forbidden("User is already invited to the room");
 
 		if (joinRule !== "knock" && joinRule !== "knock_restricted")
 			throw forbidden("Room does not support knocking");
@@ -297,8 +580,44 @@ export const putSendKnock =
 		const event = req.body as PDU;
 		const origin = req.origin as string;
 
+		// Structural validation, mirroring synapse _on_send_membership_event:
+		// the body must be a knock m.room.member *state* event whose room_id
+		// matches the request path. (TestCannotSendNonKnockViaSendKnock.)
+		if (!event || typeof event !== "object") {
+			throw new MatrixError("M_BAD_JSON", "Missing knock event", 400);
+		}
+		if (event.room_id && event.room_id !== roomId) {
+			throw new MatrixError(
+				"M_BAD_JSON",
+				"Room ID in body does not match that in request path",
+				400,
+			);
+		}
+		if (event.type !== "m.room.member" || typeof event.state_key !== "string") {
+			throw new MatrixError("M_BAD_JSON", "Not an m.room.member event", 400);
+		}
+		if ((event.content as Record<string, unknown>)?.membership !== "knock") {
+			throw new MatrixError("M_BAD_JSON", "Not a knock event", 400);
+		}
+
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
+
+		if (!event.room_id) {
+			(event as unknown as Record<string, unknown>).room_id = roomId;
+		}
+
+		// The knocking room version must actually support knocking.
+		const joinRulesEvent = room.state_events.get("m.room.join_rules\0");
+		const joinRule = joinRulesEvent
+			? ((joinRulesEvent.content as Record<string, unknown>).join_rule as string)
+			: "invite";
+		if (joinRule !== "knock" && joinRule !== "knock_restricted") {
+			throw forbidden("Room does not support knocking");
+		}
+
+		if (!isServerAllowedByAcl(origin as ServerName, room))
+			throw forbidden("Server is denied by ACL");
 
 		await verifyOriginSignature(event, origin, storage, federationClient);
 
@@ -309,6 +628,9 @@ export const putSendKnock =
 		room.depth = Math.max(room.depth, event.depth + 1);
 		room.forward_extremities = [eventId];
 
+		// Reply with stripped room state so the knocking server's clients can
+		// display room metadata while the knock is pending (synapse
+		// on_send_knock_request).
 		const strippedState = await storage.getStrippedState(roomId);
 
 		return {

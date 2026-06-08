@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
-import { forbidden, notJoined, roomNotFound } from "./errors.ts";
+import { badJson, forbidden, notJoined, roomNotFound } from "./errors.ts";
+import type { FederationClient } from "./federation/client.ts";
+import { fanoutEvent } from "./federation/outbound.ts";
 import type { SigningKey } from "./signing.ts";
 import { signEvent } from "./signing.ts";
 import type { Storage } from "./storage/interface.ts";
@@ -14,6 +16,41 @@ export const isRoomVersion12Plus = (roomVersion: string | undefined): boolean =>
 	if (!roomVersion) return false;
 	const num = parseInt(roomVersion, 10);
 	return !isNaN(num) && num >= 12;
+};
+
+/**
+ * MSC3757 (owned state events).
+ *
+ * Opt-in is gated on the room version. The MSC's unstable room version is
+ * `org.matrix.msc3757.<base version>` (the Complement test uses
+ * `org.matrix.msc3757.10`). This mirrors Synapse's `msc3757_enabled` flag on
+ * its `MSC3757v10` room version. Stable numeric versions (e.g. "10") do NOT
+ * opt in, so `TestWithoutOwnedState` still enforces normal power levels and the
+ * "cannot set others' state" restriction without the bypass.
+ */
+const isMsc3757Enabled = (roomVersion: string | undefined): boolean =>
+	roomVersion?.startsWith("org.matrix.msc3757.") ?? false;
+
+// Synapse VALID_HOST_REGEX: \A[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*\Z
+const VALID_HOST_REGEX = /^[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*$/;
+
+/**
+ * Validate that `s` is a syntactically valid user ID (`@localpart:server`),
+ * matching the subset of Synapse's `UserID.is_valid` relevant to MSC3757 owned
+ * state-key parsing. Returns false for things like `@oops` (no colon) or a
+ * server part with invalid characters (e.g. `hs1@state`).
+ */
+const isValidUserId = (s: string): boolean => {
+	if (s.length < 1 || s[0] !== "@") return false;
+	const colon = s.indexOf(":");
+	if (colon === -1) return false;
+	const domain = s.slice(colon + 1);
+	// Strip optional :port (server names may include a port).
+	const portIdx = domain.lastIndexOf(":");
+	const host = portIdx === -1 ? domain : domain.slice(0, portIdx);
+	// IPv6 literals are wrapped in [...]; accept them as-is.
+	if (host.length > 0 && host[host.length - 1] === "]") return true;
+	return VALID_HOST_REGEX.test(host);
 };
 export const canonicalJson = (val: unknown): string => {
 	if (val === null || val === undefined) return "null";
@@ -427,9 +464,7 @@ const checkMembershipAuth = (event: PDU, roomState: RoomState): void => {
 			if (senderMembership === "join") {
 				throw forbidden("User is already in the room");
 			}
-			if (senderMembership === "knock") {
-				throw forbidden("User is already knocking");
-			}
+			// A re-knock (knock -> knock) is permitted by the spec.
 			if (senderMembership === "invite") {
 				throw forbidden("User is already invited");
 			}
@@ -612,6 +647,52 @@ export const checkEventAuth = (
 			`Insufficient power level: need ${requiredPl}, have ${senderPl}`,
 		);
 	}
+
+	// MSC3757 owned state events.
+	//
+	// A state event whose state_key starts with "@" and is NOT exactly the
+	// sender's own user ID is normally only writable by anyone (subject to the
+	// power-level check above). Both with and without MSC3757, a state_key that
+	// looks like *another* user's ID is write-protected here; MSC3757 only
+	// changes *who* may write it.
+	//
+	// Mirrors Synapse `_can_send_event` (event_auth.py): the owner of a state
+	// key (whose state_key equals their user ID, or starts with their user ID
+	// followed by "_") may set it, and so may anyone with strictly higher power
+	// level than that owner. Without MSC3757 enabled, no one may set state keyed
+	// by another user ID (normal power levels still apply, so this is a stricter
+	// gate, never a looser one).
+	const stateKey = event.state_key;
+	if (stateKey !== undefined && stateKey.startsWith("@") && stateKey !== event.sender) {
+		if (isMsc3757Enabled(roomState.room_version)) {
+			// Parse the owning user ID out of the state key: it is the state key
+			// up to (but excluding) the first "_" that appears after the domain's
+			// leading colon, or the whole state key if there is no such "_".
+			const colonIdx = stateKey.indexOf(":", 1);
+			if (colonIdx === -1) {
+				throw badJson(
+					"State key neither equals a valid user ID, nor starts with one plus an underscore",
+				);
+			}
+			const suffixIdx = stateKey.indexOf("_", colonIdx + 1);
+			const stateKeyUserId =
+				suffixIdx === -1 ? stateKey : stateKey.slice(0, suffixIdx);
+			if (!isValidUserId(stateKeyUserId)) {
+				throw badJson(
+					"State key neither equals a valid user ID, nor starts with one plus an underscore",
+				);
+			}
+			// Allowed if the sender owns the state key, or has strictly higher
+			// power level than the owner.
+			if (
+				stateKeyUserId === event.sender ||
+				senderPl > getUserPowerLevel(stateKeyUserId as UserId, roomState)
+			) {
+				return;
+			}
+		}
+		throw forbidden("You are not allowed to set others' state");
+	}
 };
 export const pduToClientEvent = (pdu: PDU, eventId: EventId): ClientEvent => {
 	const ce: ClientEvent = {
@@ -709,8 +790,15 @@ export const sendStateEvent = async (
 	type: string,
 	stateKey: string,
 	content: JsonObject,
+	signingKey?: SigningKey,
+	federationClient?: FederationClient,
 ): Promise<string> => {
 	const authEvents = selectAuthEvents(type, stateKey, ctx.roomState, sender);
+	// When a signing key is supplied the event is signed by our server. Signing
+	// is additive: it injects `signatures` (and recomputes `hashes`) but does NOT
+	// change the event ID, which is derived from the redacted form (signatures and
+	// unsigned are stripped before hashing). This keeps event IDs stable whether
+	// or not federation is active.
 	const { event, eventId } = buildEvent({
 		roomId: ctx.roomState.room_id,
 		sender,
@@ -721,6 +809,7 @@ export const sendStateEvent = async (
 		prevEvents: ctx.prevEvents,
 		authEvents,
 		serverName,
+		signingKey,
 	});
 
 	checkEventAuth(event, eventId, ctx.roomState);
@@ -730,6 +819,21 @@ export const sendStateEvent = async (
 	ctx.prevEvents = [eventId];
 	ctx.roomState.depth = ctx.depth;
 	ctx.roomState.forward_extremities = [eventId];
+
+	// Fan the (signed) event out to remote servers in the room. Best-effort and
+	// fire-and-forget; only happens when both a signing key and federation client
+	// are available (i.e. federation is enabled and the event is signed).
+	if (signingKey && federationClient) {
+		await fanoutEvent(
+			storage,
+			serverName,
+			signingKey,
+			federationClient,
+			ctx.roomState.room_id as RoomId,
+			event,
+			eventId,
+		);
+	}
 
 	return eventId;
 };

@@ -1,10 +1,13 @@
 import { badJson, forbidden, notFound } from "../errors.ts";
 import {
+	buildEvent,
+	checkEventAuth,
 	countJoinedMembers,
 	getMembership,
 	getStateContent,
 	getUserPowerLevel,
 	requireJoinedRoom,
+	selectAuthEvents,
 } from "../events.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
@@ -12,7 +15,8 @@ import type {
 	PublicRoomEntry,
 	PublicRoomsResponse,
 } from "../types/directory.ts";
-import type { RoomAlias, RoomId } from "../types/index.ts";
+import type { RoomAlias, RoomId, UserId } from "../types/index.ts";
+import type { JsonObject } from "../types/json.ts";
 
 const MAX_PUBLIC_ROOMS = 100;
 
@@ -172,18 +176,20 @@ export const putDirectoryRoom =
 	};
 
 export const deleteDirectoryRoom =
-	(storage: Storage, _serverName: string): Handler =>
+	(storage: Storage, serverName: string): Handler =>
 	async (req) => {
 		const roomAlias = req.params.roomAlias as RoomAlias;
+		const userId = req.userId as UserId;
 
 		const result = await storage.getRoomByAlias(roomAlias);
 		if (!result) throw notFound("Room alias not found");
 
+		const room = await storage.getRoom(result.room_id);
+
 		const creator = await storage.getAliasCreator(roomAlias);
-		if (creator !== req.userId) {
-			const room = await storage.getRoom(result.room_id);
+		if (creator !== userId) {
 			if (room) {
-				const userPl = getUserPowerLevel(req.userId as string, room);
+				const userPl = getUserPowerLevel(userId, room);
 				const requiredPl = 50; // PL for m.room.canonical_alias
 				if (userPl < requiredPl) {
 					throw forbidden(
@@ -196,6 +202,70 @@ export const deleteDirectoryRoom =
 		}
 
 		await storage.deleteRoomAlias(roomAlias);
+
+		// If this alias was referenced by the room's m.room.canonical_alias state
+		// event (as `alias` or within `alt_aliases`), emit an updated
+		// m.room.canonical_alias event with the deleted alias removed. This keeps
+		// canonical alias state consistent (and is observable via /sync).
+		if (room) {
+			const canonical = room.state_events.get("m.room.canonical_alias\0");
+			if (canonical) {
+				const content = (canonical.content ?? {}) as {
+					alias?: string;
+					alt_aliases?: string[];
+				};
+				const referencesAlias =
+					content.alias === roomAlias ||
+					(Array.isArray(content.alt_aliases) &&
+						content.alt_aliases.includes(roomAlias));
+
+				// Only the room creator/admins (those who can send the canonical
+				// alias state event) should trigger the state update. If the
+				// remover lacks the power level to send it, leave the stale state
+				// untouched rather than failing the deletion.
+				if (referencesAlias) {
+					const newContent: JsonObject = {};
+					if (content.alias && content.alias !== roomAlias) {
+						newContent.alias = content.alias;
+					}
+					if (Array.isArray(content.alt_aliases)) {
+						const altAliases = content.alt_aliases.filter(
+							(a) => a !== roomAlias,
+						);
+						if (altAliases.length > 0) newContent.alt_aliases = altAliases;
+					}
+
+					const authEvents = selectAuthEvents(
+						"m.room.canonical_alias",
+						"",
+						room,
+						userId,
+					);
+					const { event, eventId } = buildEvent({
+						roomId: result.room_id,
+						sender: userId,
+						type: "m.room.canonical_alias",
+						content: newContent,
+						stateKey: "",
+						depth: room.depth + 1,
+						prevEvents: [...room.forward_extremities],
+						authEvents,
+						serverName,
+					});
+
+					try {
+						checkEventAuth(event, eventId, room);
+						await storage.setStateEvent(result.room_id, event, eventId);
+						room.depth += 1;
+						room.forward_extremities = [eventId];
+					} catch {
+						// Sender lacks power level to update canonical alias; the alias
+						// is still deleted, but the stale state event remains.
+					}
+				}
+			}
+		}
+
 		return { status: 200, body: {} };
 	};
 
