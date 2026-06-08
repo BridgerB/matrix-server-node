@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { SigningKey } from "../signing.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { PDU } from "../types/events.ts";
+import type { EDU, PDU } from "../types/events.ts";
 import type { RoomId, ServerName } from "../types/index.ts";
 import type { FederationClient } from "./client.ts";
 
@@ -29,6 +29,94 @@ import type { FederationClient } from "./client.ts";
 
 /** Generate an opaque transaction ID for an outbound federation transaction. */
 const newTxnId = (): string => randomBytes(16).toString("base64url");
+
+/**
+ * Collect the distinct remote servers (excluding our own) that are resident in
+ * any of the supplied rooms. Lookup failures for an individual room are
+ * swallowed (logged) so a single bad room never aborts EDU fanout for the rest.
+ */
+const collectRemoteServers = async (
+	storage: Storage,
+	serverName: string,
+	roomIds: RoomId[],
+): Promise<ServerName[]> => {
+	const destinations = new Set<ServerName>();
+	for (const roomId of roomIds) {
+		let servers: ServerName[];
+		try {
+			servers = await storage.getServersInRoom(roomId);
+		} catch (err) {
+			console.error(
+				`fanoutEdu: failed to resolve servers in room ${roomId}:`,
+				(err as Error).message,
+			);
+			continue;
+		}
+		for (const s of servers) {
+			if (s && s !== serverName) destinations.add(s as ServerName);
+		}
+	}
+	return [...destinations];
+};
+
+/**
+ * Send a single Ephemeral Data Unit (typing/presence/etc.) to every remote
+ * server resident in any of the given rooms (excluding our own server). Unlike
+ * PDUs, EDUs are not signed individually — only the wrapping X-Matrix request is
+ * signed (handled by FederationClient). Per-destination delivery is
+ * fire-and-forget: each PUT is launched without awaiting, and any error is
+ * caught and logged but never propagated. The function only awaits the (local)
+ * lookup of resident servers.
+ *
+ * EDUs are best-effort and inherently transient — a destination that is offline
+ * simply misses this typing/presence update, which is acceptable (the next
+ * update supersedes it). There is no queue or retry, matching `fanoutEvent`.
+ */
+export const fanoutEdu = async (
+	storage: Storage,
+	serverName: string,
+	_signingKey: SigningKey,
+	federationClient: FederationClient,
+	roomIds: RoomId | RoomId[],
+	edu: EDU,
+): Promise<void> => {
+	const rooms = Array.isArray(roomIds) ? roomIds : [roomIds];
+	const destinations = await collectRemoteServers(storage, serverName, rooms);
+	if (destinations.length === 0) return;
+
+	for (const destination of destinations) {
+		const txnId = newTxnId();
+		const body = {
+			origin: serverName,
+			origin_server_ts: Date.now(),
+			pdus: [],
+			edus: [edu],
+		};
+
+		// Fire-and-forget: do not await, and never let a per-destination failure
+		// escape. A failed delivery just means that server misses this EDU.
+		void federationClient
+			.request(
+				destination,
+				"PUT",
+				`/_matrix/federation/v1/send/${encodeURIComponent(txnId)}`,
+				body,
+			)
+			.then((resp) => {
+				if (resp.status >= 400) {
+					console.error(
+						`fanoutEdu: ${destination} rejected ${edu.edu_type} EDU (status ${resp.status})`,
+					);
+				}
+			})
+			.catch((err) => {
+				console.error(
+					`fanoutEdu: delivery of ${edu.edu_type} EDU to ${destination} failed:`,
+					(err as Error).message,
+				);
+			});
+	}
+};
 
 /**
  * Send a single already-signed event to every remote server resident in the

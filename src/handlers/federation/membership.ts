@@ -35,6 +35,62 @@ const domainOf = (id: string): string => {
 };
 
 /**
+ * Strict structural validation shared by send_join / send_leave / send_knock,
+ * mirroring synapse's `_on_send_membership_event` and dendrite's
+ * federationapi/routing/{join,leave}.go. The body must be a complete
+ * m.room.member *state* event whose:
+ *   - room_id matches the room_id in the request path,
+ *   - type is m.room.member with a state_key present,
+ *   - content.membership equals the membership expected by the endpoint,
+ *   - state_key matches the sender (a membership event only ever affects its
+ *     own sender's membership).
+ *
+ * Any failure raises a 400 M_BAD_JSON. This is what the Complement tests
+ * TestCannotSendNon{Join,Leave,Knock}Via* assert: regular events, non-state
+ * membership events, wrong membership types and mismatched state keys must all
+ * be rejected with 400 before any auth/storage work happens.
+ */
+const validateMembershipEvent = (
+	event: PDU,
+	roomId: RoomId,
+	expectedMembership: string,
+): void => {
+	if (!event || typeof event !== "object") {
+		throw new MatrixError("M_BAD_JSON", "Missing membership event", 400);
+	}
+	if (event.room_id && event.room_id !== roomId) {
+		throw new MatrixError(
+			"M_BAD_JSON",
+			"Room ID in body does not match that in request path",
+			400,
+		);
+	}
+	if (event.type !== "m.room.member" || typeof event.state_key !== "string") {
+		throw new MatrixError("M_BAD_JSON", "Not an m.room.member event", 400);
+	}
+	if (
+		(event.content as Record<string, unknown>)?.membership !==
+		expectedMembership
+	) {
+		throw new MatrixError(
+			"M_BAD_JSON",
+			`Not a ${expectedMembership} event`,
+			400,
+		);
+	}
+	// A membership event must target its own sender (state_key === sender).
+	// dendrite: "Event state key must match the event sender." This is what
+	// rejects the "mismatched state key" Complement case.
+	if (event.state_key !== event.sender) {
+		throw new MatrixError(
+			"M_BAD_JSON",
+			"Event state key must match the event sender",
+			400,
+		);
+	}
+};
+
+/**
  * Coerce an arbitrary value (from request body or event unsigned) into an array
  * of well-formed stripped state events. Anything malformed is dropped so a bad
  * `invite_room_state` can never crash the handler.
@@ -219,6 +275,11 @@ export const putSendJoin =
 		const event = req.body as PDU;
 		const origin = req.origin as string;
 
+		// Strict structural validation before touching storage/auth: must be a
+		// join m.room.member state event whose room_id matches the path and whose
+		// state_key matches its sender. (TestCannotSendNonJoinViaSendJoinV1/V2.)
+		validateMembershipEvent(event, roomId, "join");
+
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
 
@@ -227,21 +288,6 @@ export const putSendJoin =
 		// room_id (we put it there in make_join); but be defensive for any client.
 		if (!event.room_id) {
 			(event as unknown as Record<string, unknown>).room_id = roomId;
-		}
-
-		if (event.type !== "m.room.member") {
-			throw new MatrixError(
-				"M_BAD_JSON",
-				"send_join event must be an m.room.member event",
-				400,
-			);
-		}
-		if ((event.content as Record<string, unknown>)?.membership !== "join") {
-			throw new MatrixError(
-				"M_BAD_JSON",
-				"send_join event must have membership 'join'",
-				400,
-			);
 		}
 
 		try {
@@ -307,17 +353,23 @@ export const putSendJoin =
 			servers = [serverName as ServerName];
 		}
 
-		return {
-			status: 200,
-			body: {
-				origin: serverName,
-				auth_chain: authChain,
-				state: stateEvents,
-				event: coSigned,
-				servers_in_room: servers,
-				members_omitted: false,
-			},
+		const responseBody = {
+			origin: serverName,
+			auth_chain: authChain,
+			state: stateEvents,
+			event: coSigned,
+			servers_in_room: servers,
+			members_omitted: false,
 		};
+
+		// The v1 send_join endpoint wraps the response in a [200, {...}] array
+		// envelope, whereas v2 returns the bare object. Detect which variant was
+		// invoked from the request path.
+		if (req.path.includes("/_matrix/federation/v1/send_join/")) {
+			return { status: 200, body: [200, responseBody] };
+		}
+
+		return { status: 200, body: responseBody };
 	};
 export const getMakeLeave =
 	(storage: Storage, _serverName: string): Handler =>
@@ -367,8 +419,17 @@ export const putSendLeave =
 		const event = req.body as PDU;
 		const origin = req.origin as string;
 
+		// Strict structural validation: must be a leave m.room.member state event
+		// whose room_id matches the path and whose state_key matches its sender.
+		// (TestCannotSendNonLeaveViaSendLeaveV1/V2.)
+		validateMembershipEvent(event, roomId, "leave");
+
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
+
+		if (!event.room_id) {
+			(event as unknown as Record<string, unknown>).room_id = roomId;
+		}
 
 		await verifyOriginSignature(event, origin, storage, federationClient);
 
@@ -378,6 +439,12 @@ export const putSendLeave =
 		await storage.setStateEvent(roomId, event, eventId);
 		room.depth = Math.max(room.depth, event.depth + 1);
 		room.forward_extremities = [eventId];
+
+		// v1 send_leave wraps the (empty) response in a [200, {}] array envelope;
+		// v2 returns the bare object.
+		if (req.path.includes("/_matrix/federation/v1/send_leave/")) {
+			return { status: 200, body: [200, {}] };
+		}
 
 		return { status: 200, body: {} };
 	};
@@ -580,25 +647,14 @@ export const putSendKnock =
 		const event = req.body as PDU;
 		const origin = req.origin as string;
 
-		// Structural validation, mirroring synapse _on_send_membership_event:
+		// Strict structural validation, mirroring synapse _on_send_membership_event:
 		// the body must be a knock m.room.member *state* event whose room_id
-		// matches the request path. (TestCannotSendNonKnockViaSendKnock.)
-		if (!event || typeof event !== "object") {
-			throw new MatrixError("M_BAD_JSON", "Missing knock event", 400);
-		}
-		if (event.room_id && event.room_id !== roomId) {
-			throw new MatrixError(
-				"M_BAD_JSON",
-				"Room ID in body does not match that in request path",
-				400,
-			);
-		}
-		if (event.type !== "m.room.member" || typeof event.state_key !== "string") {
-			throw new MatrixError("M_BAD_JSON", "Not an m.room.member event", 400);
-		}
-		if ((event.content as Record<string, unknown>)?.membership !== "knock") {
-			throw new MatrixError("M_BAD_JSON", "Not a knock event", 400);
-		}
+		// matches the request path, whose membership is "knock" and whose
+		// state_key matches its sender. This runs before the join_rule/ACL checks
+		// so wrong-type or wrong-membership events are rejected with 400 even in
+		// rooms that don't support knocking. (TestCannotSendNonKnockViaSendKnock,
+		// TestCannotSendKnockViaSendKnockInMSC3787Room.)
+		validateMembershipEvent(event, roomId, "knock");
 
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");

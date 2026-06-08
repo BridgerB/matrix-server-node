@@ -19,6 +19,7 @@ import {
 	isRoomVersion12Plus,
 	selectAuthEvents,
 	sendStateEvent,
+	validateAdditionalCreators,
 } from "../events.ts";
 import type { FederationClient } from "../federation/client.ts";
 import { fanoutEvent } from "../federation/outbound.ts";
@@ -205,19 +206,29 @@ export const postCreateRoom =
 		}
 
 		if (v12Plus) {
-			// Validate additional_creators
-			const additionalCreators = createContent.additional_creators as
-				| string[]
-				| undefined;
-			if (additionalCreators) {
-				for (const uid of additionalCreators) {
-					if (
-						typeof uid !== "string" ||
-						!uid.startsWith("@") ||
-						!uid.includes(":")
-					) {
-						throw badJson(`Invalid user ID in additional_creators: ${uid}`);
+			// MSC4289: validate `additional_creators` (check_valid_additional_creators)
+			// BEFORE a room is created, so malformed values 400 early. We reuse the
+			// exact validation exported from events.ts.
+			if (createContent.additional_creators !== undefined) {
+				validateAdditionalCreators(createContent.additional_creators);
+			}
+
+			// MSC4289: in v12+ the `trusted_private_chat` preset makes the invited
+			// users room creators rather than PL100 admins. They are merged (and
+			// deduped) into the create event's `additional_creators` alongside any
+			// explicitly-supplied ones, instead of being written to
+			// power_levels.users.
+			if (preset === "trusted_private_chat" && body.invite) {
+				const existing = (createContent.additional_creators ??
+					[]) as string[];
+				const merged = [...existing];
+				for (const invitee of body.invite) {
+					if (invitee !== userId && !merged.includes(invitee)) {
+						merged.push(invitee);
 					}
+				}
+				if (merged.length > 0) {
+					createContent.additional_creators = merged;
 				}
 			}
 
@@ -321,31 +332,21 @@ export const postCreateRoom =
 				};
 		if (preset === "trusted_private_chat" && body.invite) {
 			for (const invitee of body.invite) {
-				// In v12+, don't add room creators to users field
-				if (v12Plus) {
-					const additionalCreators = (createContent.additional_creators ??
-						[]) as string[];
-					if (invitee === userId || additionalCreators.includes(invitee))
-						continue;
-				}
+				// MSC4289: in v12+ trusted_private_chat invitees are room creators
+				// (added to create.content.additional_creators above), so they must
+				// NOT appear in power_levels.users. For pre-v12 rooms they remain
+				// PL100 admins as before.
+				if (v12Plus) continue;
 				(plContent.users as Record<string, number>)[invitee] = 100;
 			}
 		}
 		if (body.power_level_content_override) {
-			// In v12+, strip room creators from the override users field
-			if (v12Plus && body.power_level_content_override.users) {
-				const overrideUsers = { ...body.power_level_content_override.users };
-				delete overrideUsers[userId as string];
-				const additionalCreators = (createContent.additional_creators ??
-					[]) as string[];
-				for (const uid of additionalCreators) {
-					delete overrideUsers[uid as string];
-				}
-				body.power_level_content_override = {
-					...body.power_level_content_override,
-					users: overrideUsers,
-				};
-			}
+			// MSC4289: do NOT strip the creator / additional_creators from the
+			// override's users map. For v12 rooms creators must not appear in
+			// power_levels.users, so passing them through lets checkEventAuth (in
+			// events.ts) reject the power_levels event with a 400
+			// ("power_level_content_override cannot set the room creator"). Non-creator
+			// overrides flow through unchanged.
 			Object.assign(plContent, body.power_level_content_override);
 		}
 		await sendStateEvent(

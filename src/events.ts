@@ -11,6 +11,23 @@ import type { RoomState } from "./types/internal.ts";
 import type { JsonObject } from "./types/json.ts";
 import type { RoomPowerLevelsContent } from "./types/state-events.ts";
 
+/**
+ * MSC4289: power level assigned to room creators. Matches Synapse's
+ * `CREATOR_POWER_LEVEL = 2**53`, which is strictly greater than the largest
+ * value representable in canonical JSON (`2**53 - 1`). This guarantees creators
+ * outrank every settable power level, so non-creators can never kick/ban/demote
+ * them, while creators can act on anyone.
+ */
+export const CREATOR_POWER_LEVEL = 2 ** 53;
+
+/**
+ * Largest/smallest integers representable in canonical JSON (Synapse's
+ * `CANONICALJSON_MAX_INT`/`CANONICALJSON_MIN_INT`, i.e. `±(2**53 - 1)`).
+ * Power-level values outside this range are rejected.
+ */
+const CANONICALJSON_MAX_INT = 2 ** 53 - 1;
+const CANONICALJSON_MIN_INT = -(2 ** 53 - 1);
+
 /** Check whether a room version is v12 or later */
 export const isRoomVersion12Plus = (roomVersion: string | undefined): boolean => {
 	if (!roomVersion) return false;
@@ -52,6 +69,32 @@ const isValidUserId = (s: string): boolean => {
 	if (host.length > 0 && host[host.length - 1] === "]") return true;
 	return VALID_HOST_REGEX.test(host);
 };
+/**
+ * MSC4289 `check_valid_additional_creators`. The `additional_creators` field of
+ * an `m.room.create` event (and the `/upgrade` request) must be an array of
+ * syntactically valid user-ID strings, each at most 255 bytes. Mismatches raise
+ * `M_BAD_JSON` (HTTP 400), matching Synapse's `AuthError(400, ...)`.
+ *
+ * Exported so the createRoom / upgrade handlers can reuse the exact same
+ * validation before building the create event.
+ */
+export const validateAdditionalCreators = (value: unknown): void => {
+	if (!Array.isArray(value)) {
+		throw badJson("additional_creators must be an array");
+	}
+	for (const entry of value) {
+		if (typeof entry !== "string") {
+			throw badJson("entry in additional_creators is not a string");
+		}
+		if (!isValidUserId(entry)) {
+			throw badJson("entry in additional_creators is not a valid user ID");
+		}
+		if (entry.length > 255 || Buffer.byteLength(entry, "utf-8") > 255) {
+			throw badJson("entry in additional_creators too long");
+		}
+	}
+};
+
 export const canonicalJson = (val: unknown): string => {
 	if (val === null || val === undefined) return "null";
 	if (typeof val === "boolean") return val ? "true" : "false";
@@ -115,8 +158,15 @@ const ALLOWED_CONTENT_KEYS: Record<string, Set<string>> = {
 };
 
 export const redactEvent = (event: PDU): PDU => {
+	// MSC4291: v12 create events have no room_id of their own, so it is not an
+	// allowed redaction key for them (mirrors Synapse's prune_event, which drops
+	// "room_id" from allowed_keys when msc4291_room_ids_as_hashes is set). This
+	// keeps both the reference hash (event ID) and the signed form room_id-free.
+	const stripRoomId = isV12CreateEvent(event);
+
 	const redacted: Record<string, unknown> = {};
 	for (const key of ALLOWED_TOP_LEVEL) {
+		if (key === "room_id" && stripRoomId) continue;
 		if (key in event) {
 			redacted[key] = (event as unknown as Record<string, unknown>)[key];
 		}
@@ -133,12 +183,32 @@ export const redactEvent = (event: PDU): PDU => {
 
 	return redacted as unknown as PDU;
 };
+/**
+ * MSC4291: in room version 12+ the `m.room.create` event has no `room_id` of its
+ * own — the room ID *is* the create event's reference hash, so including a
+ * `room_id` field while hashing would be circular. Synapse handles this by never
+ * putting a `room_id` on v12 create events. We allow the stored PDU to carry a
+ * `room_id` (so CS-API responses can expose it), but strip it before computing
+ * the content hash / reference hash so the create event's ID matches the room ID.
+ *
+ * Detection uses the event itself: a `m.room.create` whose `content.room_version`
+ * is 12+. This keeps `computeContentHash`/`computeEventId` self-contained.
+ */
+const isV12CreateEvent = (event: { type: string; content: unknown }): boolean =>
+	event.type === "m.room.create" &&
+	isRoomVersion12Plus(
+		(event.content as Record<string, unknown> | undefined)?.room_version as
+			| string
+			| undefined,
+	);
+
 export const computeContentHash = (event: PDU): string => {
 	const copy: Record<string, unknown> = { ...event };
 	delete copy.unsigned;
 	delete copy.signatures;
 	delete copy.hashes;
 	delete copy.event_id;
+	if (isV12CreateEvent(event)) delete copy.room_id;
 	return createHash("sha256").update(canonicalJson(copy)).digest("base64url");
 };
 
@@ -148,6 +218,8 @@ export const computeEventId = (event: PDU): EventId => {
 		hashes: { sha256: computeContentHash(event) },
 	};
 
+	// redactEvent already drops room_id for v12 create events (MSC4291), so the
+	// create event's reference hash — and therefore its ID — equals the room ID.
 	const redacted = redactEvent(withHash);
 	const forRef: Record<string, unknown> = { ...redacted };
 	delete forRef.unsigned;
@@ -287,9 +359,9 @@ export const getUserPowerLevel = (
 	userId: UserId,
 	roomState: RoomState,
 ): number => {
-	// In room version 12+, room creators have infinite power level
+	// In room version 12+, room creators have infinite power level (MSC4289).
 	if (isRoomVersion12Plus(roomState.room_version) && isRoomCreator(userId, roomState)) {
-		return Number.MAX_SAFE_INTEGER;
+		return CREATOR_POWER_LEVEL;
 	}
 
 	const plEvent = roomState.state_events.get("m.room.power_levels\0");
@@ -490,6 +562,27 @@ const checkMembershipAuth = (event: PDU, roomState: RoomState): void => {
 	}
 };
 
+/**
+ * Validate a single power-level value: in room version 10+ it must be an
+ * integer, and (matching Synapse's event validator / `CANONICALJSON_MAX_INT`)
+ * it must fall within the range representable in canonical JSON, i.e.
+ * `±(2**53 - 1)`. A value such as `2**53` is rejected. The error is `M_BAD_JSON`
+ * so the CS API returns HTTP 400.
+ */
+const validatePowerLevelValue = (label: string, val: unknown): void => {
+	if (typeof val !== "number") return;
+	if (!Number.isInteger(val)) {
+		throw badJson(
+			`Power level value for ${label} must be an integer in room version 10+`,
+		);
+	}
+	if (val > CANONICALJSON_MAX_INT || val < CANONICALJSON_MIN_INT) {
+		throw badJson(
+			`Power level value for ${label} is out of range for canonical JSON`,
+		);
+	}
+};
+
 const validateIntegerPowerLevels = (event: PDU): void => {
 	const content = event.content as Record<string, unknown>;
 	const intFields = [
@@ -502,43 +595,15 @@ const validateIntegerPowerLevels = (event: PDU): void => {
 		"users_default",
 	];
 	for (const field of intFields) {
-		if (field in content && typeof content[field] === "number") {
-			if (!Number.isInteger(content[field])) {
-				throw forbidden(
-					`Power level value for '${field}' must be an integer in room version 10+`,
-				);
-			}
+		if (field in content) {
+			validatePowerLevelValue(`'${field}'`, content[field]);
 		}
 	}
-	const events = content.events as Record<string, number> | undefined;
-	if (events && typeof events === "object") {
-		for (const [key, val] of Object.entries(events)) {
-			if (typeof val === "number" && !Number.isInteger(val)) {
-				throw forbidden(
-					`Power level value for event '${key}' must be an integer in room version 10+`,
-				);
-			}
-		}
-	}
-	const users = content.users as Record<string, number> | undefined;
-	if (users && typeof users === "object") {
-		for (const [key, val] of Object.entries(users)) {
-			if (typeof val === "number" && !Number.isInteger(val)) {
-				throw forbidden(
-					`Power level value for user '${key}' must be an integer in room version 10+`,
-				);
-			}
-		}
-	}
-	const notifications = content.notifications as
-		| Record<string, number>
-		| undefined;
-	if (notifications && typeof notifications === "object") {
-		for (const [key, val] of Object.entries(notifications)) {
-			if (typeof val === "number" && !Number.isInteger(val)) {
-				throw forbidden(
-					`Power level value for notification '${key}' must be an integer in room version 10+`,
-				);
+	for (const mapField of ["events", "users", "notifications"] as const) {
+		const map = content[mapField] as Record<string, unknown> | undefined;
+		if (map && typeof map === "object") {
+			for (const [key, val] of Object.entries(map)) {
+				validatePowerLevelValue(`${mapField} entry '${key}'`, val);
 			}
 		}
 	}
@@ -553,7 +618,9 @@ export const checkEventAuth = (
 
 	if (event.type === "m.room.create") {
 		if (roomState.state_events.size > 0) {
-			throw forbidden("m.room.create can only be the first event");
+			// A second m.room.create can never be sent into an existing room
+			// (MSC4291 / event auth rule 1). Clients receive HTTP 400.
+			throw badJson("m.room.create can only be the first event in a room");
 		}
 		// In v12, the create event must NOT have a room_id in the event body
 		// (it's derived from the hash). However, we still store room_id on the PDU
@@ -563,16 +630,12 @@ export const checkEventAuth = (
 				"m.room.create must not have auth_events in room version 12+",
 			);
 		}
-		// Validate additional_creators are valid user IDs
+		// Validate additional_creators (MSC4289 check_valid_additional_creators).
 		if (isV12Plus) {
 			const additionalCreators = (event.content as Record<string, unknown>)
-				.additional_creators as string[] | undefined;
-			if (additionalCreators) {
-				for (const uid of additionalCreators) {
-					if (typeof uid !== "string" || !uid.startsWith("@") || !uid.includes(":")) {
-						throw forbidden(`Invalid user ID in additional_creators: ${uid}`);
-					}
-				}
+				.additional_creators;
+			if (additionalCreators !== undefined) {
+				validateAdditionalCreators(additionalCreators);
 			}
 		}
 		return;
@@ -608,7 +671,9 @@ export const checkEventAuth = (
 		if (!isNaN(versionNum) && versionNum >= 10) {
 			validateIntegerPowerLevels(event);
 		}
-		// In v12, room creators must not appear in the users field
+		// MSC4289: in v12+ the room creator(s) hold an implicit infinite power
+		// level and must NOT be listed in the power_levels `users` map. Synapse
+		// rejects this with SynapseError(400, ...), so we use badJson (HTTP 400).
 		if (isV12Plus) {
 			const users = (event.content as Record<string, unknown>).users as
 				| Record<string, number>
@@ -621,15 +686,15 @@ export const checkEventAuth = (
 						createEvent.content as Record<string, unknown>
 					).additional_creators as string[] | undefined;
 					if (creator in users) {
-						throw forbidden(
-							"Room creators cannot appear in power_levels users field in room version 12+",
+						throw badJson(
+							`Creator user ${creator} must not appear in content.users`,
 						);
 					}
 					if (additionalCreators) {
 						for (const uid of additionalCreators) {
 							if (uid in users) {
-								throw forbidden(
-									"Room creators cannot appear in power_levels users field in room version 12+",
+								throw badJson(
+									"Additional creators users must not appear in content.users",
 								);
 							}
 						}

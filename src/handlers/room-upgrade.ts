@@ -11,6 +11,7 @@ import {
 	requireJoinedRoom,
 	selectAuthEvents,
 	sendStateEvent,
+	validateAdditionalCreators,
 } from "../events.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
@@ -39,7 +40,10 @@ export const postRoomUpgrade =
 	async (req) => {
 		const oldRoomId = req.params.roomId as RoomId;
 		const userId = req.userId as string;
-		const body = (req.body ?? {}) as { new_version?: string };
+		const body = (req.body ?? {}) as {
+			new_version?: string;
+			additional_creators?: unknown;
+		};
 
 		if (!body.new_version) throw badJson("Missing new_version");
 
@@ -65,13 +69,28 @@ export const postRoomUpgrade =
 			? computeEventId(lastCreateEvent)
 			: ("" as EventId);
 
-		const newCreateContent = {
+		const newCreateContent: JsonObject = {
 			room_version: body.new_version,
 			predecessor: {
 				room_id: oldRoomId,
 				event_id: lastCreateEventId,
 			},
 		};
+
+		// MSC4289: an upgrade to v12+ may carry `additional_creators` in the request
+		// body. These users become room creators in the replacement room. Validate
+		// them with the same rules as createRoom and copy them onto the new create
+		// event. (Pre-v12 target rooms have no concept of additional creators, so we
+		// ignore the field there.)
+		const newCreators = new Set<string>([userId]);
+		if (v12Plus && body.additional_creators !== undefined) {
+			validateAdditionalCreators(body.additional_creators);
+			const additionalCreators = body.additional_creators as string[];
+			if (additionalCreators.length > 0) {
+				newCreateContent.additional_creators = [...additionalCreators];
+				for (const c of additionalCreators) newCreators.add(c);
+			}
+		}
 
 		let newRoomId: RoomId;
 		if (v12Plus) {
@@ -135,6 +154,23 @@ export const postRoomUpgrade =
 			const oldEvent = oldRoom.state_events.get(`${stateType}\0`);
 			if (!oldEvent) continue;
 
+			const copiedContent: JsonObject = { ...oldEvent.content };
+
+			// MSC4289: in a v12+ replacement room, anyone who is now a room creator
+			// (the upgrader plus any request `additional_creators`) holds an implicit
+			// infinite power level and must NOT appear in power_levels.users. Strip
+			// them from the copied users map so the new PL event passes auth and the
+			// resulting users map matches the spec.
+			if (v12Plus && stateType === "m.room.power_levels") {
+				const oldUsers = (copiedContent.users ?? {}) as JsonObject;
+				const newUsers: JsonObject = {};
+				for (const [uid, pl] of Object.entries(oldUsers)) {
+					if (newCreators.has(uid)) continue;
+					newUsers[uid] = pl;
+				}
+				copiedContent.users = newUsers;
+			}
+
 			await sendStateEvent(
 				storage,
 				serverName,
@@ -142,7 +178,7 @@ export const postRoomUpgrade =
 				userId,
 				stateType,
 				oldEvent.state_key ?? "",
-				{ ...oldEvent.content },
+				copiedContent,
 			);
 		}
 

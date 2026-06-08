@@ -109,19 +109,54 @@ export const getProfile =
 		return { status: 200, body: { ...profile, ...extended } };
 	};
 
+/** Fetch a remote user's profile over federation; undefined if the user is local. */
+const fetchRemoteProfile = async (
+	userId: UserId,
+	serverName: string | undefined,
+	federationClient: FederationClient | undefined,
+): Promise<{ displayname?: string; avatar_url?: string } | undefined> => {
+	const userServer = userId.slice(userId.indexOf(":") + 1);
+	if (!serverName || userServer === serverName || !federationClient) {
+		return undefined;
+	}
+	const res = await federationClient.request(
+		userServer as ServerName,
+		"GET",
+		`/_matrix/federation/v1/query/profile?user_id=${encodeURIComponent(userId)}`,
+	);
+	if (res.status !== 200) throw notFound("User not found");
+	return res.body as { displayname?: string; avatar_url?: string };
+};
+
 export const getDisplayName =
-	(storage: Storage): Handler =>
+	(
+		storage: Storage,
+		serverName?: string,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const userId = req.params.userId as UserId;
+		const remote = await fetchRemoteProfile(userId, serverName, federationClient);
+		if (remote) {
+			return { status: 200, body: { displayname: remote.displayname ?? null } };
+		}
 		const profile = await storage.getProfile(userId);
 		if (!profile) throw notFound("User not found");
 		return { status: 200, body: { displayname: profile.displayname ?? null } };
 	};
 
 export const getAvatarUrl =
-	(storage: Storage): Handler =>
+	(
+		storage: Storage,
+		serverName?: string,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const userId = req.params.userId as UserId;
+		const remote = await fetchRemoteProfile(userId, serverName, federationClient);
+		if (remote) {
+			return { status: 200, body: { avatar_url: remote.avatar_url ?? null } };
+		}
 		const profile = await storage.getProfile(userId);
 		if (!profile) throw notFound("User not found");
 		return { status: 200, body: { avatar_url: profile.avatar_url ?? null } };

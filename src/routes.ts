@@ -394,11 +394,11 @@ export const registerRoutes = (
 	router.get("/_matrix/client/v3/profile/:userId", getProfile(storage, serverName, federationClient));
 	router.get(
 		"/_matrix/client/v3/profile/:userId/displayname",
-		getDisplayName(storage),
+		getDisplayName(storage, serverName, federationClient),
 	);
 	router.get(
 		"/_matrix/client/v3/profile/:userId/avatar_url",
-		getAvatarUrl(storage),
+		getAvatarUrl(storage, serverName, federationClient),
 	);
 	router.put(
 		"/_matrix/client/v3/profile/:userId/displayname",
@@ -693,7 +693,7 @@ export const registerRoutes = (
 
 	router.put(
 		"/_matrix/client/v3/rooms/:roomId/typing/:userId",
-		putTyping(storage),
+		putTyping(storage, serverName as ServerName, signingKey, federationClient),
 		auth,
 	);
 
@@ -716,7 +716,7 @@ export const registerRoutes = (
 	);
 	router.put(
 		"/_matrix/client/v3/presence/:userId/status",
-		putPresence(storage),
+		putPresence(storage, serverName as ServerName, signingKey, federationClient),
 		auth,
 	);
 
@@ -829,8 +829,8 @@ export const registerRoutes = (
 	router.post("/_matrix/client/v3/pushers/set", postPushersSet(storage), auth);
 
 	router.post("/_matrix/client/v3/keys/upload", postKeysUpload(storage, serverName as ServerName, signingKey, federationClient), auth);
-	router.post("/_matrix/client/v3/keys/query", postKeysQuery(storage), auth);
-	router.post("/_matrix/client/v3/keys/claim", postKeysClaim(storage), auth);
+	router.post("/_matrix/client/v3/keys/query", postKeysQuery(storage, serverName as ServerName, federationClient), auth);
+	router.post("/_matrix/client/v3/keys/claim", postKeysClaim(storage, serverName as ServerName, federationClient), auth);
 	router.get("/_matrix/client/v3/keys/changes", getKeysChanges(storage), auth);
 
 	router.post(
@@ -1256,6 +1256,11 @@ export const registerRoutes = (
 			putSendJoin(storage, serverName, signingKey, federationClient),
 			fedAuth,
 		);
+		router.put(
+			"/_matrix/federation/v1/send_join/:roomId/:eventId",
+			putSendJoin(storage, serverName, signingKey, federationClient),
+			fedAuth,
+		);
 		router.get(
 			"/_matrix/federation/v1/make_leave/:roomId/:userId",
 			getMakeLeave(storage, serverName),
@@ -1263,6 +1268,11 @@ export const registerRoutes = (
 		);
 		router.put(
 			"/_matrix/federation/v2/send_leave/:roomId/:eventId",
+			putSendLeave(storage, serverName, signingKey, federationClient),
+			fedAuth,
+		);
+		router.put(
+			"/_matrix/federation/v1/send_leave/:roomId/:eventId",
 			putSendLeave(storage, serverName, signingKey, federationClient),
 			fedAuth,
 		);
@@ -1411,8 +1421,8 @@ export const registerRoutes = (
 	router.post("/_matrix/client/r0/logout", postLogout(storage), auth);
 	router.post("/_matrix/client/r0/logout/all", postLogoutAll(storage), auth);
 	router.post("/_matrix/client/r0/keys/upload", postKeysUpload(storage, serverName as ServerName, signingKey, federationClient), auth);
-	router.post("/_matrix/client/r0/keys/query", postKeysQuery(storage), auth);
-	router.post("/_matrix/client/r0/keys/claim", postKeysClaim(storage), auth);
+	router.post("/_matrix/client/r0/keys/query", postKeysQuery(storage, serverName as ServerName, federationClient), auth);
+	router.post("/_matrix/client/r0/keys/claim", postKeysClaim(storage, serverName as ServerName, federationClient), auth);
 	router.put(
 		"/_matrix/client/r0/sendToDevice/:eventType/:txnId",
 		putSendToDevice(storage),
@@ -1436,7 +1446,7 @@ export const registerRoutes = (
 	);
 	router.put(
 		"/_matrix/client/r0/rooms/:roomId/typing/:userId",
-		putTyping(storage),
+		putTyping(storage, serverName as ServerName, signingKey, federationClient),
 		auth,
 	);
 	router.post(
@@ -1479,7 +1489,7 @@ export const registerRoutes = (
 	);
 	router.put(
 		"/_matrix/client/r0/presence/:userId/status",
-		putPresence(storage),
+		putPresence(storage, serverName as ServerName, signingKey, federationClient),
 		auth,
 	);
 	router.post(

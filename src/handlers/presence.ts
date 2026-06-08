@@ -1,8 +1,11 @@
 import { forbidden } from "../errors.ts";
+import type { FederationClient } from "../federation/client.ts";
+import { fanoutEdu } from "../federation/outbound.ts";
 import type { Handler } from "../router.ts";
+import type { SigningKey } from "../signing.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { PresenceState } from "../types/ephemeral.ts";
-import type { UserId } from "../types/index.ts";
+import type { ServerName, UserId } from "../types/index.ts";
 
 export const getPresence =
 	(storage: Storage): Handler =>
@@ -26,7 +29,12 @@ export const getPresence =
 	};
 
 export const putPresence =
-	(storage: Storage): Handler =>
+	(
+		storage: Storage,
+		serverName?: ServerName,
+		signingKey?: SigningKey,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const userId = req.params.userId as UserId;
 		if (req.userId !== userId)
@@ -37,5 +45,43 @@ export const putPresence =
 		const statusMsg = body.status_msg as string | undefined;
 
 		await storage.setPresence(userId, presence, statusMsg);
+
+		// Federate the presence update to every remote server that shares a room
+		// with this user. Synapse's m.presence EDU wraps per-user updates in a
+		// top-level `push` array (server-server-api spec).
+		if (serverName && signingKey && federationClient) {
+			void (async () => {
+				const roomIds = await storage.getRoomsForUser(userId);
+				if (roomIds.length === 0) return;
+
+				const update: {
+					user_id: UserId;
+					presence: PresenceState;
+					status_msg?: string;
+					last_active_ago?: number;
+					currently_active?: boolean;
+				} = { user_id: userId, presence };
+				if (statusMsg !== undefined) update.status_msg = statusMsg;
+
+				const stored = await storage.getPresence(userId);
+				if (stored?.last_active_ts) {
+					update.last_active_ago = Date.now() - stored.last_active_ts;
+				}
+				if (presence === "online") update.currently_active = true;
+
+				await fanoutEdu(
+					storage,
+					serverName,
+					signingKey,
+					federationClient,
+					roomIds,
+					{
+						edu_type: "m.presence",
+						content: { push: [update] },
+					},
+				);
+			})().catch(() => {});
+		}
+
 		return { status: 200, body: {} };
 	};

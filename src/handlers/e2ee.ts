@@ -188,20 +188,48 @@ export const queryDeviceKeys = async (
 	return deviceKeys;
 };
 
+/** Extract the server-name portion of a Matrix user ID (`@local:server`). */
+const serverOf = (userId: string): string =>
+	userId.slice(userId.indexOf(":") + 1);
+
 export const postKeysQuery =
-	(storage: Storage): Handler =>
+	(
+		storage: Storage,
+		serverName?: ServerName,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const userId = req.userId as UserId;
 		const body = (req.body ?? {}) as KeysQueryRequest;
 		if (!body.device_keys) throw badJson("Missing device_keys field");
 
-		const deviceKeys = await queryDeviceKeys(storage, body.device_keys);
+		// Split the requested users by homeserver. Users on our own server (or
+		// any server when federation isn't wired) go through the local path;
+		// users on other servers are federated. Mirrors Synapse's
+		// E2eKeysHandler.query_devices, which partitions into local_query and
+		// remote_queries and fans out one federation request per destination.
+		const localRequest: Record<string, string[]> = {};
+		const remoteByDest = new Map<ServerName, Record<string, string[]>>();
+		for (const [targetUserId, deviceIds] of Object.entries(
+			body.device_keys,
+		)) {
+			const dest = serverOf(targetUserId) as ServerName;
+			if (!serverName || !federationClient || dest === serverName) {
+				localRequest[targetUserId] = deviceIds;
+			} else {
+				const group = remoteByDest.get(dest) ?? {};
+				group[targetUserId] = deviceIds;
+				remoteByDest.set(dest, group);
+			}
+		}
+
+		const deviceKeys = await queryDeviceKeys(storage, localRequest);
 
 		const masterKeys: Record<UserId, CrossSigningKey> = {};
 		const selfSigningKeys: Record<UserId, CrossSigningKey> = {};
 		const userSigningKeys: Record<UserId, CrossSigningKey> = {};
 
-		for (const targetUserId of Object.keys(body.device_keys)) {
+		for (const targetUserId of Object.keys(localRequest)) {
 			const crossKeys = await storage.getCrossSigningKeys(
 				targetUserId as UserId,
 			);
@@ -214,6 +242,55 @@ export const postKeysQuery =
 			if (targetUserId === userId && crossKeys.user_signing_key)
 				userSigningKeys[targetUserId as UserId] =
 					crossKeys.user_signing_key;
+		}
+
+		// Federate remote users: one request per destination server, merging
+		// device_keys/master_keys/self_signing_keys into the combined result.
+		// Per-destination errors are swallowed into `failures` (Synapse:
+		// _query_devices_for_destination records failures and continues).
+		const failures: Record<string, unknown> = {};
+		if (federationClient) {
+			for (const [dest, group] of remoteByDest) {
+				try {
+					const { body: respBody } = await federationClient.request(
+						dest,
+						"POST",
+						"/_matrix/federation/v1/user/keys/query",
+						{ device_keys: group },
+					);
+					const resp = (respBody ?? {}) as {
+						device_keys?: Record<
+							UserId,
+							Record<DeviceId, DeviceKeys>
+						>;
+						master_keys?: Record<UserId, CrossSigningKey>;
+						self_signing_keys?: Record<UserId, CrossSigningKey>;
+					};
+					if (resp.device_keys) {
+						for (const [u, keys] of Object.entries(
+							resp.device_keys,
+						)) {
+							deviceKeys[u as UserId] = keys;
+						}
+					}
+					if (resp.master_keys) {
+						for (const [u, k] of Object.entries(resp.master_keys)) {
+							masterKeys[u as UserId] = k;
+						}
+					}
+					if (resp.self_signing_keys) {
+						for (const [u, k] of Object.entries(
+							resp.self_signing_keys,
+						)) {
+							selfSigningKeys[u as UserId] = k;
+						}
+					}
+				} catch (err) {
+					failures[dest] = {
+						message: err instanceof Error ? err.message : String(err),
+					};
+				}
+			}
 		}
 
 		return {
@@ -230,12 +307,18 @@ export const postKeysQuery =
 					Object.keys(userSigningKeys).length > 0
 						? userSigningKeys
 						: undefined,
+				failures:
+					Object.keys(failures).length > 0 ? failures : undefined,
 			},
 		};
 	};
 
 export const postKeysClaim =
-	(storage: Storage): Handler =>
+	(
+		storage: Storage,
+		serverName?: ServerName,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const body = (req.body ?? {}) as KeysClaimRequest;
 		if (!body.one_time_keys) throw badJson("Missing one_time_keys field");
@@ -245,7 +328,33 @@ export const postKeysClaim =
 			Record<DeviceId, Record<string, string | JsonObject>>
 		> = {};
 
-		for (const [targetUserId, devices] of Object.entries(body.one_time_keys)) {
+		// Split (user, device, algorithm) tuples by homeserver. Mirrors
+		// Synapse's E2eKeysHandler.claim_client_keys, which separates local
+		// claims from remote ones and issues one federation request per dest.
+		const localClaims: Record<string, Record<string, string>> = {};
+		const remoteByDest = new Map<
+			ServerName,
+			Record<string, Record<string, string>>
+		>();
+		for (const [targetUserId, devices] of Object.entries(
+			body.one_time_keys,
+		)) {
+			const dest = serverOf(targetUserId) as ServerName;
+			const isLocal =
+				!serverName || !federationClient || dest === serverName;
+			for (const [targetDeviceId, algorithm] of Object.entries(devices)) {
+				if (isLocal) {
+					(localClaims[targetUserId] ??= {})[targetDeviceId] =
+						algorithm;
+				} else {
+					const group = remoteByDest.get(dest) ?? {};
+					(group[targetUserId] ??= {})[targetDeviceId] = algorithm;
+					remoteByDest.set(dest, group);
+				}
+			}
+		}
+
+		for (const [targetUserId, devices] of Object.entries(localClaims)) {
 			for (const [targetDeviceId, algorithm] of Object.entries(devices)) {
 				const claimed = await storage.claimOneTimeKey(
 					targetUserId as UserId,
@@ -272,7 +381,58 @@ export const postKeysClaim =
 			}
 		}
 
-		return { status: 200, body: { one_time_keys: oneTimeKeys } };
+		// Federate remote claims: one request per destination, merging the
+		// returned one_time_keys. Per-destination errors are swallowed so a
+		// failing peer doesn't fail the whole claim.
+		const failures: Record<string, unknown> = {};
+		if (federationClient) {
+			for (const [dest, group] of remoteByDest) {
+				try {
+					const { body: respBody } = await federationClient.request(
+						dest,
+						"POST",
+						"/_matrix/federation/v1/user/keys/claim",
+						{ one_time_keys: group },
+					);
+					const resp = (respBody ?? {}) as {
+						one_time_keys?: Record<
+							UserId,
+							Record<
+								DeviceId,
+								Record<string, string | JsonObject>
+							>
+						>;
+					};
+					if (resp.one_time_keys) {
+						for (const [u, devs] of Object.entries(
+							resp.one_time_keys,
+						)) {
+							const existing = (oneTimeKeys[u as UserId] ??=
+								{}) as Record<
+								DeviceId,
+								Record<string, string | JsonObject>
+							>;
+							for (const [d, keys] of Object.entries(devs)) {
+								existing[d as DeviceId] = keys;
+							}
+						}
+					}
+				} catch (err) {
+					failures[dest] = {
+						message: err instanceof Error ? err.message : String(err),
+					};
+				}
+			}
+		}
+
+		return {
+			status: 200,
+			body: {
+				one_time_keys: oneTimeKeys,
+				failures:
+					Object.keys(failures).length > 0 ? failures : undefined,
+			},
+		};
 	};
 
 export const putSendToDevice =
