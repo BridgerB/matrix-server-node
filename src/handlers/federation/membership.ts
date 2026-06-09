@@ -156,10 +156,23 @@ const findAuthorisingLocalUser = (
  * i.e. they are joined to one of the rooms listed under
  * m.room.join_rules content.allow with type "m.room_membership".
  */
+/** True if `serverName` has at least one currently-joined member in `room`. */
+const serverHasJoinedMember = (room: RoomState, serverName: string): boolean => {
+	for (const [key, event] of room.state_events) {
+		if (!key.startsWith("m.room.member\x1f")) continue;
+		if ((event.content as Record<string, unknown>).membership !== "join")
+			continue;
+		const memberId = key.slice("m.room.member\x1f".length);
+		if (memberId.split(":").slice(1).join(":") === serverName) return true;
+	}
+	return false;
+};
+
 const userSatisfiesRestrictedAllow = async (
 	storage: Storage,
 	room: RoomState,
 	userId: UserId,
+	localServerName: string,
 ): Promise<boolean> => {
 	const joinRulesEvent = room.state_events.get("m.room.join_rules\x1f");
 	if (!joinRulesEvent) return false;
@@ -175,6 +188,12 @@ const userSatisfiesRestrictedAllow = async (
 
 		const allowedRoom = await storage.getRoom(allowedRoomId as RoomId);
 		if (!allowedRoom) continue;
+		// We may only vouch that the joiner is in the allow room if WE currently
+		// participate in that room — otherwise our view of it is stale and
+		// unreliable. MSC3083 / TestRestrictedRoomsRemoteJoinFailOver: once this
+		// server's last member leaves the allow room, it must stop authorising
+		// restricted joins and let the requester fail over to a server that can.
+		if (!serverHasJoinedMember(allowedRoom, localServerName)) continue;
 		if (getMembership(allowedRoom, userId) === "join") return true;
 	}
 	return false;
@@ -220,6 +239,7 @@ export const getMakeJoin =
 						storage,
 						room,
 						userId,
+						serverName,
 					);
 					if (!satisfies) {
 						throw unableToAuthoriseJoin(

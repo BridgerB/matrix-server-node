@@ -953,27 +953,40 @@ export const postJoin =
 					serversToTry.push(s);
 				}
 			}
-			if (
-				roomServer &&
-				roomServer !== serverName &&
-				!serversToTry.includes(roomServer)
-			) {
-				serversToTry.push(roomServer);
-			}
-			const existing = await storage.getRoom(roomId);
-			if (existing) {
-				const inviteEvent = existing.state_events.get(
-					`m.room.member\x1f${userId}`,
-				);
-				const inviter = inviteEvent?.sender;
-				if (typeof inviter === "string") {
-					const inviterServer = inviter.split(":").slice(1).join(":");
-					if (
-						inviterServer &&
-						inviterServer !== serverName &&
-						!serversToTry.includes(inviterServer)
-					) {
-						serversToTry.push(inviterServer);
+			// The room-ID server and inviter server are implicit FALLBACKS, used
+			// only when the client gave no useful *remote* candidate (priority
+			// servers + non-self `server_name`). When the client did name a remote
+			// server we try exactly that, in order, and let the join fail if it
+			// can't authorise — TestRestrictedRoomsRemoteJoinFailOver requires a
+			// join via only a non-authorising server to FAIL rather than silently
+			// fall over to the room's home server. Gating on the candidate list
+			// being empty (not on `server_name` being present) is what keeps
+			// TestRestrictedRoomsRemoteJoinLocalUser working: there the client
+			// passes its OWN server as `server_name`, which filters out to nothing,
+			// so the roomServer fallback must still apply.
+			if (serversToTry.length === 0) {
+				if (
+					roomServer &&
+					roomServer !== serverName &&
+					!serversToTry.includes(roomServer)
+				) {
+					serversToTry.push(roomServer);
+				}
+				const existing = await storage.getRoom(roomId);
+				if (existing) {
+					const inviteEvent = existing.state_events.get(
+						`m.room.member\x1f${userId}`,
+					);
+					const inviter = inviteEvent?.sender;
+					if (typeof inviter === "string") {
+						const inviterServer = inviter.split(":").slice(1).join(":");
+						if (
+							inviterServer &&
+							inviterServer !== serverName &&
+							!serversToTry.includes(inviterServer)
+						) {
+							serversToTry.push(inviterServer);
+						}
 					}
 				}
 			}
