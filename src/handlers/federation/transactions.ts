@@ -28,6 +28,35 @@ const CANONICALJSON_MAX_INT = 2 ** 53 - 1;
 const CANONICALJSON_MIN_INT = -(2 ** 53 - 1);
 
 /**
+ * Marker for an event that passed the structural checks (content hash,
+ * signature, event-ID) but FAILED authorization — either against its own
+ * auth_events / claimed-auth state, or against the state before it, or because
+ * one of its auth_events is itself rejected/unfetchable.
+ *
+ * Synapse models this as `context.rejected = RejectedReason.AUTH_ERROR`: the
+ * event is still PERSISTED (with a rejected_reason) but is treated as an
+ * outlier — never applied to room state, never returned via /event (→ 404),
+ * never delivered to clients. Crucially, because it is persisted, later events
+ * that name it in `prev_events` find it present and do NOT trigger
+ * /get_missing_events gap-filling, and it is NOT a forward extremity / not part
+ * of state.
+ *
+ * We do not have a storage-level rejected flag, so within a single inbound
+ * transaction we instead track rejected event ids in an in-memory set
+ * (`rejectedIds`). A `prev_event` that is in this set is treated as
+ * "known-but-rejected": neither missing (so no gap-fill) nor part of forward
+ * state. This is what lets a later, independently-valid event (the sentinel in
+ * TestInboundFederationRejectsEventsWithRejectedAuthEvents) still be accepted
+ * and delivered even though its prev-event chain runs through rejected events.
+ *
+ * Throwing this (rather than a plain Error) signals the transaction loop to
+ * record the event id as rejected; a plain Error means a structural failure
+ * (bad hash/sig/ID, unreachable room) where the event is dropped entirely and
+ * NOT recorded as a known-but-rejected prev.
+ */
+class RejectedEventError extends Error {}
+
+/**
  * Whether a room version enforces strict canonical JSON (room version 6+).
  * Synapse's `RoomVersion.strict_canonicaljson` is `False` for v1–v5 and `True`
  * from v6 onwards. We parse the leading numeric component of the version string
@@ -412,9 +441,25 @@ const resolveAuthEvents = async (
 	origin: ServerName,
 	federationClient: FederationClient,
 	roomVersion?: string,
+	/**
+	 * Events already validated in-memory (e.g. the auth chain fetched while
+	 * resolving state at a missing prev). These are treated as already-known —
+	 * the walk reads them from this map instead of re-fetching, and crucially
+	 * stops descending once it reaches them. Without this, a deep but entirely
+	 * valid auth chain (a long linear membership chain) is re-walked over the
+	 * network and trips the per-event fetch cap, falsely rejecting the event.
+	 */
+	knownEvents?: Map<EventId, PDU>,
 ): Promise<Map<EventId, PDU> | null> => {
 	const available = new Map<EventId, PDU>();
+	if (knownEvents) {
+		for (const [id, ev] of knownEvents) {
+			if (ev.room_id === pdu.room_id) available.set(id, ev);
+		}
+	}
 	for (const authId of pdu.auth_events as EventId[]) {
+		const known = available.get(authId);
+		if (known) continue;
 		const have = await storage.getEvent(authId);
 		if (have) {
 			available.set(authId, have.event);
@@ -488,6 +533,12 @@ const buildAuthEventState = async (
 	room: RoomState,
 	origin: ServerName,
 	federationClient: FederationClient,
+	/**
+	 * Auth-chain events already validated in-memory while resolving state at this
+	 * event's missing prevs. Passed through to `resolveAuthEvents` so a deep but
+	 * valid auth chain is satisfied from memory instead of being re-fetched.
+	 */
+	knownAuthChain?: Map<EventId, PDU>,
 ): Promise<{ state: RoomState | null; authChainRejected: boolean }> => {
 	const stateEvents = new Map<string, PDU>();
 
@@ -512,6 +563,7 @@ const buildAuthEventState = async (
 			origin,
 			federationClient,
 			room.room_version,
+			knownAuthChain,
 		);
 		if (!resolved) {
 			return { state: null, authChainRejected: true };
@@ -593,10 +645,17 @@ const fetchMissingEvents = async (
 	origin: ServerName,
 	federationClient: FederationClient,
 	room: RoomState,
+	rejectedIds: Set<EventId>,
 ): Promise<void> => {
-	// Which prev_events are we missing locally?
+	// Which prev_events are we missing locally? A prev_event we already rejected
+	// earlier in this transaction counts as "known" (it is persisted-as-rejected
+	// in Synapse): we must NOT try to gap-fill it. Without this, the child of a
+	// rejected event (e.g. sentEvent2 → sentEvent1 in
+	// TestInboundFederationRejectsEventsWithRejectedAuthEvents) would look like it
+	// has a missing prev and trigger an unexpected /get_missing_events request.
 	const missingPrevs: EventId[] = [];
 	for (const prevId of pdu.prev_events) {
+		if (rejectedIds.has(prevId as EventId)) continue;
 		const have = await storage.getEvent(prevId as EventId);
 		if (!have) missingPrevs.push(prevId as EventId);
 	}
@@ -657,9 +716,27 @@ const fetchMissingEvents = async (
 				missingId,
 				origin,
 				federationClient,
+				rejectedIds,
 				false,
 			);
-		} catch {
+		} catch (err) {
+			// A pulled event that fails AUTH (its auth chain runs through an
+			// unfetchable/rejected event, e.g. gmeEvent in TestCorruptedAuthChain
+			// whose auth_events name eventE whose chain reaches the withheld
+			// eventB) is "known-but-rejected": Synapse persists it as a rejected
+			// outlier. We have no rejected-outlier store, so we record its id in
+			// `rejectedIds`. This is crucial for the PARENT event we are gap-filling
+			// for (sendTxnEvent then gmeEvent): without it, gmeEvent stays "missing"
+			// after the fill and the parent is hard-rejected with a 403 ("isn't
+			// divulging details about prev_events"), which would surface as a
+			// per-PDU `error` in the /send response and fail the test's
+			// MustSendTransaction. Treating it as known-but-rejected instead lets
+			// the parent be cleanly auth-rejected (returning `{}`).
+			//
+			// A structural failure (plain Error) is just dropped, not recorded.
+			if (err instanceof RejectedEventError) {
+				rejectedIds.add(missingId);
+			}
 			// A returned event that fails verification/auth (e.g. bad JSON, bad
 			// signature, fails auth) is simply dropped — best effort. Synapse
 			// `_process_pulled_event` swallows per-event failures.
@@ -673,6 +750,7 @@ const processPdu = async (
 	eventId: EventId,
 	origin: ServerName,
 	federationClient: FederationClient,
+	rejectedIds: Set<EventId>,
 	allowGapFill = true,
 ): Promise<void> => {
 	const expectedHash = computeContentHash(pdu);
@@ -748,6 +826,7 @@ const processPdu = async (
 			origin,
 			federationClient,
 			room,
+			rejectedIds,
 		);
 	}
 
@@ -780,9 +859,24 @@ const processPdu = async (
 	// top-level event is rejected (below) rather than driving a /state_ids on the
 	// gap-fill event itself.
 	let resolvedStateBefore: RoomState | null = null;
+	// Auth-chain events validated while resolving state at this event's missing
+	// prevs (via /state_ids → /event). These are already known-good but are NOT
+	// persisted (they are outliers we hold only in memory), so the later
+	// claimed-auth check must be told about them — otherwise it re-walks the
+	// transitive auth chain over the network and, for a deep linear chain (e.g.
+	// the 250 display-name changes in TestMSC4297StateResolutionV2_1), trips the
+	// per-event fetch cap and falsely rejects the event (auth rule 2.3).
+	const knownAuthChain = new Map<EventId, PDU>();
 	if (pdu.type !== "m.room.create") {
 		const missingPrevs: EventId[] = [];
 		for (const prevId of pdu.prev_events) {
+			// A prev_event we rejected earlier in this transaction is
+			// known-but-rejected (persisted-as-rejected in Synapse), not missing:
+			// it just isn't part of forward state. Skipping it here means a child
+			// of a rejected event is not treated as having a missing prev — so we
+			// neither reject the child outright (top-level path) nor try to resolve
+			// state at a "missing" prev that is actually a rejected outlier.
+			if (rejectedIds.has(prevId as EventId)) continue;
 			const have = await storage.getEvent(prevId as EventId);
 			if (!have) missingPrevs.push(prevId as EventId);
 		}
@@ -805,7 +899,7 @@ const processPdu = async (
 			// auth_events DAG between conflicted events and needs them to be present
 			// in the authEvents map, otherwise the walk dead-ends and intermediate
 			// auth events can't be replayed.
-			const fetchedAuthChain = new Map<EventId, PDU>();
+			const fetchedAuthChain = knownAuthChain;
 			for (const prevId of missingPrevs) {
 				const resolved = await resolveStateAtMissingPrev(
 					storage,
@@ -891,19 +985,38 @@ const processPdu = async (
 			room,
 			origin,
 			federationClient,
+			knownAuthChain.size > 0 ? knownAuthChain : undefined,
 		);
 		if (authChainRejected) {
-			throw new Error("Event references a rejected auth event");
+			// Auth-chain rejection: this is a REJECTED event, not a structural
+			// failure. Record it (via RejectedEventError) so children that name it
+			// in prev_events treat it as known-but-rejected and don't gap-fill.
+			throw new RejectedEventError("Event references a rejected auth event");
 		}
 		if (authState) {
-			checkEventAuth(pdu, eventId, authState);
+			try {
+				checkEventAuth(pdu, eventId, authState);
+			} catch (err) {
+				// Failed claimed-auth check → rejected (Synapse RejectedReason.AUTH_ERROR).
+				throw new RejectedEventError(
+					err instanceof Error ? err.message : "Auth check failed",
+				);
+			}
 		}
 	}
 
 	// The event must also pass auth against the state before it (Synapse step 5).
 	// When we resolved state at missing prev_events use that snapshot; otherwise
-	// fall back to current room state (the state as we know it).
-	checkEventAuth(pdu, eventId, resolvedStateBefore ?? room);
+	// fall back to current room state (the state as we know it). A failure here is
+	// likewise a rejection (the event stays as a rejected outlier), not a
+	// structural error.
+	try {
+		checkEventAuth(pdu, eventId, resolvedStateBefore ?? room);
+	} catch (err) {
+		throw new RejectedEventError(
+			err instanceof Error ? err.message : "Auth check failed",
+		);
+	}
 
 	if (pdu.state_key !== undefined) {
 		await storage.setStateEvent(pdu.room_id, pdu, eventId);
@@ -1143,6 +1256,18 @@ export const putFederationSend =
 		};
 		const pduResults: Record<string, Record<string, unknown>> = {};
 
+		// Track events rejected (auth failure) earlier in THIS transaction. A
+		// rejected event is persisted-as-rejected in Synapse (an outlier): it is
+		// not in forward state, but it IS "known", so a later event in the same
+		// transaction that names it in prev_events must not trigger gap-filling
+		// (/get_missing_events) and must still be processed/accepted on its own
+		// merits. This is the crux of
+		// TestInboundFederationRejectsEventsWithRejectedAuthEvents: sentEvent1 and
+		// sentEvent2 are rejected (their auth chain references a rejected event),
+		// but the sentinel event chained after them via prev_events must still be
+		// accepted and delivered to /sync.
+		const rejectedIds = new Set<EventId>();
+
 		for (const pdu of pdus) {
 			// Compute the event ID using the room's version (or the create event's
 			// own room_version) so it matches the version-aware ID computed inside
@@ -1158,12 +1283,40 @@ export const putFederationSend =
 					: undefined);
 			const eventId = computeEventId(pdu, eventIdRoomVersion);
 			try {
-				await processPdu(storage, pdu, eventId, origin, federationClient);
+				await processPdu(
+					storage,
+					pdu,
+					eventId,
+					origin,
+					federationClient,
+					rejectedIds,
+				);
 				pduResults[eventId] = {};
 			} catch (err) {
-				pduResults[eventId] = {
-					error: err instanceof Error ? err.message : "Processing failed",
-				};
+				if (err instanceof RejectedEventError) {
+					// The event passed structural checks (hash/sig/ID) but failed
+					// AUTH. In Synapse this is `context.rejected = AUTH_ERROR`: the
+					// event is persisted-as-rejected and `process_pdu` returns an
+					// EMPTY `{}` PDU result (NOT an error) — only a FederationError
+					// (e.g. unfetchable prev_events) yields `{"error": ...}`. We must
+					// mirror that: a remote that pushes an auth-rejected event (or one
+					// whose auth chain is corrupt, as sendTxnEvent in
+					// TestCorruptedAuthChain) gets `{}` back, not an error. Reporting
+					// an error here fails the test's MustSendTransaction (which fatals
+					// on any per-PDU error). We still record the id as
+					// known-but-rejected so later events in this transaction that name
+					// it in prev_events don't trigger gap-filling.
+					rejectedIds.add(eventId);
+					pduResults[eventId] = {};
+				} else {
+					// A plain Error is a structural / hard failure (bad hash/sig/ID,
+					// unreachable room, ACL deny, or unfetchable prev_events). This is
+					// Synapse's FederationError path → report the error in the response
+					// and do NOT treat the event as a known prev.
+					pduResults[eventId] = {
+						error: err instanceof Error ? err.message : "Processing failed",
+					};
+				}
 			}
 		}
 

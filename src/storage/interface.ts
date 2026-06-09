@@ -6,6 +6,7 @@ import type {
 } from "../types/e2ee.ts";
 import type { PresenceState } from "../types/ephemeral.ts";
 import type {
+	EDU,
 	PDU,
 	StrippedStateEvent,
 	ToDeviceEvent,
@@ -555,6 +556,39 @@ export interface Storage {
 	getFederationTxn(origin: ServerName, txnId: string): Promise<boolean>;
 	setFederationTxn(origin: ServerName, txnId: string): Promise<void>;
 
+	// Federation - Durable outbound EDU retry queue
+	//
+	// When an EDU (to-device message, device-list update, ...) cannot be
+	// delivered to a destination because it is unreachable, it is persisted
+	// here keyed by destination. The outbound sender replays a destination's
+	// pending EDUs the next time it successfully contacts that destination (and
+	// on startup, so a sender that restarts while a peer is down still recovers).
+	// Mirrors Synapse's PerDestinationQueue, which buffers pending EDUs and
+	// flushes them when a transaction to the destination next succeeds.
+
+	/**
+	 * Persist an EDU for later (re)delivery to `destination`. Returns the opaque
+	 * row id of the queued entry. Implementations cap the per-destination queue
+	 * length; when the cap is exceeded the oldest entry is dropped and a warning
+	 * is logged (callers need not handle this).
+	 */
+	enqueueFederationEdu(destination: ServerName, edu: EDU): Promise<number>;
+
+	/**
+	 * Return up to `limit` pending EDUs for `destination`, oldest first, each
+	 * with its opaque row id (for deletion after successful delivery).
+	 */
+	getPendingFederationEdus(
+		destination: ServerName,
+		limit: number,
+	): Promise<{ id: number; edu: EDU }[]>;
+
+	/** Delete a delivered pending EDU by its row id. */
+	deleteFederationEdu(id: number): Promise<void>;
+
+	/** Distinct destinations that currently have at least one pending EDU. */
+	getPendingFederationDestinations(): Promise<ServerName[]>;
+
 	// 3PID verification
 	storeVerificationToken(
 		sessionId: string,
@@ -622,6 +656,14 @@ export interface ReceiptRecord {
  * if both an unthreaded receipt and a threaded receipt exist for that triple,
  * the UNTHREADED one wins (its emitted content carries no `thread_id`).
  */
+/**
+ * Maximum number of pending outbound EDUs retained per destination in the
+ * durable retry queue. Beyond this the oldest entries are dropped (logged) so
+ * an indefinitely-unreachable peer cannot grow the queue without bound. Mirrors
+ * Synapse's PerDestinationQueue.MAX_PENDING_EDUS bounding.
+ */
+export const PENDING_FEDERATION_EDU_CAP = 1000;
+
 export function collapseReceiptsMsc4102(
 	rows: ReceiptRecord[],
 ): ReceiptRecord[] {

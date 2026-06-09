@@ -1,5 +1,6 @@
 import { parseRegistrations } from "./appservice/registration.ts";
 import { FederationClient } from "./federation/client.ts";
+import { flushAllPendingEdus } from "./federation/outbound.ts";
 import {
 	postAppservicePing,
 	putAppserviceDirectoryListRoom,
@@ -277,6 +278,22 @@ export const registerRoutes = (
 	const federationClient = signingKey
 		? new FederationClient(serverName as ServerName, signingKey)
 		: undefined;
+
+	// Durable outbound EDU retry: replay any EDUs queued for destinations that
+	// were unreachable, both once on startup (so a sender that restarted while a
+	// peer was down still recovers — the "stopped server" Complement case) and
+	// on a periodic timer (so a peer that comes back up is caught up even with no
+	// new outbound traffic). Mirrors Synapse's per-destination catch-up.
+	if (federationClient) {
+		const fc = federationClient;
+		const sweep = (): void => {
+			void flushAllPendingEdus(storage, serverName, fc).catch(() => {});
+		};
+		// Initial sweep shortly after startup (let listeners bind first).
+		setTimeout(sweep, 1000).unref();
+		// Periodic catch-up sweep.
+		setInterval(sweep, 5000).unref();
+	}
 
 	router.get("/_matrix/client/versions", versionsHandler(serverName));
 	router.get("/.well-known/matrix/server", wellKnownServerHandler(serverName));
@@ -614,7 +631,7 @@ export const registerRoutes = (
 	);
 	router.get(
 		"/_matrix/client/v3/rooms/:roomId/timestamp_to_event",
-		getTimestampToEvent(storage),
+		getTimestampToEvent(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.get(
@@ -1049,7 +1066,7 @@ export const registerRoutes = (
 
 	router.post(
 		"/_matrix/client/v3/rooms/:roomId/upgrade",
-		postRoomUpgrade(storage, serverName),
+		postRoomUpgrade(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 
@@ -1112,7 +1129,7 @@ export const registerRoutes = (
 	);
 	router.get(
 		"/_matrix/client/v1/rooms/:roomId/timestamp_to_event",
-		getTimestampToEvent(storage),
+		getTimestampToEvent(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 

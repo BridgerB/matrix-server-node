@@ -11,6 +11,7 @@ import type {
 	OneTimeKey,
 } from "../types/e2ee.ts";
 import type {
+	EDU,
 	PDU,
 	StrippedStateEvent,
 	ToDeviceEvent,
@@ -40,7 +41,10 @@ import {
 	eventToStrippedState,
 	INVITE_STATE_TYPES,
 } from "./ephemeral.ts";
-import { collapseReceiptsMsc4102 } from "./interface.ts";
+import {
+	collapseReceiptsMsc4102,
+	PENDING_FEDERATION_EDU_CAP,
+} from "./interface.ts";
 import type { Storage, StoredSession } from "./interface.ts";
 
 /** True for an empty JSON object `{}` (MSC3391 account-data tombstone). */
@@ -142,6 +146,12 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		{ key: string; validUntil: number }
 	>();
 	private federationTxns = new Set<string>();
+	// Durable outbound EDU retry queue: destination -> ordered pending entries.
+	private pendingFederationEdus = new Map<
+		ServerName,
+		{ id: number; edu: EDU }[]
+	>();
+	private pendingFederationEduCounter = 0;
 	private verificationSessions = new Map<
 		string,
 		{
@@ -1877,6 +1887,50 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 
 	async setFederationTxn(origin: ServerName, txnId: string): Promise<void> {
 		this.federationTxns.add(`${origin}\x1f${txnId}`);
+	}
+
+	async enqueueFederationEdu(
+		destination: ServerName,
+		edu: EDU,
+	): Promise<number> {
+		const id = ++this.pendingFederationEduCounter;
+		const queue = this.pendingFederationEdus.get(destination) ?? [];
+		queue.push({ id, edu });
+		// Cap the per-destination queue; drop the oldest entries on overflow.
+		if (queue.length > PENDING_FEDERATION_EDU_CAP) {
+			const dropped = queue.splice(
+				0,
+				queue.length - PENDING_FEDERATION_EDU_CAP,
+			);
+			console.warn(
+				`pendingFederationEdus: dropped ${dropped.length} EDU(s) for ${destination} (queue cap ${PENDING_FEDERATION_EDU_CAP} exceeded)`,
+			);
+		}
+		this.pendingFederationEdus.set(destination, queue);
+		return id;
+	}
+
+	async getPendingFederationEdus(
+		destination: ServerName,
+		limit: number,
+	): Promise<{ id: number; edu: EDU }[]> {
+		const queue = this.pendingFederationEdus.get(destination) ?? [];
+		return queue.slice(0, limit).map((e) => ({ id: e.id, edu: e.edu }));
+	}
+
+	async deleteFederationEdu(id: number): Promise<void> {
+		for (const [dest, queue] of this.pendingFederationEdus) {
+			const idx = queue.findIndex((e) => e.id === id);
+			if (idx !== -1) {
+				queue.splice(idx, 1);
+				if (queue.length === 0) this.pendingFederationEdus.delete(dest);
+				return;
+			}
+		}
+	}
+
+	async getPendingFederationDestinations(): Promise<ServerName[]> {
+		return [...this.pendingFederationEdus.keys()];
 	}
 
 	async storeVerificationToken(

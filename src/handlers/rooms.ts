@@ -840,6 +840,7 @@ const notifyDeviceListUpdateOnJoin = async (
 			federationClient,
 			roomId,
 			edu,
+			true, // durable: device-list updates must survive a peer outage
 		);
 	}
 };
@@ -930,10 +931,12 @@ export const postJoin =
 
 			// Candidate servers to contact, in priority order:
 			//  0. servers known to be able to authorise this restricted join
+			//     (computed by us from room state — always trustworthy)
 			//  1. ?server_name= query params (Complement passes these)
 			//  2. the server in the room ID
 			//  3. servers of any remote users who invited us (so an invite from a
-			//     remote server lets us join via that server, per dendrite)
+			//     remote server lets us join via that server, per dendrite). Derived
+			//     from actual room state, so safe to keep regardless.
 			const serverNameParams = req.query.getAll("server_name");
 			const roomServer = roomId.includes(":")
 				? roomId.split(":").slice(1).join(":")

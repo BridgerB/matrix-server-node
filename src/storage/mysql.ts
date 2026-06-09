@@ -11,6 +11,7 @@ import type {
 	OneTimeKey,
 } from "../types/e2ee.ts";
 import type {
+	EDU,
 	PDU,
 	StrippedStateEvent,
 	ToDeviceEvent,
@@ -40,7 +41,10 @@ import {
 	eventToStrippedState,
 	INVITE_STATE_TYPES,
 } from "./ephemeral.ts";
-import { collapseReceiptsMsc4102 } from "./interface.ts";
+import {
+	collapseReceiptsMsc4102,
+	PENDING_FEDERATION_EDU_CAP,
+} from "./interface.ts";
 import type { Storage, StoredSession } from "./interface.ts";
 import { rowToSession, rowToUser } from "./sql-helpers.ts";
 
@@ -338,6 +342,15 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 					origin VARCHAR(255) NOT NULL,
 					txn_id VARCHAR(255) NOT NULL,
 					PRIMARY KEY (origin, txn_id)
+				)
+			`);
+
+			await conn.query(`
+				CREATE TABLE IF NOT EXISTS pending_federation_edus (
+					id BIGINT AUTO_INCREMENT PRIMARY KEY,
+					destination VARCHAR(255) NOT NULL,
+					edu_json LONGTEXT NOT NULL,
+					INDEX idx_pending_fed_edus_dest (destination, id)
 				)
 			`);
 
@@ -2374,6 +2387,59 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			"INSERT IGNORE INTO federation_txns (origin, txn_id) VALUES (?, ?)",
 			[origin, txnId],
 		);
+	}
+
+	async enqueueFederationEdu(
+		destination: ServerName,
+		edu: EDU,
+	): Promise<number> {
+		const result = await this.exec(
+			"INSERT INTO pending_federation_edus (destination, edu_json) VALUES (?, ?)",
+			[destination, JSON.stringify(edu)],
+		);
+		const id = Number(result.insertId);
+		// Enforce the per-destination cap by deleting the oldest overflow rows.
+		const countRows = (await this.query(
+			"SELECT COUNT(*) AS c FROM pending_federation_edus WHERE destination = ?",
+			[destination],
+		)) as { c: number | bigint }[];
+		const count = Number(countRows[0]?.c ?? 0);
+		if (count > PENDING_FEDERATION_EDU_CAP) {
+			const overflow = count - PENDING_FEDERATION_EDU_CAP;
+			await this.exec(
+				"DELETE FROM pending_federation_edus WHERE destination = ? ORDER BY id ASC LIMIT ?",
+				[destination, overflow],
+			);
+			console.warn(
+				`pending_federation_edus: dropped ${overflow} EDU(s) for ${destination} (queue cap ${PENDING_FEDERATION_EDU_CAP} exceeded)`,
+			);
+		}
+		return id;
+	}
+
+	async getPendingFederationEdus(
+		destination: ServerName,
+		limit: number,
+	): Promise<{ id: number; edu: EDU }[]> {
+		const rows = (await this.query(
+			"SELECT id, edu_json FROM pending_federation_edus WHERE destination = ? ORDER BY id ASC LIMIT ?",
+			[destination, limit],
+		)) as { id: number | bigint; edu_json: string }[];
+		return rows.map((r) => ({
+			id: Number(r.id),
+			edu: JSON.parse(r.edu_json) as EDU,
+		}));
+	}
+
+	async deleteFederationEdu(id: number): Promise<void> {
+		await this.exec("DELETE FROM pending_federation_edus WHERE id = ?", [id]);
+	}
+
+	async getPendingFederationDestinations(): Promise<ServerName[]> {
+		const rows = (await this.query(
+			"SELECT DISTINCT destination FROM pending_federation_edus",
+		)) as { destination: string }[];
+		return rows.map((r) => r.destination as ServerName);
 	}
 
 	// 3PID verification — in-memory for simplicity (not persisted across restarts)

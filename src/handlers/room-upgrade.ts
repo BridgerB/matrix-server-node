@@ -13,7 +13,10 @@ import {
 	sendStateEvent,
 	validateAdditionalCreators,
 } from "../events.ts";
+import type { FederationClient } from "../federation/client.ts";
+import { fanoutEvent } from "../federation/outbound.ts";
 import type { Handler } from "../router.ts";
+import type { SigningKey } from "../signing.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { EventId, RoomId } from "../types/index.ts";
 import type { RoomState } from "../types/internal.ts";
@@ -36,7 +39,12 @@ const STATE_TO_COPY = [
 ];
 
 export const postRoomUpgrade =
-	(storage: Storage, serverName: string): Handler =>
+	(
+		storage: Storage,
+		serverName: string,
+		signingKey?: SigningKey,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const oldRoomId = req.params.roomId as RoomId;
 		const userId = req.userId as string;
@@ -147,8 +155,8 @@ export const postRoomUpgrade =
 			"m.room.create",
 			"",
 			newCreateContent,
-			undefined,
-			undefined,
+			signingKey,
+			federationClient,
 			createOriginServerTs,
 		);
 
@@ -162,6 +170,8 @@ export const postRoomUpgrade =
 			{
 				membership: "join",
 			},
+			signingKey,
+			federationClient,
 		);
 
 		for (const stateType of STATE_TO_COPY) {
@@ -193,6 +203,8 @@ export const postRoomUpgrade =
 				stateType,
 				oldEvent.state_key ?? "",
 				copiedContent,
+				signingKey,
+				federationClient,
 			);
 		}
 
@@ -216,12 +228,32 @@ export const postRoomUpgrade =
 			authEvents: tombstoneAuthEvents,
 			serverName,
 			roomVersion: oldRoom.room_version,
+			signingKey,
 		});
 
 		checkEventAuth(tombstoneEvent, tombstoneEventId, oldRoom);
 		await storage.setStateEvent(oldRoomId, tombstoneEvent, tombstoneEventId);
 		oldRoom.depth++;
 		oldRoom.forward_extremities = [tombstoneEventId];
+
+		// Fan the tombstone out to every remote server resident in the OLD room.
+		// Remote members (e.g. bob on hs2) are joined to the old room and must see
+		// the tombstone over federation before they can find and join the
+		// replacement room. The new room's create/member/state events were already
+		// federated by sendStateEvent above, but the new room has no remote members
+		// yet — the tombstone in the old room is the only signal remote members get.
+		// Best-effort and fire-and-forget (same semantics as sendStateEvent fanout).
+		if (signingKey && federationClient) {
+			await fanoutEvent(
+				storage,
+				serverName,
+				signingKey,
+				federationClient,
+				oldRoomId,
+				tombstoneEvent,
+				tombstoneEventId,
+			);
+		}
 
 		// Copy over any room-scoped push rules for all local joined users from the
 		// old room id to the new room id (matches Synapse's

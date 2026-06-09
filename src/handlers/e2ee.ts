@@ -1,6 +1,7 @@
 import { generateToken } from "../crypto.ts";
 import { badJson } from "../errors.ts";
 import type { FederationClient } from "../federation/client.ts";
+import { deliverEduToDestination } from "../federation/outbound.ts";
 import type { Handler } from "../router.ts";
 import type { SigningKey } from "../signing.ts";
 import type { Storage } from "../storage/interface.ts";
@@ -11,6 +12,7 @@ import type {
 	KeysQueryRequest,
 	KeysUploadRequest,
 } from "../types/e2ee.ts";
+import type { EDU } from "../types/events.ts";
 import type { DeviceId, ServerName, UserId } from "../types/index.ts";
 import type { JsonObject } from "../types/json.ts";
 
@@ -80,22 +82,23 @@ export const sendDeviceListUpdate = async (
 	const device = await storage.getDevice(userId, deviceId);
 	if (device?.display_name) content.device_display_name = device.display_name;
 
-	const edu = { edu_type: "m.device_list_update", content };
+	const edu: EDU = {
+		edu_type: "m.device_list_update",
+		content: content as EDU["content"],
+	};
 
+	// Durable per-destination delivery: an unreachable peer has the EDU queued
+	// and replayed on recovery (TestDeviceListsUpdateOverFederation's
+	// "interrupted/stopped server" cases). Errors are isolated per destination
+	// inside deliverEduToDestination, so the upload response is never affected.
 	for (const dest of destinations) {
-		const txnId = generateToken();
-		const txn = {
-			origin: serverName,
-			origin_server_ts: Date.now(),
-			pdus: [],
-			edus: [edu],
-		};
-		// Fire-and-forget: do not let a failing/unreachable destination affect
-		// the upload response. The Complement "interrupted/stopped server"
-		// cases rely on the upload succeeding even while the peer is down.
-		void federationClient
-			.request(dest, "PUT", `/_matrix/federation/v1/send/${txnId}`, txn)
-			.catch(() => {});
+		await deliverEduToDestination(
+			storage,
+			serverName,
+			federationClient,
+			dest,
+			edu,
+		);
 	}
 };
 
@@ -524,30 +527,29 @@ export const putSendToDevice =
 		// EDU once it is reachable again).
 		if (serverName && federationClient && remoteByDest.size > 0) {
 			for (const [dest, messages] of remoteByDest) {
-				const edu = {
+				const edu: EDU = {
 					edu_type: "m.direct_to_device",
 					content: {
 						sender: userId,
 						type: eventType,
 						message_id: generateToken(),
 						messages,
-					},
+					} as EDU["content"],
 				};
-				const txnId = generateToken();
-				const txn = {
-					origin: serverName,
-					origin_server_ts: Date.now(),
-					pdus: [],
-					edus: [edu],
-				};
-				void federationClient
-					.request(
-						dest,
-						"PUT",
-						`/_matrix/federation/v1/send/${encodeURIComponent(txnId)}`,
-						txn,
-					)
-					.catch(() => {});
+				// Durable delivery: if `dest` is unreachable the EDU is persisted
+				// and replayed on recovery (TestToDeviceMessagesOverFederation's
+				// "interrupted/stopped server" cases). Errors are isolated inside
+				// deliverEduToDestination, so the client's sendToDevice still 200s
+				// even while the peer is down. NOT awaited in the request path —
+				// blocking /sendToDevice on a slow/unreachable federation round-trip
+				// adds latency to every E2EE send and causes timeouts under load.
+				void deliverEduToDestination(
+					storage,
+					serverName,
+					federationClient,
+					dest,
+					edu,
+				).catch(() => {});
 			}
 		}
 

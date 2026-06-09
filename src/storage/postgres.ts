@@ -11,6 +11,7 @@ import type {
 	OneTimeKey,
 } from "../types/e2ee.ts";
 import type {
+	EDU,
 	PDU,
 	StrippedStateEvent,
 	ToDeviceEvent,
@@ -40,7 +41,10 @@ import {
 	eventToStrippedState,
 	INVITE_STATE_TYPES,
 } from "./ephemeral.ts";
-import { collapseReceiptsMsc4102 } from "./interface.ts";
+import {
+	collapseReceiptsMsc4102,
+	PENDING_FEDERATION_EDU_CAP,
+} from "./interface.ts";
 import type { Storage, StoredSession } from "./interface.ts";
 import { rowToSession, rowToUser } from "./sql-helpers.ts";
 
@@ -276,6 +280,14 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				txn_id TEXT NOT NULL,
 				PRIMARY KEY (origin, txn_id)
 			);
+
+			CREATE TABLE IF NOT EXISTS pending_federation_edus (
+				id BIGSERIAL PRIMARY KEY,
+				destination TEXT NOT NULL,
+				edu_json TEXT NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_pending_fed_edus_dest
+				ON pending_federation_edus (destination, id);
 
 			CREATE TABLE IF NOT EXISTS cross_signing_keys (
 				user_id TEXT NOT NULL,
@@ -2260,6 +2272,57 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		await this.pool.query(
 			"INSERT INTO federation_txns (origin, txn_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
 			[origin, txnId],
+		);
+	}
+
+	async enqueueFederationEdu(
+		destination: ServerName,
+		edu: EDU,
+	): Promise<number> {
+		const { rows } = await this.pool.query(
+			"INSERT INTO pending_federation_edus (destination, edu_json) VALUES ($1, $2) RETURNING id",
+			[destination, JSON.stringify(edu)],
+		);
+		const id = Number((rows[0] as { id: string | number }).id);
+		// Enforce the per-destination cap: delete oldest rows beyond the cap.
+		const { rowCount } = await this.pool.query(
+			"DELETE FROM pending_federation_edus WHERE id IN (SELECT id FROM pending_federation_edus WHERE destination = $1 ORDER BY id ASC OFFSET $2)",
+			[destination, PENDING_FEDERATION_EDU_CAP],
+		);
+		if (rowCount && rowCount > 0) {
+			console.warn(
+				`pending_federation_edus: dropped ${rowCount} EDU(s) for ${destination} (queue cap ${PENDING_FEDERATION_EDU_CAP} exceeded)`,
+			);
+		}
+		return id;
+	}
+
+	async getPendingFederationEdus(
+		destination: ServerName,
+		limit: number,
+	): Promise<{ id: number; edu: EDU }[]> {
+		const { rows } = await this.pool.query(
+			"SELECT id, edu_json FROM pending_federation_edus WHERE destination = $1 ORDER BY id ASC LIMIT $2",
+			[destination, limit],
+		);
+		return (rows as { id: string | number; edu_json: string }[]).map((r) => ({
+			id: Number(r.id),
+			edu: JSON.parse(r.edu_json) as EDU,
+		}));
+	}
+
+	async deleteFederationEdu(id: number): Promise<void> {
+		await this.pool.query("DELETE FROM pending_federation_edus WHERE id = $1", [
+			id,
+		]);
+	}
+
+	async getPendingFederationDestinations(): Promise<ServerName[]> {
+		const { rows } = await this.pool.query(
+			"SELECT DISTINCT destination FROM pending_federation_edus",
+		);
+		return (rows as { destination: string }[]).map(
+			(r) => r.destination as ServerName,
 		);
 	}
 

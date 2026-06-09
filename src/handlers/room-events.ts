@@ -995,7 +995,73 @@ export const getMessages =
 						: undefined,
 			};
 		} else {
-			result = await storage.getEventsByRoom(roomId, limit, from, dir);
+			// Normal pagination. We page in TOPOLOGICAL (DAG) order — `(depth,
+			// stream_ordering)` — rather than raw stream/arrival order, mirroring
+			// Synapse's `paginate_room_events_by_topological_ordering`
+			// (storage/databases/main/stream.py: `ORDER BY topological_ordering,
+			// stream_ordering`). This matters when an event arrives out of DAG order:
+			// a federated event injected late (high stream position) but forked at an
+			// earlier point in the DAG (low depth) must scroll back into its DAG
+			// position, not its arrival position. Ordering by stream alone returns
+			// scrollback in the wrong order and can drop the boundary event
+			// (TestNetworkPartitionOrdering).
+			//
+			// The pagination cursor remains a STREAM position (our tokens are plain
+			// integers, and sync's `prev_batch` is a stream position): we select the
+			// page by a stream-position bound but ORDER the selected events
+			// topologically. Bounds are inclusive of the token on the "from" side so a
+			// sync `prev_batch` of `firstKept - 1` includes the event immediately
+			// older (in stream order) than the live window; the emitted `end` token is
+			// `oldest_returned_stream_pos - 1` (dir=b) / `newest_returned_stream_pos +
+			// 1` (dir=f), keeping successive pages contiguous and non-overlapping.
+			const all = await storage.getEventsByRoomSince(
+				roomId as RoomId,
+				0,
+				1_000_000,
+			);
+
+			// Topological (depth, then stream) ascending order over the whole room.
+			const ordered = [...all.events].sort(
+				(a, b) =>
+					a.event.depth - b.event.depth || a.streamPos - b.streamPos,
+			);
+
+			let page: { event: PDU; eventId: EventId; streamPos: number }[];
+			let end: number | undefined;
+
+			if (dir === "b") {
+				// Backward: events at or before the cursor (by stream position), most
+				// recent first in DAG order. Absent token → start from the newest.
+				const upper = from ?? Number.POSITIVE_INFINITY;
+				const eligible = ordered.filter((e) => e.streamPos <= upper);
+				page = eligible.slice(Math.max(0, eligible.length - limit)).reverse();
+				if (page.length > 0 && eligible.length > page.length) {
+					const oldest = page[page.length - 1] as { streamPos: number };
+					end = oldest.streamPos - 1;
+				}
+			} else {
+				// Forward: events strictly after the cursor (by stream position),
+				// oldest first in DAG order. The lower bound is EXCLUSIVE so paginating
+				// forward from a sync `next_batch` token (a stream position pointing AT
+				// the last-seen event) does not re-deliver that event — matching the
+				// previous stream-ordered pager's `streamPos > from` semantics and
+				// TestSendAndFetchMessage (forward from a pre-send token must return
+				// only the newly-sent event, not the boundary state event). Absent
+				// token → start from the beginning of the room.
+				const lower = from ?? Number.NEGATIVE_INFINITY;
+				const eligible = ordered.filter((e) => e.streamPos > lower);
+				page = eligible.slice(0, limit);
+				if (page.length > 0 && eligible.length > page.length) {
+					// Next forward page continues strictly after the newest returned.
+					const newest = page[page.length - 1] as { streamPos: number };
+					end = newest.streamPos;
+				}
+			}
+
+			result = {
+				events: page.map((e) => ({ event: e.event, eventId: e.eventId })),
+				end,
+			};
 		}
 
 		let chunk = result.events.map((e) =>
@@ -1376,8 +1442,234 @@ export const getJoinedMembers =
 		return { status: 200, body: { joined } };
 	};
 
+/**
+ * Find the closest local event to `ts` in `dir` direction, mirroring Synapse's
+ * `get_event_id_for_timestamp` SQL exactly (events_worker.py):
+ *
+ *   ORDER BY origin_server_ts {order}, depth {order}, stream_ordering {order}
+ *   WHERE origin_server_ts {<=|>=} ts   LIMIT 1
+ *
+ * The primary key is `origin_server_ts` (NOT depth) — sorting by depth first
+ * returns the wrong neighbour when timestamps differ. We tie-break on `depth`
+ * then `stream_ordering` (received order), which decides same-timestamp runs in
+ * DAG order: looking backwards returns the *last* such event, forwards the
+ * *first*.
+ *
+ * - `dir === "f"`: smallest `origin_server_ts >= ts`, then smallest depth, then
+ *   smallest stream position.
+ * - `dir === "b"`: largest `origin_server_ts <= ts`, then largest depth, then
+ *   largest stream position.
+ *
+ * `events` must carry each event's `streamPos` (stream_ordering).
+ */
+const findClosestLocalEvent = (
+	events: { event: PDU; eventId: EventId; streamPos: number }[],
+	ts: number,
+	dir: "f" | "b",
+): { eventId: EventId; event: PDU } | undefined => {
+	let best:
+		| { eventId: EventId; event: PDU; streamPos: number }
+		| undefined;
+
+	for (const cand of events) {
+		const candTs = cand.event.origin_server_ts;
+		if (dir === "f") {
+			if (candTs < ts) continue;
+		} else {
+			if (candTs > ts) continue;
+		}
+
+		if (!best) {
+			best = cand;
+			continue;
+		}
+
+		// Apply the ORDER BY: origin_server_ts, then depth, then stream_ordering,
+		// in ascending order for `f` and descending for `b`; keep the first row.
+		const bTs = best.event.origin_server_ts;
+		let better: boolean;
+		if (dir === "f") {
+			better =
+				candTs < bTs ||
+				(candTs === bTs &&
+					(cand.event.depth < best.event.depth ||
+						(cand.event.depth === best.event.depth &&
+							cand.streamPos < best.streamPos)));
+		} else {
+			better =
+				candTs > bTs ||
+				(candTs === bTs &&
+					(cand.event.depth > best.event.depth ||
+						(cand.event.depth === best.event.depth &&
+							cand.streamPos > best.streamPos)));
+		}
+		if (better) best = cand;
+	}
+
+	return best
+		? { eventId: best.eventId, event: best.event }
+		: undefined;
+};
+
+/**
+ * Mirror of Synapse's `is_event_next_to_backward_gap` (events_worker.py):
+ * checked when looking *forwards*. The local event is next to a backward gap if
+ * any of its `prev_events` is missing locally — i.e. there is unknown history
+ * older than it that could hold a closer event. (Synapse keys this off
+ * `event_backward_extremities`; the unheld prev_events are their analogue.)
+ */
+const isEventNextToBackwardGap = (
+	event: PDU,
+	held: Set<EventId>,
+): boolean => event.prev_events.some((p) => !held.has(p));
+
+/**
+ * Mirror of Synapse's `is_event_next_to_forward_gap` (events_worker.py):
+ * checked when looking *backwards*. A forward extremity is never a gap (it is
+ * the latest event in the room). Otherwise the event is next to a forward gap
+ * if no held event references it in their `prev_events` — there is unknown
+ * history newer than it that could hold a closer event.
+ */
+const isEventNextToForwardGap = (
+	eventId: EventId,
+	forwardExtremities: EventId[],
+	referencedPrevs: Set<EventId>,
+): boolean => {
+	if (forwardExtremities.includes(eventId)) return false;
+	return !referencedPrevs.has(eventId);
+};
+
+/**
+ * Ask other resident servers for the closest event to `ts`, mirroring
+ * Synapse's `get_event_for_timestamp` federation fallback. Returns the remote
+ * server's answer (event id + claimed origin_server_ts) from the first server
+ * that responds, or `undefined` if none do. The event itself is NOT fetched
+ * here — the caller backfills it so `/context` and `/messages` can work.
+ */
+const remoteTimestampToEvent = async (
+	storage: Storage,
+	serverName: string,
+	federationClient: FederationClient,
+	roomId: RoomId,
+	ts: number,
+	dir: "f" | "b",
+): Promise<{ eventId: EventId; originServerTs: number } | undefined> => {
+	const servers = (await storage.getServersInRoom(roomId)).filter(
+		(s) => s !== serverName,
+	);
+	const path = `/_matrix/federation/v1/timestamp_to_event/${encodeURIComponent(
+		roomId,
+	)}?ts=${ts}&dir=${dir}`;
+
+	for (const server of servers) {
+		let res: { status: number; body: unknown };
+		try {
+			res = await federationClient.request(server, "GET", path);
+		} catch {
+			continue;
+		}
+		if (res.status !== 200 || typeof res.body !== "object" || res.body === null)
+			continue;
+		const body = res.body as { event_id?: unknown; origin_server_ts?: unknown };
+		if (
+			typeof body.event_id !== "string" ||
+			typeof body.origin_server_ts !== "number"
+		)
+			continue;
+		return {
+			eventId: body.event_id as EventId,
+			originServerTs: body.origin_server_ts,
+		};
+	}
+	return undefined;
+};
+
+/**
+ * Backfill a specific remote event (and its ancestry) into local storage by
+ * seeding the federation `/backfill` walk from that event id. After this
+ * returns successfully the event is persisted locally with enough surrounding
+ * history that `/context` and backward `/messages` pagination work. Returns
+ * the stored event, or `undefined` if it could not be fetched/verified.
+ */
+const backfillRemoteEventById = async (
+	storage: Storage,
+	serverName: string,
+	federationClient: FederationClient,
+	roomId: RoomId,
+	eventId: EventId,
+	roomVersion: string | undefined,
+): Promise<PDU | undefined> => {
+	const existing = await storage.getEvent(eventId);
+	if (existing && existing.event.room_id === roomId) return existing.event;
+
+	const servers = (await storage.getServersInRoom(roomId)).filter(
+		(s) => s !== serverName,
+	);
+	const path = `/_matrix/federation/v1/backfill/${encodeURIComponent(
+		roomId,
+	)}?v=${encodeURIComponent(eventId)}&limit=100`;
+
+	for (const server of servers) {
+		let res: { status: number; body: unknown };
+		try {
+			res = await federationClient.request(server, "GET", path);
+		} catch {
+			continue;
+		}
+		if (res.status !== 200 || typeof res.body !== "object" || res.body === null)
+			continue;
+		const pdus = (res.body as { pdus?: unknown }).pdus;
+		if (!Array.isArray(pdus)) continue;
+
+		for (const raw of pdus) {
+			if (!raw || typeof raw !== "object") continue;
+			const event = raw as PDU;
+			if (event.room_id !== roomId) continue;
+
+			let id: EventId;
+			try {
+				const expectedHash = computeContentHash(event);
+				if (event.hashes?.sha256 !== expectedHash) continue;
+				id = computeEventId(event, roomVersion);
+			} catch {
+				continue;
+			}
+			if (await storage.getEvent(id)) continue;
+			try {
+				await verifyOriginSignature(
+					event,
+					server,
+					storage,
+					federationClient,
+					roomVersion,
+				);
+			} catch {
+				continue;
+			}
+			// Persist + index defensively: a single malformed PDU must not abort
+			// the whole backfill (or, worse, escape as a 500 from the handler).
+			try {
+				await storage.storeEvent(event, id);
+				await indexRelation(storage, event, id);
+			} catch {
+				continue;
+			}
+		}
+
+		const stored = await storage.getEvent(eventId);
+		if (stored && stored.event.room_id === roomId) return stored.event;
+	}
+
+	return undefined;
+};
+
 export const getTimestampToEvent =
-	(storage: Storage): Handler =>
+	(
+		storage: Storage,
+		serverName?: string,
+		_signingKey?: SigningKey,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const roomId = req.params.roomId as string;
 		await requireJoinedRoom(storage, roomId, req.userId as string);
@@ -1390,37 +1682,101 @@ export const getTimestampToEvent =
 		const dir = req.query.get("dir");
 		if (dir !== "f" && dir !== "b") throw badJson("'dir' must be 'f' or 'b'");
 
-		// Events are stored in forward chronological order
-		const result = await storage.getEventsByRoom(roomId, 10000, undefined, "f");
-		if (result.events.length === 0) throw notFound("No events in room");
+		const room = await storage.getRoom(roomId);
+		const roomVersion = room?.room_version;
 
-		let best: { eventId: string; originServerTs: number } | undefined;
+		// Find the closest local event in `dir`, using Synapse's exact ordering
+		// (origin_server_ts, depth, stream_ordering). `getEventsByRoomSince(0)`
+		// yields every held event with its `streamPos` (stream_ordering).
+		const all = await storage.getEventsByRoomSince(
+			roomId as RoomId,
+			0,
+			1_000_000,
+		);
+		const local = findClosestLocalEvent(all.events, ts, dir);
 
-		if (dir === "f") {
-			// Find first event at or after ts (events are chronological, first match wins)
-			for (const entry of result.events) {
-				const eventTs = entry.event.origin_server_ts;
-				if (eventTs >= ts) {
-					best = { eventId: entry.eventId, originServerTs: eventTs };
-					break;
+		// Gap detection (Synapse `get_event_for_timestamp`): a local event that
+		// sits next to a gap in our history might be hiding a closer event behind
+		// missing prev/forward edges, so we must consult federation even though we
+		// found something locally. Looking *forwards* we check for a backward gap;
+		// looking *backwards* a forward gap.
+		const held = new Set<EventId>(all.events.map((e) => e.eventId));
+		const referencedPrevs = new Set<EventId>();
+		for (const e of all.events) {
+			for (const p of e.event.prev_events) referencedPrevs.add(p);
+		}
+		const forwardExtremities = room?.forward_extremities ?? [];
+
+		let nextToGap = false;
+		if (local) {
+			nextToGap =
+				dir === "f"
+					? isEventNextToBackwardGap(local.event, held)
+					: isEventNextToForwardGap(
+							local.eventId,
+							forwardExtremities,
+							referencedPrevs,
+						);
+		}
+
+		// Federation fallback (mirrors Synapse's get_event_for_timestamp): when we
+		// have no suitable local event, or the local event is next to a gap, ask
+		// the room's other resident servers, then backfill the event they return
+		// so we can serve it (and the surrounding history for /context +
+		// /messages). The whole remote path is best-effort: ANY failure (network,
+		// verification, persistence) falls through to the local answer (or 404),
+		// never a 500.
+		if ((!local || nextToGap) && serverName && federationClient) {
+			try {
+				const remote = await remoteTimestampToEvent(
+					storage,
+					serverName,
+					federationClient,
+					roomId as RoomId,
+					ts,
+					dir,
+				);
+				if (remote) {
+					const fetched = await backfillRemoteEventById(
+						storage,
+						serverName,
+						federationClient,
+						roomId as RoomId,
+						remote.eventId,
+						roomVersion,
+					);
+					// Only return the remote event when it's actually closer to `ts`
+					// than the local one (Synapse's `abs(...) < abs(...)` check), or
+					// when we had no local event at all.
+					if (fetched) {
+						const remoteTs = fetched.origin_server_ts;
+						const closer =
+							!local ||
+							Math.abs(remoteTs - ts) <
+								Math.abs(local.event.origin_server_ts - ts);
+						if (closer) {
+							return {
+								status: 200,
+								body: {
+									event_id: remote.eventId,
+									origin_server_ts: remoteTs,
+								},
+							};
+						}
+					}
 				}
-			}
-		} else {
-			// Find last event at or before ts (scan forward, keep updating)
-			for (const entry of result.events) {
-				const eventTs = entry.event.origin_server_ts;
-				if (eventTs <= ts) {
-					best = { eventId: entry.eventId, originServerTs: eventTs };
-				} else {
-					break;
-				}
+			} catch {
+				// Fall through to the local answer (or 404) below.
 			}
 		}
 
-		if (!best) throw notFound("No event found for the given timestamp");
+		if (!local) throw notFound("No event found for the given timestamp");
 
 		return {
 			status: 200,
-			body: { event_id: best.eventId, origin_server_ts: best.originServerTs },
+			body: {
+				event_id: local.eventId,
+				origin_server_ts: local.event.origin_server_ts,
+			},
 		};
 	};

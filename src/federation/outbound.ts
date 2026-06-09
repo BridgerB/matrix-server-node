@@ -31,6 +31,216 @@ import type { FederationClient } from "./client.ts";
 const newTxnId = (): string => randomBytes(16).toString("base64url");
 
 /**
+ * Max EDUs packed into a single replay transaction. Federation transactions are
+ * capped at 100 EDUs by the spec; we stay well under that. Synapse uses the same
+ * 100-EDU-per-transaction limit in TransactionManager.
+ */
+const MAX_EDUS_PER_TXN = 100;
+
+/**
+ * Deliver an EDU to a single destination with a durable retry queue, mirroring
+ * Synapse's PerDestinationQueue:
+ *
+ *  1. Drain any EDUs previously queued for this destination (catch-up) and batch
+ *     them with the new EDU into one federation transaction.
+ *  2. POST the transaction. On success (2xx) delete the delivered queued entries
+ *     so they are not re-sent.
+ *  3. On failure (network error / non-2xx) persist the NEW edu to the queue for
+ *     this destination so it is replayed the next time we successfully contact
+ *     it (next outbound send, or the periodic/startup catch-up sweep). Already
+ *     queued entries are left in place to retry again later.
+ *
+ * The new EDU is always persisted up-front when there is a backlog, so a crash
+ * mid-flight never loses it; on success the whole batch is deleted.
+ */
+export const deliverEduToDestination = async (
+	storage: Storage,
+	serverName: string,
+	federationClient: FederationClient,
+	destination: ServerName,
+	edu: EDU,
+): Promise<void> => {
+	// Pull any backlog for this destination first.
+	let pending: { id: number; edu: EDU }[];
+	try {
+		pending = await storage.getPendingFederationEdus(
+			destination,
+			MAX_EDUS_PER_TXN - 1,
+		);
+	} catch (err) {
+		console.error(
+			`deliverEdu: failed to load pending EDUs for ${destination}:`,
+			(err as Error).message,
+		);
+		pending = [];
+	}
+
+	// Persist the new EDU now (so it survives a crash) only when there is a
+	// backlog — otherwise we optimistically try the fast path and queue on
+	// failure, avoiding a write on the common (peer-up) case.
+	let newEntryId: number | undefined;
+	if (pending.length > 0) {
+		try {
+			newEntryId = await storage.enqueueFederationEdu(destination, edu);
+		} catch (err) {
+			console.error(
+				`deliverEdu: failed to enqueue EDU for ${destination}:`,
+				(err as Error).message,
+			);
+		}
+	}
+
+	const batch: { id?: number; edu: EDU }[] = [...pending];
+	if (newEntryId !== undefined) batch.push({ id: newEntryId, edu });
+	else batch.push({ edu });
+
+	const txnId = newTxnId();
+	const body = {
+		origin: serverName,
+		origin_server_ts: Date.now(),
+		pdus: [],
+		edus: batch.map((b) => b.edu),
+	};
+
+	let delivered = false;
+	try {
+		const resp = await federationClient.request(
+			destination,
+			"PUT",
+			`/_matrix/federation/v1/send/${encodeURIComponent(txnId)}`,
+			body,
+		);
+		delivered = resp.status < 400;
+		if (!delivered) {
+			console.error(
+				`deliverEdu: ${destination} rejected EDU batch (status ${resp.status})`,
+			);
+		}
+	} catch (err) {
+		console.error(
+			`deliverEdu: delivery to ${destination} failed:`,
+			(err as Error).message,
+		);
+	}
+
+	if (delivered) {
+		// Remove every successfully delivered persisted entry.
+		for (const b of batch) {
+			if (b.id !== undefined) {
+				await storage
+					.deleteFederationEdu(b.id)
+					.catch(() => {});
+			}
+		}
+		return;
+	}
+
+	// Delivery failed. Ensure the new EDU is persisted for a later replay (it is
+	// already persisted when there was a backlog; queue it now otherwise).
+	if (newEntryId === undefined) {
+		await storage
+			.enqueueFederationEdu(destination, edu)
+			.catch((err: Error) =>
+				console.error(
+					`deliverEdu: failed to enqueue EDU for ${destination} after delivery failure:`,
+					err.message,
+				),
+			);
+	}
+};
+
+/**
+ * Replay queued EDUs for a single destination (catch-up). Sends batches until
+ * the queue is empty or a send fails (in which case we stop and leave the rest
+ * for the next sweep). Used by the startup/periodic catch-up sweep.
+ */
+export const flushPendingEdusForDestination = async (
+	storage: Storage,
+	serverName: string,
+	federationClient: FederationClient,
+	destination: ServerName,
+): Promise<void> => {
+	for (;;) {
+		let pending: { id: number; edu: EDU }[];
+		try {
+			pending = await storage.getPendingFederationEdus(
+				destination,
+				MAX_EDUS_PER_TXN,
+			);
+		} catch {
+			return;
+		}
+		if (pending.length === 0) return;
+
+		const txnId = newTxnId();
+		const body = {
+			origin: serverName,
+			origin_server_ts: Date.now(),
+			pdus: [],
+			edus: pending.map((p) => p.edu),
+		};
+
+		let delivered = false;
+		try {
+			const resp = await federationClient.request(
+				destination,
+				"PUT",
+				`/_matrix/federation/v1/send/${encodeURIComponent(txnId)}`,
+				body,
+			);
+			delivered = resp.status < 400;
+		} catch {
+			delivered = false;
+		}
+
+		if (!delivered) return; // still unreachable; try again next sweep
+
+		for (const p of pending) {
+			await storage.deleteFederationEdu(p.id).catch(() => {});
+		}
+		// Loop to drain any further backlog beyond this batch.
+		if (pending.length < MAX_EDUS_PER_TXN) return;
+	}
+};
+
+/**
+ * Sweep every destination that currently has queued EDUs and attempt a replay.
+ * Called once on startup (so a sender that restarted while a peer was down still
+ * recovers) and on a periodic timer (so a peer that comes back up is caught up
+ * even without new outbound traffic). Failures per destination are isolated.
+ */
+export const flushAllPendingEdus = async (
+	storage: Storage,
+	serverName: string,
+	federationClient: FederationClient,
+): Promise<void> => {
+	let destinations: ServerName[];
+	try {
+		destinations = await storage.getPendingFederationDestinations();
+	} catch (err) {
+		console.error(
+			"flushAllPendingEdus: failed to list pending destinations:",
+			(err as Error).message,
+		);
+		return;
+	}
+	for (const destination of destinations) {
+		if (destination === serverName) continue;
+		await flushPendingEdusForDestination(
+			storage,
+			serverName,
+			federationClient,
+			destination,
+		).catch((err: Error) =>
+			console.error(
+				`flushAllPendingEdus: replay to ${destination} failed:`,
+				err.message,
+			),
+		);
+	}
+};
+
+/**
  * Collect the distinct remote servers (excluding our own) that are resident in
  * any of the supplied rooms. Lookup failures for an individual room are
  * swallowed (logged) so a single bad room never aborts EDU fanout for the rest.
@@ -68,9 +278,11 @@ const collectRemoteServers = async (
  * caught and logged but never propagated. The function only awaits the (local)
  * lookup of resident servers.
  *
- * EDUs are best-effort and inherently transient — a destination that is offline
- * simply misses this typing/presence update, which is acceptable (the next
- * update supersedes it). There is no queue or retry, matching `fanoutEvent`.
+ * Transient EDUs (typing/presence) are best-effort: a destination that is
+ * offline simply misses the update, which is acceptable (the next update
+ * supersedes it). Pass `durable: true` for EDUs that MUST eventually arrive even
+ * across a destination outage (device-list updates) — those route through
+ * `deliverEduToDestination`, which persists and replays on recovery.
  */
 export const fanoutEdu = async (
 	storage: Storage,
@@ -79,12 +291,27 @@ export const fanoutEdu = async (
 	federationClient: FederationClient,
 	roomIds: RoomId | RoomId[],
 	edu: EDU,
+	durable = false,
 ): Promise<void> => {
 	const rooms = Array.isArray(roomIds) ? roomIds : [roomIds];
 	const destinations = await collectRemoteServers(storage, serverName, rooms);
 	if (destinations.length === 0) return;
 
 	for (const destination of destinations) {
+		if (durable) {
+			// Durable path: persist-on-failure + replay-on-recovery. Awaited so a
+			// crash before enqueue cannot lose the EDU, but errors are isolated
+			// per destination inside deliverEduToDestination.
+			await deliverEduToDestination(
+				storage,
+				serverName,
+				federationClient,
+				destination,
+				edu,
+			);
+			continue;
+		}
+
 		const txnId = newTxnId();
 		const body = {
 			origin: serverName,

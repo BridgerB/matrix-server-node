@@ -465,36 +465,52 @@ export const getFederationTimestampToEvent =
 		if (!isServerAllowedByAcl(req.origin as ServerName, room))
 			throw forbidden("Server is denied by ACL");
 
-		// Events are stored in forward chronological order
-		const result = await storage.getEventsByRoom(roomId, 10000, undefined, "f");
-		const events = result.events;
+		// Pick the closest event using Synapse's exact `get_event_id_for_timestamp`
+		// ordering (events_worker.py):
+		//
+		//   WHERE origin_server_ts {<=|>=} ts
+		//   ORDER BY origin_server_ts {order}, depth {order}, stream_ordering {order}
+		//   LIMIT 1
+		//
+		// origin_server_ts is the PRIMARY key; depth and stream_ordering only
+		// tie-break same-timestamp runs (so forwards returns the first such event,
+		// backwards the last). `getEventsByRoomSince(0)` yields every held event
+		// annotated with its `streamPos` (stream_ordering).
+		const all = await storage.getEventsByRoomSince(roomId, 0, 1_000_000);
 
-		let closest: { event: PDU; eventId: EventId } | undefined;
-
-		if (dir === "f") {
-			for (const entry of events) {
-				if (entry.event.origin_server_ts >= ts) {
-					closest = entry;
-					break;
-				}
+		let best:
+			| { event: PDU; eventId: EventId; streamPos: number }
+			| undefined;
+		for (const cand of all.events) {
+			const candTs = cand.event.origin_server_ts;
+			if (dir === "f" ? candTs < ts : candTs > ts) continue;
+			if (!best) {
+				best = cand;
+				continue;
 			}
-		} else {
-			for (const entry of events) {
-				if (entry.event.origin_server_ts <= ts) {
-					closest = entry;
-				} else {
-					break;
-				}
-			}
+			const bTs = best.event.origin_server_ts;
+			const better =
+				dir === "f"
+					? candTs < bTs ||
+						(candTs === bTs &&
+							(cand.event.depth < best.event.depth ||
+								(cand.event.depth === best.event.depth &&
+									cand.streamPos < best.streamPos)))
+					: candTs > bTs ||
+						(candTs === bTs &&
+							(cand.event.depth > best.event.depth ||
+								(cand.event.depth === best.event.depth &&
+									cand.streamPos > best.streamPos)));
+			if (better) best = cand;
 		}
 
-		if (!closest) throw notFound("No event found");
+		if (!best) throw notFound("No event found");
 
 		return {
 			status: 200,
 			body: {
-				event_id: closest.eventId,
-				origin_server_ts: closest.event.origin_server_ts,
+				event_id: best.eventId,
+				origin_server_ts: best.event.origin_server_ts,
 			},
 		};
 	};
