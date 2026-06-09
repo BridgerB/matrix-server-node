@@ -278,6 +278,8 @@ export interface Storage {
 		  }
 		| undefined
 	>;
+	/** Stream position at which `userId`'s presence last changed (0 if never). */
+	getPresenceChangedAt(userId: UserId): Promise<number>;
 
 	// Media
 	storeMedia(media: StoredMedia, data: Buffer): Promise<void>;

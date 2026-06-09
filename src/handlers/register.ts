@@ -23,7 +23,12 @@ const REGISTRATION_FLOWS: { stages: AuthType[] }[] = [
 	{ stages: ["m.login.dummy"] },
 ];
 
-const MIN_PASSWORD_LENGTH = 8;
+// Minimum password length. The Matrix spec does not mandate a server-side
+// minimum, and Complement tests legitimately register with short passwords
+// (e.g. "hunter2", "secret"); an overly strict minimum (was 8) rejected those
+// with M_WEAK_PASSWORD. Keep it at 1 so only an empty password is rejected
+// (empty is also caught earlier by the missing-field check).
+const MIN_PASSWORD_LENGTH = 1;
 const USERNAME_RE = /^[a-z0-9._=\-/]+$/;
 
 export const postRegister =

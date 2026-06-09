@@ -140,6 +140,64 @@ const applyTimelineFilter = (
 };
 
 /**
+ * Detect a non-contiguous gap in a room's stored timeline (Synapse's
+ * `get_timeline_gaps` / `record_event_timeline_gap`).
+ *
+ * Background: events arriving via federation backfill / `get_missing_events`
+ * can be inserted into the room with sequential *stream* positions even though
+ * the DAG behind them is NOT fully known to us. In TestSyncTimelineGap a remote
+ * sends one event referencing ~50 prior events; our server fills the gap via
+ * `get_missing_events` but only obtains a recent subset (the spec lets the
+ * remote return a bounded window). The result is a "hole" in the DAG: the
+ * oldest backfilled event references `prev_events` we never fetched and do not
+ * have stored. Stream order alone makes the timeline look contiguous, but it is
+ * not — there is unseen history behind that event.
+ *
+ * We detect this by scanning the room's full forward-ordered timeline for an
+ * event whose `prev_events` are not all present in storage (a "broken
+ * backlink"). The create event (no prev_events) is exempt. Such an event, and
+ * everything after it, is disconnected from earlier history by a gap.
+ *
+ * Returns the stream position of the gap — events with `streamPos > gapPos`
+ * lie *after* the gap and are contiguously connected to the latest events;
+ * events at or before it lie *before* the gap. Returns `undefined` when the
+ * timeline is fully contiguous (the common case, so normal rooms are
+ * unaffected). The *earliest* broken backlink within the window defines the
+ * gap, so the entire connected component of recent events (e.g. the bounded
+ * batch we did fetch via `get_missing_events`, plus the event that referenced
+ * them) is delivered after the gap rather than collapsing to just the newest
+ * event (which typically also references the same unseen history).
+ */
+const detectTimelineGap = async (
+	storage: Storage,
+	roomId: RoomId,
+): Promise<number | undefined> => {
+	// The full forward timeline, carrying stream positions. Both state events
+	// (via setStateEvent → storeEvent) and message events live here, so this is
+	// the complete set of locally-known event IDs — a prev_event absent from it
+	// is genuinely unfetched history, not a state event we happen to track
+	// separately.
+	const window = await storage.getEventsByRoomSince(roomId, 0, 100000);
+	const present = new Set<EventId>(window.events.map((e) => e.eventId));
+	for (const { event, streamPos } of window.events) {
+		const prevs = (event.prev_events ?? []) as EventId[];
+		if (prevs.length === 0) continue; // create event / no backlink to break
+		const broken = prevs.some((p) => !present.has(p));
+		if (broken) {
+			// The gap sits immediately before this, the *earliest* event whose DAG
+			// backlink is broken. Everything from here to `now` is the contiguous
+			// "after gap" segment we can serve (later events may also reference the
+			// same unseen history, but they are reachable from this point forward).
+			// We return on the first broken backlink so the whole connected
+			// component after the gap is preserved, rather than collapsing to just
+			// the newest event (which typically also references the unseen history).
+			return streamPos - 1;
+		}
+	}
+	return undefined;
+};
+
+/**
  * MSC4115: compute the syncing user's membership as of each event in the room.
  *
  * Walks the room's full forward-ordered timeline tracking the user's membership.
@@ -207,17 +265,35 @@ const collectJoinedUsers = async (
 		.map((m) => m.event.state_key as UserId);
 };
 
+/**
+ * Build `m.presence` events for a set of users.
+ *
+ * `users` is the set to emit for:
+ *   - INITIAL sync: every user sharing a room with the syncer (all `seenUsers`).
+ *   - INCREMENTAL sync: only users the syncer NEWLY shares a room with in this
+ *     window (the same newly-joined/invited set used for `device_lists.changed`).
+ *     Already-shared users with no presence change are NOT re-emitted, so a
+ *     subsequent sync with no membership change carries an empty `presence`.
+ *
+ * A user with no stored presence still produces an event with the Matrix default
+ * `presence: "online"` (an active user). This means a user who never called
+ * /presence (e.g. someone who just joined and is being synced) still appears in
+ * the recipient's `presence.events`.
+ */
 const buildPresenceEvents = async (
 	storage: Storage,
-	seenUsers: Set<UserId>,
+	users: Set<UserId>,
 ): Promise<ClientEvent[]> => {
 	const events: ClientEvent[] = [];
-	for (const uid of seenUsers) {
+	for (const uid of users) {
 		const p = await storage.getPresence(uid);
-		if (!p) continue;
-		const content: Record<string, unknown> = { presence: p.presence };
-		if (p.status_msg) content.status_msg = p.status_msg;
-		if (p.last_active_ts)
+		// Synthesize a default-online presence when storage has none, so users
+		// who never explicitly set presence still appear.
+		const content: Record<string, unknown> = {
+			presence: p?.presence ?? "online",
+		};
+		if (p?.status_msg) content.status_msg = p.status_msg;
+		if (p?.last_active_ts)
 			content.last_active_ago = Date.now() - p.last_active_ts;
 		events.push({
 			type: "m.presence",
@@ -274,13 +350,21 @@ const buildEphemeralEvents = async (
 	storage: Storage,
 	roomId: RoomId,
 	forUserId: UserId,
+	// Whether to emit an `m.typing` event even when nobody is currently typing.
+	// An empty typing notification is only meaningful as a *change* (a typing-stop
+	// in an incremental sync). Emitting it unconditionally adds a spurious empty
+	// `m.typing` to every room's ephemeral on a full sync — TestACLsForEDUs checks
+	// a quiet room has zero ephemeral events. So only force it when typing changed.
+	typingChanged = false,
 ): Promise<ClientEvent[]> => {
-	const events: ClientEvent[] = [
-		{
+	const typingUsers = await storage.getTypingUsers(roomId);
+	const events: ClientEvent[] = [];
+	if (typingUsers.length > 0 || typingChanged) {
+		events.push({
 			type: "m.typing",
-			content: { user_ids: await storage.getTypingUsers(roomId) },
-		} as unknown as ClientEvent,
-	];
+			content: { user_ids: typingUsers },
+		} as unknown as ClientEvent);
+	}
 	const receipts = await storage.getReceipts(roomId);
 	// Filter private receipts: m.read.private only visible to the owning user
 	const visibleReceipts = receipts.filter(
@@ -755,10 +839,19 @@ const buildInitialSync = async (
 
 			const allState = await storage.getAllState(roomId);
 
-			let candidates = fullWindow.events.map((e) => ({
-				streamPos: e.streamPos,
-				clientEvent: pduToClientEvent(e.event, e.eventId),
-			}));
+			// Detect a non-contiguous DAG gap (events backfilled via federation
+			// `get_missing_events` with unseen history behind them). On initial sync
+			// we only deliver events *after* the most recent gap and force `limited`,
+			// so the client paginates the unreachable history (Synapse
+			// `_load_filtered_recents`, gap_token branch).
+			const gapPos = await detectTimelineGap(storage, roomId);
+
+			let candidates = fullWindow.events
+				.filter((e) => gapPos === undefined || e.streamPos > gapPos)
+				.map((e) => ({
+					streamPos: e.streamPos,
+					clientEvent: pduToClientEvent(e.event, e.eventId),
+				}));
 
 			if (ignoredUsers.size > 0) {
 				candidates = candidates.filter(
@@ -769,8 +862,10 @@ const buildInitialSync = async (
 			}
 
 			// Truncate to the timeline limit (most-recent events by stream order) BEFORE
-			// filtering. `limited` reflects whether older history was dropped.
-			const limited = candidates.length > filter.timelineLimit;
+			// filtering. `limited` reflects whether older history was dropped, or a gap
+			// exists behind the delivered window.
+			const limited =
+				gapPos !== undefined || candidates.length > filter.timelineLimit;
 			const recentWindow = limited
 				? candidates.slice(candidates.length - filter.timelineLimit)
 				: candidates;
@@ -1063,18 +1158,32 @@ const buildIncrementalSync = async (
 				}));
 				storageGap = true;
 			} else {
-				// Load the full delta since `since` (no storage-side truncation) so the
+				// Detect a non-contiguous DAG gap in the room (events backfilled via
+				// federation `get_missing_events` with unseen history behind them —
+				// TestSyncTimelineGap). Mirrors Synapse `_load_filtered_recents`: when a
+				// gap falls within this sync window `(since, now]`, we must (a) mark the
+				// batch `limited` so the client paginates the hole, and (b) only return
+				// events *after* the gap, dropping pre-gap events from the delta even
+				// though they share the same stream window.
+				const gapPos = await detectTimelineGap(storage, roomId);
+				const gapInWindow = gapPos !== undefined && gapPos >= since;
+				// When there's a gap in the window, ignore `since` and load events from
+				// just after the gap; otherwise load the plain delta since `since`. In
+				// both cases we read the full set (no storage-side truncation) so the
 				// timeline filter is applied before we truncate to the limit.
+				const loadFrom = gapInWindow ? gapPos : since;
 				const res = await storage.getEventsByRoomSince(
 					roomId,
-					since,
+					loadFrom,
 					100000,
 				);
 				candidates = res.events.map((e) => ({
 					streamPos: e.streamPos,
 					clientEvent: pduToClientEvent(e.event, e.eventId),
 				}));
-				storageGap = false;
+				// A gap forces `limited` even if the (post-gap) delta is under the limit,
+				// so the client knows there is unreachable history behind this batch.
+				storageGap = gapInWindow;
 			}
 
 			if (ignoredUsers.size > 0) {
@@ -1180,20 +1289,20 @@ const buildIncrementalSync = async (
 					? String(newEvents[0]!.streamPos - 1)
 					: String(since);
 
-			const ephemeralEvents = await buildEphemeralEvents(storage, roomId, userId);
-
-			// `buildEphemeralEvents` always emits an `m.typing` event (possibly with
-			// an empty `user_ids`), so its mere presence must NOT cause an otherwise
-			// unchanged room to be re-reported on every incremental sync. Only treat
-			// ephemeral data as a reason to include the room when it actually carries
-			// content: a non-empty typing list, or any receipt event. (Timeline/state
-			// changes are handled by the other clauses.)
-			// Include the room when typing CHANGED since `since` (covers an
-			// explicit stop → empty typing list), or when there's a receipt event.
-			// Don't include it merely because the always-emitted m.typing event is
-			// present, or unchanged rooms would re-appear on every incremental sync.
+			// Emit an `m.typing` event only when someone is typing or when typing
+			// CHANGED since `since` (covers an explicit stop → empty list). This
+			// avoids re-reporting an unchanged room on every incremental sync.
 			const typingChangedAt = await storage.getTypingChangedAt(roomId);
 			const typingChanged = since === undefined || typingChangedAt > since;
+			const ephemeralEvents = await buildEphemeralEvents(
+				storage,
+				roomId,
+				userId,
+				typingChanged,
+			);
+
+			// Only treat ephemeral data as a reason to include the room when it
+			// carries a change: a typing change (incl. a stop), or any receipt event.
 			const hasEphemeralContent = ephemeralEvents.some((e) => {
 				if (e.type === "m.receipt") return true;
 				if (e.type === "m.typing") return typingChanged;
@@ -1415,7 +1524,26 @@ const buildIncrementalSync = async (
 		room.account_data = { events };
 	}
 
-	const presenceEvents = await buildPresenceEvents(storage, seenUsers);
+	// Presence (incremental): emit `m.presence` ONLY for users the syncer newly
+	// shares a room with in this window (the same set used for
+	// `device_lists.changed`). Already-shared users with no change are not
+	// re-emitted, so a subsequent unchanged sync carries an empty `presence`
+	// block. Self is excluded — a client does not receive its own presence here.
+	const presenceUsers = new Set<UserId>();
+	// Users newly sharing a room with us this window get their (default-online)
+	// presence...
+	for (const u of newlyJoinedOrInvitedUsers) {
+		if (u !== userId) presenceUsers.add(u);
+	}
+	// ...and any already-shared user whose presence actually changed since the
+	// `since` token gets their updated presence (TestPresence). Without this an
+	// explicit presence change never reaches other members of a shared room.
+	for (const u of seenUsers) {
+		if (u === userId) continue;
+		if (presenceUsers.has(u)) continue;
+		if ((await storage.getPresenceChangedAt(u)) > since) presenceUsers.add(u);
+	}
+	const presenceEvents = await buildPresenceEvents(storage, presenceUsers);
 
 	const toDeviceEvents = await storage.getToDeviceMessages(userId, deviceId);
 	if (toDeviceEvents.length > 0) {

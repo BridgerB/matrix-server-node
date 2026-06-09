@@ -54,6 +54,10 @@ export abstract class EphemeralMixin {
 		UserId,
 		{ presence: PresenceState; status_msg?: string; last_active_ts?: Timestamp }
 	>();
+	/** Stream position at which each user's presence last changed. Lets
+	 * incremental /sync surface presence updates to users sharing a room since
+	 * the `since` token (TestPresence), without re-reporting unchanged presence. */
+	protected presenceChangedAt = new Map<UserId, number>();
 
 	protected wakeWaiters(): void {
 		for (const waiter of this.eventWaiters) waiter();
@@ -136,7 +140,15 @@ export abstract class EphemeralMixin {
 			status_msg: statusMsg,
 			last_active_ts: Date.now(),
 		});
+		// Advance the stream so long-polling /sync wakes and surfaces the change,
+		// and record the position so incremental sync knows which users changed.
+		this.presenceChangedAt.set(userId, ++this.streamCounter);
 		this.wakeWaiters();
+	}
+
+	/** Stream position at which `userId`'s presence last changed (0 if never). */
+	async getPresenceChangedAt(userId: UserId): Promise<number> {
+		return this.presenceChangedAt.get(userId) ?? 0;
 	}
 
 	async getPresence(userId: UserId): Promise<

@@ -1,5 +1,6 @@
 import { canonicalJson } from "../events.ts";
 import { generateSessionId } from "../crypto.ts";
+import { verifyPassword } from "../crypto-utils.ts";
 import { badJson, forbidden } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
@@ -88,8 +89,11 @@ export const postDeviceSigningUpload =
 				const account = await storage.getUserById(userId);
 				if (!account) throw forbidden("User not found");
 
-				if (body.auth.password !== account.password_hash)
-					throw forbidden("Invalid password");
+				const passwordValid = await verifyPassword(
+					body.auth.password ?? "",
+					account.password_hash,
+				);
+				if (!passwordValid) throw forbidden("Invalid password");
 
 				await storage.addUIAACompleted(body.auth.session!, "m.login.password");
 				await storage.deleteUIAASession(body.auth.session!);

@@ -60,5 +60,13 @@ export DISABLE_RATE_LIMIT=1
 # Complement serves previewed pages from private Docker IPs; allow URL-preview fetches.
 export URL_PREVIEW_ALLOW_PRIVATE_IPS=1
 
+# Complement copies appservice registration YAML files to /complement/appservice/.
+# Convert them into the JSON array our server reads from APPSERVICE_REGISTRATIONS.
+if [ -d /complement/appservice ]; then
+    APPSERVICE_REGISTRATIONS="$(node scripts/complement-as-registrations.mjs /complement/appservice)"
+    export APPSERVICE_REGISTRATIONS
+    echo "Loaded appservice registrations: $APPSERVICE_REGISTRATIONS"
+fi
+
 # Start the server
 exec node src/index.ts

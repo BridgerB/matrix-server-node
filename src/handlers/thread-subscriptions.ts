@@ -50,6 +50,22 @@ interface ThreadState {
 // (userId, roomId, threadRootId) -> ThreadState
 const store = new Map<string, ThreadState>();
 
+/**
+ * Monotonic counter used to stamp every subscription write. We cannot reuse
+ * the storage stream position because subscribing does not store an event, so
+ * the stream position can stay constant across a subscribe. Incremental
+ * sliding sync compares `bumpStamp` against the `pos` it last returned (which
+ * is a storage stream position); to guarantee a brand-new subscription is
+ * always newer than any previously-returned `pos`, we seed this counter above
+ * the current stream position and increment it on every write.
+ */
+let bumpCounter = 0;
+
+const nextBumpStamp = (streamPosition: number): number => {
+	bumpCounter = Math.max(bumpCounter, streamPosition) + 1;
+	return bumpCounter;
+};
+
 const stateKey = (userId: string, roomId: string, threadRootId: string): string =>
 	`${userId}${KEY_SEP}${roomId}${KEY_SEP}${threadRootId}`;
 
@@ -166,7 +182,7 @@ export const putThreadSubscription =
 				return { status: 200, body: {} };
 			}
 
-			const bumpStamp = await storage.getStreamPosition();
+			const bumpStamp = nextBumpStamp(await storage.getStreamPosition());
 			store.set(key, {
 				...existing,
 				subscription: { automatic: true, bumpStamp },
@@ -176,7 +192,7 @@ export const putThreadSubscription =
 
 		// Manual subscription. Always (re)sets the subscription and clears any
 		// prior unsubscribe marker; manual subscriptions overwrite automatic.
-		const bumpStamp = await storage.getStreamPosition();
+		const bumpStamp = nextBumpStamp(await storage.getStreamPosition());
 		store.set(key, {
 			subscription: { automatic: false, bumpStamp },
 		});

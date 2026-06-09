@@ -267,7 +267,7 @@ export const registerRoutes = (
 	signingKey?: SigningKey,
 ): void => {
 	const registrations = parseRegistrations();
-	const auth = requireAuth(storage);
+	const auth = requireAuth(storage, registrations, serverName);
 	const asAuth = requireAppserviceAuth(registrations, serverName);
 	const loginRL = rateLimit("login");
 	const registerRL = rateLimit("register");
@@ -564,7 +564,7 @@ export const registerRoutes = (
 	);
 	router.get(
 		"/_matrix/client/unstable/org.matrix.msc4140/delayed_events",
-		getDelayedEvents(),
+		getDelayedEvents(storage, serverName),
 		auth,
 	);
 	router.post(

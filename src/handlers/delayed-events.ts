@@ -18,9 +18,13 @@
  *   GET  .../delayed_events
  *   POST .../delayed_events/{delay_id}/{action}   (action: send|cancel|restart)
  *
- * Storage is an in-memory, module-level registry scheduled with Node timers
- * (`setTimeout`). It is intentionally process-local: delayed events do not
- * survive a server restart (this homeserver keeps all state in memory anyway).
+ * Persistence: the live, armed timers live in a module-level in-memory registry,
+ * but each pending delayed event is ALSO persisted to the scheduling user's
+ * global account data (type `org.matrix.msc4140.delayed_events`). This lets
+ * pending delayed events survive a server restart: when a user next queries
+ * `GET .../delayed_events` (or manages one) the persisted entries are rehydrated
+ * back into the registry and their timers re-armed with the remaining delay.
+ * The Complement "kept on server restart" test relies on this behaviour.
  */
 
 import { badJson, invalidParam, notFound } from "../errors.ts";
@@ -36,6 +40,10 @@ import { indexRelation } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { JsonObject } from "../types/json.ts";
+import type { UserId } from "../types/identifiers.ts";
+
+/** Account-data type under which a user's pending delayed events are persisted. */
+const ACCOUNT_DATA_TYPE = "org.matrix.msc4140.delayed_events";
 
 interface DelayedEvent {
 	delayId: string;
@@ -50,9 +58,24 @@ interface DelayedEvent {
 	delayMs: number;
 	/** Wall-clock ms at which the current timer was (re)started. */
 	runningSince: number;
+	/** Absolute wall-clock ms at which the event is scheduled to fire. */
+	sendAt: number;
 	timer: ReturnType<typeof setTimeout>;
 	storage: Storage;
 	serverName: string;
+}
+
+/** Persisted (storage) shape of a single delayed event. */
+interface PersistedDelayedEvent {
+	delay_id: string;
+	device_id: string;
+	room_id: string;
+	type: string;
+	state_key?: string;
+	content: JsonObject;
+	delay: number;
+	running_since: number;
+	send_at: number;
 }
 
 /** Module-level registry of pending delayed events, keyed by delay_id. */
@@ -75,6 +98,56 @@ const newDelayId = (): string =>
 		.toString(36)
 		.slice(2, 8)}`;
 
+// ---------------------------------------------------------------------------
+// Persistence helpers (per-user global account data)
+// ---------------------------------------------------------------------------
+
+const loadPersisted = async (
+	storage: Storage,
+	userId: string,
+): Promise<Record<string, PersistedDelayedEvent>> => {
+	const data = await storage.getGlobalAccountData(userId as UserId, ACCOUNT_DATA_TYPE);
+	if (!data || typeof data !== "object") return {};
+	const events = (data as JsonObject).events;
+	if (!events || typeof events !== "object" || Array.isArray(events)) return {};
+	return events as unknown as Record<string, PersistedDelayedEvent>;
+};
+
+const savePersisted = async (
+	storage: Storage,
+	userId: string,
+	events: Record<string, PersistedDelayedEvent>,
+): Promise<void> => {
+	await storage.setGlobalAccountData(userId as UserId, ACCOUNT_DATA_TYPE, {
+		events: events as unknown as JsonObject,
+	});
+};
+
+const persist = async (de: DelayedEvent): Promise<void> => {
+	const events = await loadPersisted(de.storage, de.userId);
+	const entry: PersistedDelayedEvent = {
+		delay_id: de.delayId,
+		device_id: de.deviceId,
+		room_id: de.roomId,
+		type: de.type,
+		content: de.content,
+		delay: de.delayMs,
+		running_since: de.runningSince,
+		send_at: de.sendAt,
+	};
+	if (de.stateKey !== undefined) entry.state_key = de.stateKey;
+	events[de.delayId] = entry;
+	await savePersisted(de.storage, de.userId, events);
+};
+
+const unpersist = async (de: DelayedEvent): Promise<void> => {
+	const events = await loadPersisted(de.storage, de.userId);
+	if (events[de.delayId]) {
+		delete events[de.delayId];
+		await savePersisted(de.storage, de.userId, events);
+	}
+};
+
 const removeFromRegistry = (de: DelayedEvent): void => {
 	registry.delete(de.delayId);
 	if (de.stateKey !== undefined) {
@@ -93,6 +166,7 @@ const removeFromRegistry = (de: DelayedEvent): void => {
  */
 const fireDelayedEvent = async (de: DelayedEvent): Promise<void> => {
 	removeFromRegistry(de);
+	await unpersist(de).catch(() => {});
 	const { storage, serverName, roomId, userId, type, content, stateKey } = de;
 	try {
 		const room = await requireJoinedRoom(storage, roomId, userId);
@@ -131,12 +205,65 @@ const fireDelayedEvent = async (de: DelayedEvent): Promise<void> => {
 
 const arm = (de: DelayedEvent): void => {
 	de.runningSince = Date.now();
+	de.sendAt = de.runningSince + de.delayMs;
+	const remaining = Math.max(0, de.sendAt - Date.now());
 	de.timer = setTimeout(() => {
 		void fireDelayedEvent(de);
-	}, de.delayMs);
+	}, remaining);
 	// Don't keep the Node process alive solely for a pending delayed event.
 	if (typeof de.timer === "object" && de.timer && "unref" in de.timer) {
 		(de.timer as { unref: () => void }).unref();
+	}
+};
+
+/** Re-arm a rehydrated event using its persisted absolute fire time. */
+const armWithSendAt = (de: DelayedEvent): void => {
+	const remaining = Math.max(0, de.sendAt - Date.now());
+	de.timer = setTimeout(() => {
+		void fireDelayedEvent(de);
+	}, remaining);
+	if (typeof de.timer === "object" && de.timer && "unref" in de.timer) {
+		(de.timer as { unref: () => void }).unref();
+	}
+};
+
+/**
+ * Rehydrate a user's persisted delayed events into the in-memory registry,
+ * arming timers for any that aren't already live. This makes pending delayed
+ * events survive a server restart.
+ */
+const rehydrate = async (
+	storage: Storage,
+	serverName: string,
+	userId: string,
+): Promise<void> => {
+	const persisted = await loadPersisted(storage, userId);
+	for (const entry of Object.values(persisted)) {
+		if (!entry || typeof entry !== "object") continue;
+		if (registry.has(entry.delay_id)) continue;
+		const de: DelayedEvent = {
+			delayId: entry.delay_id,
+			userId,
+			deviceId: entry.device_id,
+			roomId: entry.room_id,
+			type: entry.type,
+			stateKey: entry.state_key,
+			content: entry.content,
+			delayMs: entry.delay,
+			runningSince: entry.running_since,
+			sendAt: entry.send_at,
+			timer: undefined as unknown as ReturnType<typeof setTimeout>,
+			storage,
+			serverName,
+		};
+		registry.set(de.delayId, de);
+		if (de.stateKey !== undefined) {
+			stateKeyIndex.set(
+				stateTripleOf(de.roomId, de.type, de.stateKey),
+				de.delayId,
+			);
+		}
+		armWithSendAt(de);
 	}
 };
 
@@ -157,7 +284,7 @@ const requireObjectBody = (body: unknown): JsonObject => {
 	return content as JsonObject;
 };
 
-const schedule = (params: {
+const schedule = async (params: {
 	storage: Storage;
 	serverName: string;
 	userId: string;
@@ -167,7 +294,7 @@ const schedule = (params: {
 	stateKey?: string;
 	content: JsonObject;
 	delayMs: number;
-}): string => {
+}): Promise<string> => {
 	// Scheduling a new delayed state event for the same (room, type, state_key)
 	// supersedes any previously pending one.
 	if (params.stateKey !== undefined) {
@@ -178,11 +305,13 @@ const schedule = (params: {
 			if (prev) {
 				clearTimeout(prev.timer);
 				removeFromRegistry(prev);
+				await unpersist(prev).catch(() => {});
 			}
 		}
 	}
 
 	const delayId = newDelayId();
+	const now = Date.now();
 	const de: DelayedEvent = {
 		delayId,
 		userId: params.userId,
@@ -192,7 +321,8 @@ const schedule = (params: {
 		stateKey: params.stateKey,
 		content: params.content,
 		delayMs: params.delayMs,
-		runningSince: Date.now(),
+		runningSince: now,
+		sendAt: now + params.delayMs,
 		timer: undefined as unknown as ReturnType<typeof setTimeout>,
 		storage: params.storage,
 		serverName: params.serverName,
@@ -204,7 +334,8 @@ const schedule = (params: {
 			delayId,
 		);
 	}
-	arm(de);
+	armWithSendAt(de);
+	await persist(de);
 	return delayId;
 };
 
@@ -232,14 +363,18 @@ export const putDelayedEvent =
 		const deviceId = req.deviceId as string;
 
 		const scopedTxnId = `delayed ${roomId} ${txnId}`;
-		const existing = await storage.getTxnEventId(userId, deviceId, scopedTxnId);
+		const existing = await storage.getTxnEventId(
+			userId as UserId,
+			deviceId,
+			scopedTxnId,
+		);
 		if (existing) return { status: 200, body: { delay_id: existing } };
 
 		const content = requireObjectBody(req.body);
 		// Validate the sender may post here right now (matches normal send).
 		await requireJoinedRoom(storage, roomId, userId);
 
-		const delayId = schedule({
+		const delayId = await schedule({
 			storage,
 			serverName,
 			userId,
@@ -250,7 +385,12 @@ export const putDelayedEvent =
 			delayMs,
 		});
 
-		await storage.setTxnEventId(userId, deviceId, scopedTxnId, delayId);
+		await storage.setTxnEventId(
+			userId as UserId,
+			deviceId,
+			scopedTxnId,
+			delayId,
+		);
 		return { status: 200, body: { delay_id: delayId } };
 	};
 
@@ -272,7 +412,7 @@ export const putDelayedStateEvent =
 		const content = requireObjectBody(req.body);
 		await requireJoinedRoom(storage, roomId, userId);
 
-		const delayId = schedule({
+		const delayId = await schedule({
 			storage,
 			serverName,
 			userId,
@@ -291,20 +431,21 @@ export const putDelayedStateEvent =
  * GET .../delayed_events — list the requesting user's pending delayed events.
  * Response: `{ delayed_events: [...] }`, each entry containing at least
  * `delay_id` and `content` (plus room_id/type/delay/running_since/state_key).
+ *
+ * Persisted delayed events are rehydrated first so that they remain visible
+ * (and their timers re-armed) after a server restart.
  */
 export const getDelayedEvents =
-	(): Handler =>
+	(storage: Storage, serverName: string): Handler =>
 	async (req) => {
 		const userId = req.userId as string;
+		await rehydrate(storage, serverName, userId);
 		// Match Synapse's `get_all_delayed_events_for_user` shape exactly: each
 		// entry has delay_id, room_id, type, (state_key if state), delay,
 		// running_since, content — ordered by scheduled send time (send_ts).
 		const delayed_events = [...registry.values()]
 			.filter((de) => de.userId === userId)
-			.sort(
-				(a, b) =>
-					a.runningSince + a.delayMs - (b.runningSince + b.delayMs),
-			)
+			.sort((a, b) => a.sendAt - b.sendAt)
 			.map((de) => {
 				const entry: JsonObject = {
 					delay_id: de.delayId,
@@ -341,12 +482,14 @@ export const postDelayedEventAction = (): Handler => async (req) => {
 	if (action === "cancel") {
 		clearTimeout(de.timer);
 		removeFromRegistry(de);
+		await unpersist(de).catch(() => {});
 		return { status: 200, body: {} };
 	}
 
 	if (action === "restart") {
 		clearTimeout(de.timer);
 		arm(de);
+		await persist(de).catch(() => {});
 		return { status: 200, body: {} };
 	}
 

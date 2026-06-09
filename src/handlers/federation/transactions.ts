@@ -23,6 +23,66 @@ import type {
 import type { RoomState } from "../../types/internal.ts";
 import type { JsonObject } from "../../types/json.ts";
 
+/** Bounds of an integer representable in canonical JSON (`±(2**53 - 1)`). */
+const CANONICALJSON_MAX_INT = 2 ** 53 - 1;
+const CANONICALJSON_MIN_INT = -(2 ** 53 - 1);
+
+/**
+ * Whether a room version enforces strict canonical JSON (room version 6+).
+ * Synapse's `RoomVersion.strict_canonicaljson` is `False` for v1–v5 and `True`
+ * from v6 onwards. We parse the leading numeric component of the version string
+ * (handling plain "6"/"10" and MSC-style "...mscXXXX.6" suffixes); an
+ * unknown/undefined version defaults to the newest (strict) behaviour.
+ */
+const isStrictCanonicalJson = (roomVersion: string | undefined): boolean => {
+	if (!roomVersion) return true; // unknown → newest behaviour (strict)
+	const direct = parseInt(roomVersion, 10);
+	if (!Number.isNaN(direct)) return direct >= 6;
+	const trailing = roomVersion.match(/\.(\d+)$/);
+	if (trailing?.[1]) {
+		const n = parseInt(trailing[1], 10);
+		if (!Number.isNaN(n)) return n >= 6;
+	}
+	return true;
+};
+
+/**
+ * Ensure a parsed JSON value obeys the canonical-JSON rules that strict room
+ * versions (v6+) enforce: no floats (incl. NaN/Infinity), and integers within
+ * `±(2**53 - 1)`. Throws on the first violation.
+ *
+ * Mirrors Synapse `validate_canonicaljson` (events/utils.py), invoked from
+ * `EventValidator.validate_new` when `room_version.strict_canonicaljson` is set.
+ * Because our `canonicalJson`/`computeContentHash` happily serialise a float
+ * (`JSON.stringify(1.1) === "1.1"`), the bad event's content hash and event ID
+ * would otherwise MATCH and the event would verify and be persisted. This guard
+ * is what makes us reject such an event instead — without it, a deliberately
+ * malformed (float-bearing) event pulled during gap-filling would be stored,
+ * poisoning the DAG so a later child appears to have its prev_events present and
+ * we'd skip the second /get_missing_events
+ * (TestOutboundFederationIgnoresMissingEventWithBadJSONForRoomVersion6).
+ */
+const validateStrictCanonicalJson = (value: unknown): void => {
+	if (typeof value === "number") {
+		if (!Number.isFinite(value) || !Number.isInteger(value)) {
+			throw new Error("Bad JSON value: float");
+		}
+		if (value < CANONICALJSON_MIN_INT || value > CANONICALJSON_MAX_INT) {
+			throw new Error("JSON integer out of range");
+		}
+		return;
+	}
+	if (Array.isArray(value)) {
+		for (const item of value) validateStrictCanonicalJson(item);
+		return;
+	}
+	if (value !== null && typeof value === "object") {
+		for (const v of Object.values(value as Record<string, unknown>)) {
+			validateStrictCanonicalJson(v);
+		}
+	}
+};
+
 /**
  * Fetch a single event by ID from a remote server via
  * GET /_matrix/federation/v1/event/{eventId}. The response is a federation
@@ -633,6 +693,18 @@ const processPdu = async (
 					| string
 					| undefined) ?? "10"
 			: undefined);
+
+	// Strict canonical-JSON validation (room version 6+). Reject any event whose
+	// JSON contains a float or out-of-range integer — our canonicalJson would
+	// otherwise serialise a float (e.g. `1.1`) verbatim, so the content hash and
+	// event ID would MATCH and the event would verify and persist. Synapse rejects
+	// such events up-front (events/validator.py → validate_canonicaljson).
+	// Rejecting here keeps a malformed event pulled during gap-filling out of our
+	// store, preserving the DAG gap so a later child still triggers
+	// /get_missing_events.
+	if (isStrictCanonicalJson(roomVersion)) {
+		validateStrictCanonicalJson(pdu);
+	}
 
 	await verifyOriginSignature(
 		pdu,

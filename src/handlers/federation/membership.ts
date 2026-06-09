@@ -17,6 +17,7 @@ import { isServerAllowedByAcl } from "../../federation/acl.ts";
 import type { FederationClient } from "../../federation/client.ts";
 import { fanoutEvent } from "../../federation/outbound.ts";
 import { verifyOriginSignature } from "../../federation/verify.ts";
+import { getInviteRuleForTarget } from "../../invite-filter.ts";
 import type { Handler } from "../../router.ts";
 import type { SigningKey } from "../../signing.ts";
 import { signEvent } from "../../signing.ts";
@@ -433,6 +434,20 @@ export const putSendJoin =
 			);
 		}
 
+		// MSC3706 / partial-state send_join: detect the magic query param BEFORE we
+		// persist the join, because the partial-state response is computed from the
+		// state of the room *before* this join is added (synapse's `prev_state_ids`).
+		// In particular, the joining user's OWN new membership must NOT appear in the
+		// returned `state` unless they already had a prior membership (e.g. an
+		// outstanding invite). Compute the partial state set now, while
+		// room.state_events still reflects the pre-join state.
+		const omitMembers =
+			req.path.includes("/_matrix/federation/v2/send_join/") &&
+			req.query.get("omit_members") === "true";
+		const partialStateEvents = omitMembers
+			? buildPartialStateEvents(room, event.state_key as UserId)
+			: undefined;
+
 		await storage.setStateEvent(roomId, coSigned, eventId);
 		room.depth = Math.max(room.depth, event.depth + 1);
 		room.forward_extremities = [eventId];
@@ -452,20 +467,16 @@ export const putSendJoin =
 		// MSC3706 / partial-state send_join: if the joining server set the
 		// `omit_members=true` query param (only honoured on the v2 endpoint, which
 		// is where the gomatrixserverlib SendJoinPartialState client sends it), we
-		// may return a PARTIAL response: `members_omitted: true`, the non-member
-		// state events (plus a small set of hero members so DM rooms render), the
-		// servers currently in the room, and the auth_chain. The joining server
-		// then back-fills the omitted member events lazily. Mirrors synapse
+		// return a PARTIAL response: `members_omitted: true`, the non-member state
+		// events (plus a small set of hero members so DM rooms render), the servers
+		// currently in the room, and the auth_chain. The joining server then
+		// back-fills the omitted member events lazily. Mirrors synapse
 		// federation_server.on_send_join / _get_event_ids_for_partial_state_join.
-		const omitMembers =
-			req.path.includes("/_matrix/federation/v2/send_join/") &&
-			req.query.get("omit_members") === "true";
-
+		// The partial state set was computed above from the PRE-join state, so the
+		// joiner's own new membership is correctly excluded.
 		let stateEvents: PDU[];
-		if (omitMembers) {
-			stateEvents = buildPartialStateEvents(room, event.state_key as UserId).map(
-				withRoomId,
-			);
+		if (partialStateEvents) {
+			stateEvents = partialStateEvents.map(withRoomId);
 		} else {
 			stateEvents = [...room.state_events.values()].map(withRoomId);
 		}
@@ -484,12 +495,33 @@ export const putSendJoin =
 			return ae.room_id ? ae : ({ ...ae, room_id: roomId } as PDU);
 		});
 
+		// For a partial-state (members_omitted) response, every event needed to
+		// authorise the join is already returned under `state` (the heroes design),
+		// so the auth_chain must not duplicate them — synapse returns an empty
+		// auth_chain here (TestSendJoinPartialStateResponse). Exclude any auth event
+		// whose (type, state_key) is already present in the returned state set.
+		if (partialStateEvents) {
+			const stateKeys = new Set(
+				stateEvents.map((se) => `${se.type}${se.state_key ?? ""}`),
+			);
+			authChain = authChain.filter(
+				(ae) => !stateKeys.has(`${ae.type}${ae.state_key ?? ""}`),
+			);
+		}
+
 		let servers: ServerName[];
 		try {
 			servers = await storage.getServersInRoom(roomId);
 		} catch {
 			servers = [serverName as ServerName];
 		}
+		// `servers_in_room` lists the OTHER servers already resident in the room so
+		// the joining server can fetch the omitted state from them. It must not
+		// include the joining server itself (its join was just stored above, so
+		// getServersInRoom now sees it) — TestSendJoinPartialStateResponse expects
+		// only the resident server(s).
+		const joiningServer = (event.state_key as string).split(":").slice(1).join(":");
+		servers = servers.filter((s) => s !== joiningServer);
 
 		// Distribute the new join to the OTHER servers participating in the room.
 		// Synapse's federation_server.on_send_join persists the join via the normal
@@ -723,6 +755,23 @@ export const putFederationInvite =
 		if (targetServer !== serverName)
 			throw forbidden("Invited user is not on this server");
 
+		// MSC4155 invite filtering: the invited user (event.state_key) is local to
+		// this server, so honour the invite permission config they published in
+		// their global account data against the inviting user (event.sender).
+		//   - "block": reject the invite (403) so the inviting server's invite fails.
+		//   - "ignore": acknowledge the invite (200, co-signed) so the remote side
+		//     succeeds, but do NOT persist it locally, so it never reaches the
+		//     invitee's /sync.
+		//   - "allow" (default / no config): proceed normally.
+		const inviteRule = await getInviteRuleForTarget(
+			storage,
+			event.state_key as UserId,
+			event.sender as string,
+		);
+		if (inviteRule === "block") {
+			throw forbidden("You are not permitted to invite this user.");
+		}
+
 		// Determine the room version for version-aware redaction/signing. We may
 		// not be resident in this room yet, so prefer the room's stored version,
 		// then the body's `room_version`, defaulting to "10" (the seed default used
@@ -748,6 +797,13 @@ export const putFederationInvite =
 			inviteRoomVersion,
 		);
 		const eventId = computeEventId(coSigned, inviteRoomVersion);
+
+		// MSC4155 "ignore": acknowledge the invite to the sending server (return the
+		// co-signed event with 200) but do not persist it locally, so it never
+		// appears in the invitee's /sync.
+		if (inviteRule === "ignore") {
+			return { status: 200, body: { event: coSigned } };
+		}
 
 		// The inviting server provides stripped room state so the invitee can see
 		// room metadata (name, join_rules, ...) before joining. It may be sent

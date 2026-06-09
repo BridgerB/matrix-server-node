@@ -482,12 +482,103 @@ const assertNotForgotten = async (
 	}
 };
 
+/**
+ * SPEC-216 ("departed room" reads): a user who has left (or been banned from) a
+ * room may still read it AS OF the point at which they left — but not its
+ * current state, nor any events after their departure. This is the behaviour
+ * Synapse implements in `RoomMemberHandler` / the `/state`, `/members`,
+ * `/messages` paths (history is clamped to the user's own leave event).
+ *
+ * Given a requester who is NOT currently joined, this resolves whether they may
+ * read the room under SPEC-216 and, if so, the stream position of their OWN last
+ * `m.room.member` (leave/ban) event. We scan the room timeline in ascending
+ * stream order for the requester's `state_key`, tracking the latest membership
+ * event and its stream position.
+ *
+ * Returns:
+ *   - `{ allowed: true, leavePos }` when the requester left/was banned — reads
+ *     should be served as of `leavePos`.
+ *   - `{ allowed: false }` when the requester is currently joined (caller should
+ *     use the normal current-state path) or has no qualifying membership.
+ *
+ * Note this only fires for the leave/ban case; joined and world-readable access
+ * is still handled by the existing `requireJoinedOrWorldReadable` callers.
+ */
+const resolveDepartedRead = async (
+	storage: Storage,
+	roomId: string,
+	userId: string | undefined,
+): Promise<{ allowed: true; leavePos: number } | { allowed: false }> => {
+	if (!userId) return { allowed: false };
+
+	const room = await storage.getRoom(roomId);
+	if (!room) return { allowed: false };
+
+	const membership = getMembership(room, userId as UserId);
+	if (membership !== "leave" && membership !== "ban") return { allowed: false };
+
+	// Scan ascending; keep the stream position of the user's latest membership
+	// event. That position is the requester's departure point.
+	const all = await storage.getEventsByRoomSince(
+		roomId as RoomId,
+		0,
+		1_000_000,
+	);
+	let leavePos = 0;
+	for (const e of all.events) {
+		if (e.event.type !== "m.room.member") continue;
+		if (e.event.state_key !== userId) continue;
+		leavePos = e.streamPos;
+	}
+
+	return { allowed: true, leavePos };
+};
+
+/**
+ * Compute the full room state (latest state event per (type, state_key)) as of a
+ * given stream position by replaying every state event up to and including that
+ * position. Used to serve `/state` and `/members` to a departed user with the
+ * room as it was when they left.
+ */
+const stateAsOf = async (
+	storage: Storage,
+	roomId: string,
+	at: number,
+): Promise<{ event: PDU; eventId: EventId }[]> => {
+	const all = await storage.getEventsByRoomSince(
+		roomId as RoomId,
+		0,
+		1_000_000,
+	);
+	const latest = new Map<string, { event: PDU; eventId: EventId }>();
+	for (const e of all.events) {
+		if (e.streamPos > at) break;
+		if (typeof e.event.state_key !== "string") continue;
+		latest.set(`${e.event.type}${KEY_SEP}${e.event.state_key}`, {
+			event: e.event,
+			eventId: e.eventId,
+		});
+	}
+	return [...latest.values()];
+};
+
 export const getAllState =
 	(storage: Storage): Handler =>
 	async (req) => {
 		const roomId = req.params.roomId as string;
-		await requireJoinedOrWorldReadable(storage, roomId, req.userId);
 		await assertNotForgotten(storage, req.userId, roomId);
+
+		// SPEC-216: a departed (left/banned) user reads state as of their leave.
+		const departed = await resolveDepartedRead(storage, roomId, req.userId);
+		if (departed.allowed) {
+			const stateEntries = await stateAsOf(storage, roomId, departed.leavePos);
+			return {
+				status: 200,
+				body: stateEntries.map((e) => pduToClientEvent(e.event, e.eventId)),
+			};
+		}
+
+		await requireJoinedOrWorldReadable(storage, roomId, req.userId);
 
 		const stateEntries = await storage.getAllState(roomId);
 		const events = stateEntries.map((e) =>
@@ -503,10 +594,22 @@ export const getStateEvent =
 		const eventType = req.params.eventType as string;
 		const stateKey = req.params.stateKey ?? "";
 
-		await requireJoinedOrWorldReadable(storage, roomId, req.userId);
 		await assertNotForgotten(storage, req.userId, roomId);
 
-		const entry = await storage.getStateEvent(roomId, eventType, stateKey);
+		// SPEC-216: a departed (left/banned) user gets the state value as of their
+		// leave point, not the current value.
+		const departed = await resolveDepartedRead(storage, roomId, req.userId);
+		let entry: { event: PDU; eventId: EventId } | undefined;
+		if (departed.allowed) {
+			const stateEntries = await stateAsOf(storage, roomId, departed.leavePos);
+			entry = stateEntries.find(
+				(e) =>
+					e.event.type === eventType && e.event.state_key === stateKey,
+			);
+		} else {
+			await requireJoinedOrWorldReadable(storage, roomId, req.userId);
+			entry = await storage.getStateEvent(roomId, eventType, stateKey);
+		}
 		if (!entry) throw notFound("State event not found");
 
 		const format = req.query.get("format");
@@ -689,14 +792,27 @@ export const getMessages =
 		// locally here so the missing-room case maps to 403 rather than the
 		// shared helper's 404.
 		const messagesRoom = await storage.getRoom(roomId);
+		// SPEC-216: a departed (left/banned) user may still page history up to their
+		// leave point. `departed.leavePos` is the stream position of their last
+		// membership event; events after it are not visible to them (enforced
+		// below by clamping the returned chunk).
+		const messagesDeparted = await resolveDepartedRead(
+			storage,
+			roomId,
+			userId,
+		);
 		if (
 			!messagesRoom ||
-			(getMembership(messagesRoom, userId) !== "join" &&
+			(!messagesDeparted.allowed &&
+				getMembership(messagesRoom, userId) !== "join" &&
 				!isWorldReadable(messagesRoom))
 		) {
 			throw forbidden("You aren't a member of the room");
 		}
 		await assertNotForgotten(storage, userId, roomId);
+		const departedLeavePos = messagesDeparted.allowed
+			? messagesDeparted.leavePos
+			: undefined;
 
 		const dir = (req.query.get("dir") ?? "f") as "b" | "f";
 		if (dir !== "b" && dir !== "f") throw badJson("dir must be 'b' or 'f'");
@@ -765,6 +881,9 @@ export const getMessages =
 			dir === "b" &&
 			serverName &&
 			federationClient &&
+			// Departed (SPEC-216) readers are clamped to local history up to their
+			// leave; never backfill remote history on their behalf.
+			departedLeavePos === undefined &&
 			(isBackfillToken || from === undefined)
 		) {
 			const remoteServers = (
@@ -825,6 +944,55 @@ export const getMessages =
 			result = {
 				events: page,
 				end: sliceStart > 0 ? `b${sliceStart}` : undefined,
+			};
+		} else if (departedLeavePos !== undefined) {
+			// SPEC-216: a departed reader sees only events up to and including their
+			// leave (stream position `departedLeavePos`). Build the page directly
+			// from the stream-ordered timeline, bounded by the leave position, so
+			// post-leave events are never surfaced regardless of the `from` token.
+			// `dir=f` from the leave token therefore yields an empty chunk; `dir=b`
+			// returns the most recent visible events (including the user's own leave
+			// member event) newest-first.
+			const since = await storage.getEventsByRoomSince(
+				roomId as RoomId,
+				0,
+				1_000_000,
+			);
+			const visible = since.events.filter(
+				(e) => e.streamPos <= departedLeavePos,
+			);
+
+			let page: { event: PDU; eventId: EventId; streamPos: number }[];
+			if (dir === "f") {
+				// Forward from `from`: events strictly after the token but still
+				// within the visible (<= leave) window. From the leave token this is
+				// empty.
+				const lower = from ?? 0;
+				page = visible.filter((e) => e.streamPos > lower).slice(0, limit);
+			} else {
+				// Backward from `from`: the visible events at or before the token,
+				// newest-first. The sync `from` token equals the stream position of
+				// the user's own leave event (our stream counter points AT, not
+				// after, the last event), so the boundary is inclusive — this is what
+				// surfaces the user's `m.room.member` leave event in the first page.
+				// We never exceed the leave position regardless of the token.
+				const upper = Math.min(from ?? departedLeavePos, departedLeavePos);
+				page = visible
+					.filter((e) => e.streamPos <= upper)
+					.reverse()
+					.slice(0, limit);
+			}
+
+			result = {
+				events: page.map((e) => ({ event: e.event, eventId: e.eventId })),
+				// For backward pagination, the `end` token must point just before the
+				// oldest event returned so the next page does not repeat it.
+				end:
+					page.length > 0
+						? dir === "b"
+							? (page[page.length - 1] as { streamPos: number }).streamPos - 1
+							: (page[page.length - 1] as { streamPos: number }).streamPos
+						: undefined,
 			};
 		} else {
 			result = await storage.getEventsByRoom(roomId, limit, from, dir);
@@ -903,11 +1071,21 @@ export const getMembers =
 	(storage: Storage): Handler =>
 	async (req) => {
 		const roomId = req.params.roomId as string;
-		await requireJoinedOrWorldReadable(storage, roomId, req.userId);
+
+		// SPEC-216: a departed (left/banned) user sees the member list as of their
+		// leave point — members who joined after they left (e.g. charlie) must not
+		// appear. We resolve this before the join check so the leave/ban case is
+		// allowed rather than rejected with 403.
+		const departed = await resolveDepartedRead(storage, roomId, req.userId);
+		if (!departed.allowed) {
+			await requireJoinedOrWorldReadable(storage, roomId, req.userId);
+		}
 
 		const membershipFilter = req.query.get("membership");
 		const notMembershipFilter = req.query.get("not_membership");
-		const atToken = req.query.get("at");
+		const atToken = departed.allowed
+			? String(departed.leavePos)
+			: req.query.get("at");
 
 		let entries: { event: PDU; eventId: EventId }[];
 

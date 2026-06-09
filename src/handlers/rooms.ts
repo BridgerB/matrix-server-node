@@ -24,6 +24,7 @@ import {
 } from "../events.ts";
 import type { FederationClient } from "../federation/client.ts";
 import { fanoutEdu, fanoutEvent } from "../federation/outbound.ts";
+import { getInviteRuleForTarget } from "../invite-filter.ts";
 
 import type { Handler } from "../router.ts";
 import type { SigningKey } from "../signing.ts";
@@ -1427,6 +1428,27 @@ export const postInvite =
 		const inviteeServer = body.user_id.includes(":")
 			? body.user_id.split(":").slice(1).join(":")
 			: serverName;
+
+		// MSC4155 invite filtering: when the invitee is local to this server, honour
+		// the invite permission config they published in their global account data.
+		// A "block" rule rejects the invite outright (403); an "ignore" rule lets the
+		// request succeed (200) but the invite is silently dropped so it never
+		// reaches the invitee's /sync. "allow" (the default, including no config) is
+		// a no-op. Inviters on other servers reach us via inbound federation
+		// (putFederationInvite), which applies the same filtering on that path.
+		if (inviteeServer === serverName) {
+			const rule = await getInviteRuleForTarget(
+				storage,
+				body.user_id as UserId,
+				req.userId as string,
+			);
+			if (rule === "block") {
+				throw forbidden("You are not permitted to invite this user.");
+			}
+			if (rule === "ignore") {
+				return { status: 200, body: {} };
+			}
+		}
 
 		// A remote invitee must be invited over federation (PUT /v2/invite) so the
 		// invitee's server learns about (and co-signs) the invite. Mirrors

@@ -69,7 +69,11 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		mkdirSync(dirname(dbPath), { recursive: true });
 		this.db = new Database(dbPath);
 		this.db.pragma("journal_mode = WAL");
-		this.db.pragma("synchronous = NORMAL");
+		// Durability is configurable: NORMAL (default) fsyncs at WAL checkpoints
+		// (~fast, can lose the last few txns on power loss); FULL fsyncs every
+		// commit (fully durable). Override with SQLITE_SYNCHRONOUS=FULL.
+		const sync = process.env.SQLITE_SYNCHRONOUS ?? "NORMAL";
+		this.db.pragma(`synchronous = ${sync}`);
 		this.db.pragma("foreign_keys = OFF");
 		this.init();
 	}
