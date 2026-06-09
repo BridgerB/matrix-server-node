@@ -30,36 +30,36 @@ export const buildPublicRoomEntry = async (
 
 	const numJoined = countJoinedMembers(room.state_events);
 
-	const name = getStateContent(room.state_events, "m.room.name\0", "name");
-	const topic = getStateContent(room.state_events, "m.room.topic\0", "topic");
+	const name = getStateContent(room.state_events, "m.room.name\x1f", "name");
+	const topic = getStateContent(room.state_events, "m.room.topic\x1f", "topic");
 	const avatarUrl = getStateContent(
 		room.state_events,
-		"m.room.avatar\0",
+		"m.room.avatar\x1f",
 		"url",
 	);
 	const canonicalAlias = getStateContent(
 		room.state_events,
-		"m.room.canonical_alias\0",
+		"m.room.canonical_alias\x1f",
 		"alias",
 	);
 	const joinRule = getStateContent(
 		room.state_events,
-		"m.room.join_rules\0",
+		"m.room.join_rules\x1f",
 		"join_rule",
 	);
 	const historyVisibility = getStateContent(
 		room.state_events,
-		"m.room.history_visibility\0",
+		"m.room.history_visibility\x1f",
 		"history_visibility",
 	);
 	const guestAccess = getStateContent(
 		room.state_events,
-		"m.room.guest_access\0",
+		"m.room.guest_access\x1f",
 		"guest_access",
 	);
 	const roomType = getStateContent(
 		room.state_events,
-		"m.room.create\0",
+		"m.room.create\x1f",
 		"type",
 	);
 
@@ -230,7 +230,7 @@ export const deleteDirectoryRoom =
 		// m.room.canonical_alias event with the deleted alias removed. This keeps
 		// canonical alias state consistent (and is observable via /sync).
 		if (room) {
-			const canonical = room.state_events.get("m.room.canonical_alias\0");
+			const canonical = room.state_events.get("m.room.canonical_alias\x1f");
 			if (canonical) {
 				const content = (canonical.content ?? {}) as {
 					alias?: string;
@@ -273,6 +273,7 @@ export const deleteDirectoryRoom =
 						prevEvents: [...room.forward_extremities],
 						authEvents,
 						serverName,
+						roomVersion: room.room_version,
 					});
 
 					try {

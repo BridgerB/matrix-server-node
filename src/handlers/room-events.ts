@@ -21,6 +21,7 @@ import {
 	getPowerLevels,
 	getUserPowerLevel,
 	isWorldReadable,
+	KEY_SEP,
 	pduToClientEvent,
 	redactEvent,
 	requireJoinedOrWorldReadable,
@@ -33,6 +34,7 @@ import {
 	parseRoomEventFilter,
 } from "../event-filter.ts";
 import type { FederationClient } from "../federation/client.ts";
+import { verifyOriginSignature } from "../federation/verify.ts";
 import { fanoutEvent } from "../federation/outbound.ts";
 import { getIgnoredUsers } from "../ignored-users.ts";
 import { bundleAggregations, indexRelation } from "../relations.ts";
@@ -93,7 +95,7 @@ const requireHistoryVisibleOr404 = async (
 	const room = await storage.getRoom(roomId);
 	if (!room) throw notFound("Event not found");
 
-	const hvEvent = room.state_events.get("m.room.history_visibility\0");
+	const hvEvent = room.state_events.get("m.room.history_visibility\x1f");
 	const visibility =
 		hvEvent &&
 		typeof (hvEvent.content as Record<string, unknown>).history_visibility ===
@@ -232,6 +234,7 @@ const applyTsOverride = (
 	originServerTs: number,
 	serverName: string,
 	signingKey?: SigningKey,
+	roomVersion?: string,
 ): { event: PDU; eventId: EventId } => {
 	// Build the unsigned, hash-able form: drop the prior hash/signatures so the
 	// recompute below starts from clean content (buildEvent does the same).
@@ -244,10 +247,13 @@ const applyTsOverride = (
 	delete (rebuilt as { unsigned?: unknown }).unsigned;
 
 	rebuilt.hashes = { sha256: computeContentHash(rebuilt) };
-	const eventId = computeEventId(rebuilt);
+	const eventId = computeEventId(rebuilt, roomVersion);
 
 	if (signingKey) {
-		return { event: signEvent(rebuilt, serverName, signingKey), eventId };
+		return {
+			event: signEvent(rebuilt, serverName, signingKey, roomVersion),
+			eventId,
+		};
 	}
 	return { event: rebuilt, eventId };
 };
@@ -271,7 +277,7 @@ export const putSendEvent =
 		// same txnId in a DIFFERENT room must produce a new event. The storage
 		// txn key is (user, device, txnId) only, so we fold the room into the
 		// opaque txn-id string to scope it per-room without changing storage.
-		const scopedTxnId = `${roomId} ${txnId}`;
+		const scopedTxnId = `${roomId}${KEY_SEP}${txnId}`;
 
 		const existing = await storage.getTxnEventId(userId, deviceId, scopedTxnId);
 		if (existing) return { status: 200, body: { event_id: existing } };
@@ -302,6 +308,7 @@ export const putSendEvent =
 			authEvents,
 			serverName,
 			signingKey,
+			roomVersion: room.room_version,
 		});
 
 		// Application services may backdate events via `?ts=<ms>`. Since the
@@ -309,7 +316,7 @@ export const putSendEvent =
 		const tsOverride = resolveTsOverride(req);
 		const { event, eventId } =
 			tsOverride !== undefined
-				? applyTsOverride(built.event, tsOverride, serverName, signingKey)
+				? applyTsOverride(built.event, tsOverride, serverName, signingKey, room.room_version)
 				: built;
 
 		const eventSize = Buffer.byteLength(canonicalJson(event), "utf-8");
@@ -381,12 +388,19 @@ export const putStateEvent =
 			await validateCanonicalAlias(storage, roomId, newContent);
 		}
 
-		// Check if existing state has the same content — if so, return existing event ID (idempotent)
+		// No-op state dedup (mirrors Synapse's `deduplicate_state_event`): if the
+		// room already has a state event of this (type, state_key) whose content is
+		// deep-equal to the new content AND was sent by the same user, sending it
+		// again is a no-op — return the EXISTING event's ID without creating a
+		// duplicate. This prevents redundant history_visibility / etc. events from
+		// piling up (and is what TestInboundCanReturnMissingEvents relies on to keep
+		// the DAG free of spurious no-op events).
 		const existing = await storage.getStateEvent(roomId, eventType, stateKey);
 		if (existing) {
-			const existingJson = canonicalJson(existing.event.content);
-			const newJson = canonicalJson(newContent);
-			if (existingJson === newJson) {
+			const sameContent =
+				canonicalJson(existing.event.content) === canonicalJson(newContent);
+			const sameSender = existing.event.sender === userId;
+			if (sameContent && sameSender) {
 				return { status: 200, body: { event_id: existing.eventId } };
 			}
 		}
@@ -405,6 +419,7 @@ export const putStateEvent =
 			authEvents,
 			serverName,
 			signingKey,
+			roomVersion: room.room_version,
 		});
 
 		// Application services may backdate state events via `?ts=<ms>`.
@@ -416,6 +431,7 @@ export const putStateEvent =
 						stateTsOverride,
 						serverName,
 						signingKey,
+						room.room_version,
 					)
 				: builtState;
 
@@ -504,8 +520,165 @@ export const getStateEvent =
 		return { status: 200, body: entry.event.content };
 	};
 
+/**
+ * Outbound `/messages` backfill (mirrors Synapse's
+ * `FederationHandler.maybe_backfill`). When a local user paginates backward
+ * (`dir=b`) into a room whose history we only partially hold — typically after
+ * joining a remote room via `send_join`, which gives us the current state but
+ * not the historical timeline — there is a "gap": events we hold reference
+ * `prev_events` we do not. We fill that gap by asking a remote server in the
+ * room for the missing events via `GET /_matrix/federation/v1/backfill`.
+ *
+ * Each returned PDU is verified (content hash, origin signature, event id),
+ * deduplicated against storage, persisted, and indexed for relations, exactly
+ * as an inbound transaction PDU would be. We run a bounded number of rounds so
+ * a hostile/large remote history cannot make a single request unbounded.
+ *
+ * Returns the number of new events imported across all rounds.
+ */
+const backfillMissingHistory = async (
+	storage: Storage,
+	serverName: string,
+	federationClient: FederationClient,
+	roomId: RoomId,
+	roomVersion: string | undefined,
+	maxRounds = 2,
+): Promise<number> => {
+	// Choose a remote server that participates in the room (excluding ourselves).
+	const servers = (await storage.getServersInRoom(roomId)).filter(
+		(s) => s !== serverName,
+	);
+	if (servers.length === 0) return 0;
+
+	let imported = 0;
+
+	for (let round = 0; round < maxRounds; round++) {
+		// Re-read the timeline each round: previously-imported events extend the
+		// known set and shift the gap boundary further back.
+		const all = await storage.getEventsByRoom(
+			roomId,
+			1_000_000,
+			undefined,
+			"f",
+		);
+		const known = new Set<EventId>(all.events.map((e) => e.eventId));
+
+		// The backfill "seeds" are the IDs of prev_events we reference but do not
+		// hold — the earliest edge of our known DAG. These are exactly the events
+		// the remote should walk back from. Synapse seeds from the room's
+		// backward extremities; the unknown prev_events are their analogue here.
+		const seeds = new Set<EventId>();
+		for (const { event } of all.events) {
+			for (const prev of event.prev_events) {
+				if (!known.has(prev)) seeds.add(prev);
+			}
+		}
+		if (seeds.size === 0) break; // No gap — nothing to backfill.
+
+		const v = [...seeds].slice(0, 10);
+		const qs = v
+			.map((id) => `v=${encodeURIComponent(id)}`)
+			.join("&");
+		const path = `/_matrix/federation/v1/backfill/${encodeURIComponent(
+			roomId,
+		)}?${qs}&limit=100`;
+
+		let roundImported = 0;
+		for (const server of servers) {
+			let res: { status: number; body: unknown };
+			try {
+				res = await federationClient.request(server, "GET", path);
+			} catch {
+				continue; // Try the next server.
+			}
+			if (res.status !== 200 || typeof res.body !== "object" || res.body === null)
+				continue;
+
+			const pdus = (res.body as { pdus?: unknown }).pdus;
+			if (!Array.isArray(pdus)) continue;
+
+			for (const raw of pdus) {
+				if (!raw || typeof raw !== "object") continue;
+				const event = raw as PDU;
+				if (event.room_id !== roomId) continue;
+
+				// Verify content hash, then recompute the event id from the content
+				// (v4+ event IDs are content hashes) and reject mismatches.
+				let eventId: EventId;
+				try {
+					const expectedHash = computeContentHash(event);
+					if (event.hashes?.sha256 !== expectedHash) continue;
+					eventId = computeEventId(event, roomVersion);
+				} catch {
+					continue;
+				}
+
+				// Dedupe: skip anything we already hold.
+				if (await storage.getEvent(eventId)) continue;
+
+				// Verify the event is correctly signed by its origin server.
+				try {
+					await verifyOriginSignature(
+						event,
+						server,
+						storage,
+						federationClient,
+						roomVersion,
+					);
+				} catch {
+					continue;
+				}
+
+				await storage.storeEvent(event, eventId);
+				await indexRelation(storage, event, eventId);
+				imported++;
+				roundImported++;
+			}
+
+			// One server that produced events is enough for this round.
+			if (roundImported > 0) break;
+		}
+
+		if (roundImported === 0) break; // No progress — stop.
+	}
+
+	return imported;
+};
+
+/**
+ * Build a complete depth-ordered (ascending) view of every event currently held
+ * for a room, deduplicated by event id. After backfill, historical events live
+ * at the *newest* stream positions (storage appends by insertion order), so
+ * `getEventsByRoom`'s stream-ordered output no longer reflects DAG order. We
+ * therefore reorder by `(depth, origin_server_ts, event_id)` ourselves before
+ * serving the `/messages` chunk and paginating it.
+ */
+const buildDepthOrdered = (
+	events: { event: PDU; eventId: EventId }[],
+): { event: PDU; eventId: EventId }[] => {
+	const seen = new Set<EventId>();
+	const out: { event: PDU; eventId: EventId }[] = [];
+	for (const e of events) {
+		if (seen.has(e.eventId)) continue;
+		seen.add(e.eventId);
+		out.push(e);
+	}
+	out.sort(
+		(a, b) =>
+			a.event.depth - b.event.depth ||
+			a.event.origin_server_ts - b.event.origin_server_ts ||
+			(a.eventId < b.eventId ? -1 : a.eventId > b.eventId ? 1 : 0),
+	);
+	return out;
+};
+
 export const getMessages =
-	(storage: Storage): Handler =>
+	(
+		storage: Storage,
+		serverName?: string,
+		_signingKey?: SigningKey,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const roomId = req.params.roomId as string;
 		const userId = req.userId as UserId;
@@ -529,7 +702,12 @@ export const getMessages =
 		if (dir !== "b" && dir !== "f") throw badJson("dir must be 'b' or 'f'");
 
 		const fromStr = req.query.get("from");
-		const from = fromStr ? parseInt(fromStr, 10) : undefined;
+		// Backfill pagination tokens are emitted as `b<index>` (a position into the
+		// depth-ordered timeline). Plain numeric tokens are stream positions used by
+		// the storage-backed pager. Detect the former so we can continue paging the
+		// depth-ordered view across requests.
+		const isBackfillToken = fromStr !== null && /^b\d+$/.test(fromStr);
+		const from = fromStr && !isBackfillToken ? parseInt(fromStr, 10) : undefined;
 		const limitStr = req.query.get("limit");
 		const limit = Math.min(Math.max(parseInt(limitStr ?? "10", 10), 1), 100);
 
@@ -567,7 +745,91 @@ export const getMessages =
 			return undefined;
 		};
 
-		const result = await storage.getEventsByRoom(roomId, limit, from, dir);
+		// Resolve the raw page of events to serve. The normal path is the
+		// storage-backed (stream-ordered) pager. For backward pagination into a
+		// room whose history we only partially hold, we instead backfill the gap
+		// from a remote server and serve a depth-ordered view (see
+		// `backfillMissingHistory` / `buildDepthOrdered`). The depth-ordered pager
+		// uses `b<index>` tokens so it can be continued across requests.
+		let result: {
+			events: { event: PDU; eventId: EventId }[];
+			end?: number | string;
+		};
+
+		// Decide whether to engage the depth-ordered backfill pager. We only do so
+		// for backward pagination, when we have the means to federate, and either
+		// the client is already paging the depth-ordered view (`b` token) or a gap
+		// to events we don't hold currently exists.
+		let useBackfillPager = false;
+		if (
+			dir === "b" &&
+			serverName &&
+			federationClient &&
+			(isBackfillToken || from === undefined)
+		) {
+			const remoteServers = (
+				await storage.getServersInRoom(roomId as RoomId)
+			).filter((s) => s !== serverName);
+			if (remoteServers.length > 0) {
+				const localAll = await storage.getEventsByRoom(
+					roomId as RoomId,
+					1_000_000,
+					undefined,
+					"f",
+				);
+				const known = new Set<EventId>(
+					localAll.events.map((e) => e.eventId),
+				);
+				const hasGap = localAll.events.some((e) =>
+					e.event.prev_events.some((p) => !known.has(p)),
+				);
+				useBackfillPager = isBackfillToken || hasGap;
+			}
+		}
+
+		if (useBackfillPager && serverName && federationClient) {
+			// Pull missing history into storage (bounded rounds), unless we are
+			// merely continuing to page an already-backfilled view.
+			if (!isBackfillToken) {
+				await backfillMissingHistory(
+					storage,
+					serverName,
+					federationClient,
+					roomId as RoomId,
+					messagesRoom.room_version,
+				);
+			}
+
+			// Build the depth-ordered ascending timeline and page it backward.
+			const localAll = await storage.getEventsByRoom(
+				roomId as RoomId,
+				1_000_000,
+				undefined,
+				"f",
+			);
+			const ordered = buildDepthOrdered(localAll.events);
+
+			// `from` index: the position to read *before* (exclusive). Absent ->
+			// start from the newest event (end of the ascending array).
+			const fromIdx = isBackfillToken
+				? parseInt((fromStr as string).slice(1), 10)
+				: ordered.length;
+			const startIdx = Math.max(0, Math.min(fromIdx, ordered.length));
+			const sliceStart = Math.max(0, startIdx - limit);
+			// Newest-first for dir=b.
+			const pageAsc = ordered.slice(sliceStart, startIdx);
+			const page = [...pageAsc].reverse();
+
+			// Omit `end` once we have reached the start of the room (index 0),
+			// signalling the client to stop paginating.
+			result = {
+				events: page,
+				end: sliceStart > 0 ? `b${sliceStart}` : undefined,
+			};
+		} else {
+			result = await storage.getEventsByRoom(roomId, limit, from, dir);
+		}
+
 		let chunk = result.events.map((e) =>
 			pduToClientEvent(e.event, e.eventId),
 		);
@@ -725,7 +987,12 @@ export const getEvent =
 	};
 
 export const postRedact =
-	(storage: Storage, serverName: string): Handler =>
+	(
+		storage: Storage,
+		serverName: string,
+		signingKey?: SigningKey,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const roomId = req.params.roomId as string;
 		const targetEventId = req.params.eventId as string;
@@ -736,21 +1003,32 @@ export const postRedact =
 		// Room-scoped txn idempotency (see putSendEvent): fold the room into the
 		// opaque txn-id string so the storage (user, device, txnId) key is
 		// effectively keyed by (user, device, room, txnId).
-		const scopedTxnId = `${roomId} ${txnId}`;
+		const scopedTxnId = `${roomId}${KEY_SEP}${txnId}`;
 
 		const existing = await storage.getTxnEventId(userId, deviceId, scopedTxnId);
 		if (existing) return { status: 200, body: { event_id: existing } };
 
 		const room = await requireJoinedRoom(storage, roomId, userId);
 
+		// The target event may not exist locally — e.g. it was authored on a remote
+		// server and never federated to us (TestFederationRedactSendsWithoutEvent).
+		// In that case we still create, store and fan out the redaction event; we
+		// simply skip the local "apply the redaction to the target" step below.
+		// Mirrors Synapse, which builds and sends the redaction regardless of
+		// whether the redacted event is held locally.
 		const targetEntry = await storage.getEvent(targetEventId);
-		if (!targetEntry || targetEntry.event.room_id !== roomId)
-			throw notFound("Event not found");
+		const targetIsLocal = !!targetEntry && targetEntry.event.room_id === roomId;
 
 		const pl = getPowerLevels(room);
 		const senderPl = getUserPowerLevel(userId, room);
 		const redactPl = pl.redact ?? 50;
-		if (senderPl < redactPl && targetEntry.event.sender !== userId) {
+		// We can only enforce the "you may redact your own events at any PL" carve
+		// out when the target is held locally (we need its sender). When the target
+		// is absent, fall back to the room's redact power level alone.
+		if (
+			senderPl < redactPl &&
+			(!targetIsLocal || targetEntry!.event.sender !== userId)
+		) {
 			throw forbidden("Insufficient power level to redact");
 		}
 
@@ -764,6 +1042,9 @@ export const postRedact =
 			room,
 			userId,
 		);
+		// Sign the redaction (when a signing key is available) so it can be fanned
+		// out to remote servers, which reject unsigned PDUs. Signing is additive and
+		// does not change the event ID (computed over the redacted form).
 		const { event, eventId } = buildEvent({
 			roomId,
 			sender: userId,
@@ -774,6 +1055,8 @@ export const postRedact =
 			authEvents,
 			redacts: targetEventId,
 			serverName,
+			signingKey,
+			roomVersion: room.room_version,
 		});
 
 		checkEventAuth(event, eventId, room);
@@ -782,19 +1065,32 @@ export const postRedact =
 		room.depth++;
 		room.forward_extremities = [eventId];
 
-		const redacted = redactEvent(targetEntry.event);
-		redacted.unsigned = {
-			...redacted.unsigned,
-			redacted_because: pduToClientEvent(event, eventId),
-		};
-		// Replace the target event content entirely (Object.assign would merge, not strip)
-		targetEntry.event.content = redacted.content;
-		targetEntry.event.unsigned = redacted.unsigned;
-		// Persist the redaction so it survives across reads on non-memory backends
-		await storage.updateEvent(
-			targetEventId as EventId,
-			targetEntry.event,
-		);
+		// Apply the redaction to the target only when we actually hold it locally.
+		if (targetIsLocal) {
+			const redacted = redactEvent(targetEntry!.event);
+			redacted.unsigned = {
+				...redacted.unsigned,
+				redacted_because: pduToClientEvent(event, eventId),
+			};
+			// Replace the target event content entirely (Object.assign would merge, not strip)
+			targetEntry!.event.content = redacted.content;
+			targetEntry!.event.unsigned = redacted.unsigned;
+			// Persist the redaction so it survives across reads on non-memory backends
+			await storage.updateEvent(targetEventId as EventId, targetEntry!.event);
+		}
+
+		// Propagate the redaction to remote servers in the room (best-effort).
+		if (signingKey && federationClient) {
+			await fanoutEvent(
+				storage,
+				serverName,
+				signingKey,
+				federationClient,
+				roomId as RoomId,
+				event,
+				eventId,
+			);
+		}
 
 		await storage.setTxnEventId(userId, deviceId, scopedTxnId, eventId);
 		return { status: 200, body: { event_id: eventId } };

@@ -31,7 +31,7 @@ const contentField = (event: PDU | undefined, field: string): unknown =>
  * `restricted` (or `knock_restricted`) join rule (MSC3083).
  */
 export const getAllowedRoomIds = (room: RoomState): string[] => {
-	const joinRulesEvent = room.state_events.get("m.room.join_rules\0");
+	const joinRulesEvent = room.state_events.get("m.room.join_rules\x1f");
 	if (!joinRulesEvent) return [];
 	const content = joinRulesEvent.content as Record<string, unknown>;
 	const joinRule = content.join_rule;
@@ -55,7 +55,7 @@ export const getAllowedRoomIds = (room: RoomState): string[] => {
 /** True if any user from `origin` is joined to `room`. */
 const isHostInRoom = (room: RoomState, origin: ServerName): boolean => {
 	for (const [key, event] of room.state_events) {
-		if (!key.startsWith("m.room.member\0")) continue;
+		if (!key.startsWith("m.room.member\x1f")) continue;
 		const membership = (event.content as Record<string, unknown>).membership;
 		if (membership !== "join" && membership !== "invite") continue;
 		const userId = event.state_key ?? "";
@@ -76,7 +76,7 @@ export const isRoomAccessibleToServer = async (
 	origin: ServerName,
 ): Promise<boolean> => {
 	const joinRule = contentField(
-		room.state_events.get("m.room.join_rules\0"),
+		room.state_events.get("m.room.join_rules\x1f"),
 		"join_rule",
 	);
 	if (
@@ -88,7 +88,7 @@ export const isRoomAccessibleToServer = async (
 	}
 
 	const histVis = contentField(
-		room.state_events.get("m.room.history_visibility\0"),
+		room.state_events.get("m.room.history_visibility\x1f"),
 		"history_visibility",
 	);
 	if (histVis === "world_readable") return true;
@@ -112,7 +112,7 @@ export const buildFederationRoomEntry = (
 ): FederationRoomEntry => {
 	const childrenState: StrippedStateEvent[] = [];
 	for (const [key, event] of room.state_events) {
-		if (!key.startsWith("m.space.child\0")) continue;
+		if (!key.startsWith("m.space.child\x1f")) continue;
 		const content = event.content as Record<string, unknown>;
 		if (!content.via || !Array.isArray(content.via)) continue;
 		if (suggestedOnly && !content.suggested) continue;
@@ -125,39 +125,39 @@ export const buildFederationRoomEntry = (
 	}
 
 	const histVis = contentField(
-		room.state_events.get("m.room.history_visibility\0"),
+		room.state_events.get("m.room.history_visibility\x1f"),
 		"history_visibility",
 	);
 	const guestAccess = contentField(
-		room.state_events.get("m.room.guest_access\0"),
+		room.state_events.get("m.room.guest_access\x1f"),
 		"guest_access",
 	);
 
 	return {
 		room_id: roomId,
-		name: contentField(room.state_events.get("m.room.name\0"), "name") as
+		name: contentField(room.state_events.get("m.room.name\x1f"), "name") as
 			| string
 			| undefined,
-		topic: contentField(room.state_events.get("m.room.topic\0"), "topic") as
+		topic: contentField(room.state_events.get("m.room.topic\x1f"), "topic") as
 			| string
 			| undefined,
 		avatar_url: contentField(
-			room.state_events.get("m.room.avatar\0"),
+			room.state_events.get("m.room.avatar\x1f"),
 			"url",
 		) as string | undefined,
 		canonical_alias: contentField(
-			room.state_events.get("m.room.canonical_alias\0"),
+			room.state_events.get("m.room.canonical_alias\x1f"),
 			"alias",
 		) as string | undefined,
 		num_joined_members: countJoinedMembers(room.state_events),
 		world_readable: histVis === "world_readable",
 		guest_can_join: guestAccess === "can_join",
 		join_rule: contentField(
-			room.state_events.get("m.room.join_rules\0"),
+			room.state_events.get("m.room.join_rules\x1f"),
 			"join_rule",
 		) as string | undefined,
 		room_type: contentField(
-			room.state_events.get("m.room.create\0"),
+			room.state_events.get("m.room.create\x1f"),
 			"type",
 		) as string | undefined,
 		children_state: childrenState,

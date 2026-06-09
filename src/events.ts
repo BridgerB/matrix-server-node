@@ -28,11 +28,71 @@ export const CREATOR_POWER_LEVEL = 2 ** 53;
 const CANONICALJSON_MAX_INT = 2 ** 53 - 1;
 const CANONICALJSON_MIN_INT = -(2 ** 53 - 1);
 
+/**
+ * Extract the numeric base version from a room-version string.
+ *
+ * Handles plain numeric versions ("1".."12") and MSC-style unstable versions
+ * of the form `org.matrix.mscXXXX.N` (or `<vendor>.N`), where the trailing
+ * numeric component after the final "." is the base version (e.g.
+ * `org.matrix.msc3757.10` → 10). A bare numeric prefix like "10-dev" also
+ * resolves to 10. Returns `undefined` when no numeric version can be derived,
+ * in which case callers default to the newest (v11+) redaction behaviour.
+ */
+const parseRoomVersionNumber = (
+	roomVersion: string | undefined,
+): number | undefined => {
+	if (!roomVersion) return undefined;
+	// Plain numeric ("10") or numeric-prefixed ("10-foo").
+	const direct = parseInt(roomVersion, 10);
+	if (!Number.isNaN(direct)) return direct;
+	// MSC-style "org.matrix.mscXXXX.N": take the trailing numeric component.
+	const trailing = roomVersion.match(/\.(\d+)$/);
+	if (trailing?.[1]) {
+		const n = parseInt(trailing[1], 10);
+		if (!Number.isNaN(n)) return n;
+	}
+	return undefined;
+};
+
 /** Check whether a room version is v12 or later */
 export const isRoomVersion12Plus = (roomVersion: string | undefined): boolean => {
-	if (!roomVersion) return false;
-	const num = parseInt(roomVersion, 10);
-	return !isNaN(num) && num >= 12;
+	const num = parseRoomVersionNumber(roomVersion);
+	return num !== undefined && num >= 12;
+};
+
+/**
+ * Redaction-relevant room-version feature flags, derived from the version
+ * string. Mirrors the booleans Synapse hangs off its `RoomVersion` object
+ * (`updated_redaction_rules`, `restricted_join_rule_fix`,
+ * `msc4291_room_ids_as_hashes`, `implicit_room_creator`).
+ *
+ * An unknown/undefined version defaults to the newest behaviour (v11+),
+ * matching the previous fixed allow-list this module shipped.
+ */
+interface RedactionFlags {
+	/** v11+: MSC2174/MSC2176/MSC3989 updated redaction rules. */
+	updatedRedactionRules: boolean;
+	/** v8+: restricted join rules keep `allow` in m.room.join_rules. */
+	restrictedJoinRule: boolean;
+	/** v9+: keep `join_authorised_via_users_server` in m.room.member redaction. */
+	restrictedJoinRuleFix: boolean;
+	/** v12+: MSC4291 — create event has no `room_id` (derived from its hash). */
+	msc4291: boolean;
+	/** v11+: room creator implied by `m.room.create.sender` (no `creator`). */
+	implicitRoomCreator: boolean;
+}
+
+const redactionFlagsFor = (roomVersion: string | undefined): RedactionFlags => {
+	const num = parseRoomVersionNumber(roomVersion);
+	// Unknown version → newest (v11+) behaviour.
+	const v = num ?? 11;
+	return {
+		updatedRedactionRules: v >= 11,
+		restrictedJoinRule: v >= 8,
+		restrictedJoinRuleFix: v >= 9,
+		msc4291: v >= 12,
+		implicitRoomCreator: v >= 11,
+	};
 };
 
 /**
@@ -113,73 +173,139 @@ export const canonicalJson = (val: unknown): string => {
 	}
 	return JSON.stringify(val);
 };
-const ALLOWED_TOP_LEVEL = new Set([
-	"auth_events",
-	"content",
-	"depth",
-	"hashes",
-	"origin_server_ts",
-	"prev_events",
-	"room_id",
+/**
+ * Top-level event keys kept by redaction for ALL room versions. Mirrors
+ * Synapse's `prune_event_dict` base `allowed_keys` list.
+ */
+const ALLOWED_TOP_LEVEL_BASE = [
+	"event_id",
 	"sender",
+	"room_id",
+	"hashes",
 	"signatures",
-	"state_key",
+	"content",
 	"type",
-]);
+	"state_key",
+	"depth",
+	"prev_events",
+	"auth_events",
+	"origin_server_ts",
+];
 
-const ALLOWED_CONTENT_KEYS: Record<string, Set<string>> = {
-	"m.room.create": new Set([
-		"creator",
-		"room_version",
-		"type",
-		"federate",
-		"predecessor",
-		"additional_creators",
-	]),
-	"m.room.member": new Set([
-		"membership",
-		"join_authorised_via_users_server",
-		"third_party_invite",
-	]),
-	"m.room.power_levels": new Set([
-		"ban",
-		"events",
-		"events_default",
-		"invite",
-		"kick",
-		"redact",
-		"state_default",
-		"users",
-		"users_default",
-	]),
-	"m.room.join_rules": new Set(["join_rule", "allow"]),
-	"m.room.history_visibility": new Set(["history_visibility"]),
-	"m.room.redaction": new Set(["redacts"]),
-};
+/**
+ * Additional top-level keys kept by redaction for room versions BEFORE the
+ * updated (v11+) redaction rules: `prev_state`, `membership`, `origin`. These
+ * are part of the signed/hashed form for v1–v10 events, so omitting them breaks
+ * signature verification and event-ID computation for those rooms.
+ */
+const ALLOWED_TOP_LEVEL_LEGACY = ["prev_state", "membership", "origin"];
 
-export const redactEvent = (event: PDU): PDU => {
+/**
+ * Redact an event down to its federation-safe form, applying the redaction
+ * rules for the given `roomVersion`. Follows Synapse's `prune_event_dict`
+ * (synapse/events/utils.py) exactly.
+ *
+ * When `roomVersion` is undefined the newest (v11+) rules are applied, matching
+ * the fixed allow-list this module previously shipped. For v1–v10 rooms the
+ * caller MUST pass the room version, because those rooms keep extra top-level
+ * keys (`prev_state`, `membership`, `origin`) and use different content rules —
+ * without them the redacted form (and therefore the signature and event ID)
+ * will not match what remote servers compute.
+ */
+export const redactEvent = (event: PDU, roomVersion?: string): PDU => {
+	const flags = redactionFlagsFor(roomVersion);
+
+	const allowedKeys = [...ALLOWED_TOP_LEVEL_BASE];
+	if (!flags.updatedRedactionRules) {
+		allowedKeys.push(...ALLOWED_TOP_LEVEL_LEGACY);
+	}
+
 	// MSC4291: v12 create events have no room_id of their own, so it is not an
-	// allowed redaction key for them (mirrors Synapse's prune_event, which drops
-	// "room_id" from allowed_keys when msc4291_room_ids_as_hashes is set). This
-	// keeps both the reference hash (event ID) and the signed form room_id-free.
-	const stripRoomId = isV12CreateEvent(event);
+	// allowed redaction key for them (Synapse drops "room_id" from allowed_keys
+	// when msc4291_room_ids_as_hashes is set). This keeps both the reference hash
+	// (event ID) and the signed form room_id-free. We detect a v12 create event
+	// from its own content (`room_version` 12+), independent of `roomVersion`, so
+	// that computeEventId without an explicit version still strips it.
+	// Only the v12 CREATE event has its room_id stripped (synapse removes
+	// "room_id" from allowed_keys only when `event_type == Create`). Stripping it
+	// from non-create v12 events would make their redacted/signed form omit
+	// room_id, so signatures from other servers (which keep it) fail to verify.
+	const stripRoomId =
+		(flags.msc4291 && event.type === "m.room.create") ||
+		isV12CreateEvent(event);
 
-	const redacted: Record<string, unknown> = {};
-	for (const key of ALLOWED_TOP_LEVEL) {
-		if (key === "room_id" && stripRoomId) continue;
-		if (key in event) {
-			redacted[key] = (event as unknown as Record<string, unknown>)[key];
+	const src = event as unknown as Record<string, unknown>;
+	const content = (event.content ?? {}) as Record<string, unknown>;
+
+	const newContent: Record<string, unknown> = {};
+	const addFields = (...fields: string[]): void => {
+		for (const field of fields) {
+			if (field in content) newContent[field] = content[field];
+		}
+	};
+
+	switch (event.type) {
+		case "m.room.member": {
+			addFields("membership");
+			if (flags.restrictedJoinRuleFix) {
+				addFields("join_authorised_via_users_server");
+			}
+			if (flags.updatedRedactionRules) {
+				// Preserve only the `signed` subkey under third_party_invite.
+				const tpi = content.third_party_invite;
+				if (tpi && typeof tpi === "object" && !Array.isArray(tpi)) {
+					const signed = (tpi as Record<string, unknown>).signed;
+					newContent.third_party_invite =
+						signed !== undefined ? { signed } : {};
+				}
+			}
+			break;
+		}
+		case "m.room.create": {
+			if (flags.updatedRedactionRules) {
+				// MSC2176: create events keep their full content.
+				Object.assign(newContent, content);
+			}
+			if (!flags.implicitRoomCreator) {
+				addFields("creator");
+			}
+			break;
+		}
+		case "m.room.join_rules": {
+			addFields("join_rule");
+			if (flags.restrictedJoinRule) addFields("allow");
+			break;
+		}
+		case "m.room.power_levels": {
+			addFields(
+				"users",
+				"users_default",
+				"events",
+				"events_default",
+				"state_default",
+				"ban",
+				"kick",
+				"redact",
+			);
+			if (flags.updatedRedactionRules) addFields("invite");
+			break;
+		}
+		case "m.room.history_visibility": {
+			addFields("history_visibility");
+			break;
+		}
+		case "m.room.redaction": {
+			if (flags.updatedRedactionRules) addFields("redacts");
+			break;
 		}
 	}
 
-	const allowedKeys = ALLOWED_CONTENT_KEYS[event.type];
-	redacted.content = allowedKeys
-		? Object.fromEntries(
-				[...allowedKeys]
-					.filter((k) => k in event.content)
-					.map((k) => [k, event.content[k]]),
-			)
-		: {};
+	const redacted: Record<string, unknown> = {};
+	for (const key of allowedKeys) {
+		if (key === "room_id" && stripRoomId) continue;
+		if (key in src) redacted[key] = src[key];
+	}
+	redacted.content = newContent;
 
 	return redacted as unknown as PDU;
 };
@@ -194,13 +320,34 @@ export const redactEvent = (event: PDU): PDU => {
  * Detection uses the event itself: a `m.room.create` whose `content.room_version`
  * is 12+. This keeps `computeContentHash`/`computeEventId` self-contained.
  */
-const isV12CreateEvent = (event: { type: string; content: unknown }): boolean =>
+export const isV12CreateEvent = (event: {
+	type: string;
+	content: unknown;
+}): boolean =>
 	event.type === "m.room.create" &&
 	isRoomVersion12Plus(
 		(event.content as Record<string, unknown> | undefined)?.room_version as
 			| string
 			| undefined,
 	);
+
+/**
+ * MSC4291: prepare a stored event for transmission over federation. A v12+
+ * `m.room.create` event MUST NOT carry a `room_id` of its own — the room ID *is*
+ * its reference hash, and gomatrixserverlib (Complement's federation library)
+ * keeps `room_id` during redaction, so a create event federated WITH a `room_id`
+ * yields a different reference hash than the room ID, breaking the
+ * MSC4291 "room_id == hash(create event)" invariant. We store a `room_id` on the
+ * create PDU for CS-API convenience but must drop it on the wire. All other
+ * events keep their `room_id` (it is part of their redacted/signed form).
+ */
+export const stripV12CreateRoomId = (event: PDU): PDU => {
+	if (!isV12CreateEvent(event)) return event;
+	if (!(event as unknown as Record<string, unknown>).room_id) return event;
+	const copy = { ...event } as unknown as Record<string, unknown>;
+	delete copy.room_id;
+	return copy as unknown as PDU;
+};
 
 export const computeContentHash = (event: PDU): string => {
 	const copy: Record<string, unknown> = { ...event };
@@ -209,18 +356,31 @@ export const computeContentHash = (event: PDU): string => {
 	delete copy.hashes;
 	delete copy.event_id;
 	if (isV12CreateEvent(event)) delete copy.room_id;
-	return createHash("sha256").update(canonicalJson(copy)).digest("base64url");
+	// The content hash (hashes.sha256) is unpadded STANDARD base64 (+/), per the
+	// Matrix spec "Adding hashes and signatures to events" — NOT url-safe base64.
+	// (The reference hash / event ID below uses url-safe base64.) Using the wrong
+	// alphabet here makes every inbound event from another server fail the content
+	// hash check.
+	return createHash("sha256")
+		.update(canonicalJson(copy))
+		.digest("base64")
+		.replace(/=+$/, "");
 };
 
-export const computeEventId = (event: PDU): EventId => {
+export const computeEventId = (event: PDU, roomVersion?: string): EventId => {
 	const withHash: PDU = {
 		...event,
 		hashes: { sha256: computeContentHash(event) },
 	};
 
+	// The event ID is the reference hash of the redacted event, so it MUST use
+	// the room version's redaction rules. For v1–v10 rooms this means keeping
+	// `prev_state`/`membership`/`origin` and version-specific content fields, so
+	// our IDs match what remote servers compute.
+	//
 	// redactEvent already drops room_id for v12 create events (MSC4291), so the
 	// create event's reference hash — and therefore its ID — equals the room ID.
-	const redacted = redactEvent(withHash);
+	const redacted = redactEvent(withHash, roomVersion);
 	const forRef: Record<string, unknown> = { ...redacted };
 	delete forRef.unsigned;
 	delete forRef.signatures;
@@ -235,7 +395,7 @@ export const computeEventId = (event: PDU): EventId => {
  * The room ID is the event ID of the create event with `!` sigil instead of `$`.
  */
 export const computeRoomIdV12 = (createEvent: PDU): RoomId => {
-	const eventId = computeEventId(createEvent);
+	const eventId = computeEventId(createEvent, "12");
 	return `!${eventId.slice(1)}` as RoomId;
 };
 
@@ -252,13 +412,25 @@ export const buildEvent = (params: {
 	unsigned?: UnsignedData;
 	serverName: ServerName;
 	signingKey?: SigningKey;
+	roomVersion?: string;
+	/**
+	 * Explicit `origin_server_ts`. Defaults to `Date.now()`. Pass this when the
+	 * same logical event must be built more than once and produce an identical
+	 * event ID — most importantly for v12 create events, whose reference hash is
+	 * the room ID. Building the create event twice with two `Date.now()` calls
+	 * (e.g. once to derive the room ID and once to store it) can straddle a
+	 * millisecond boundary and yield two different IDs, so the stored create
+	 * event's ID would no longer equal the room ID. Supplying a fixed timestamp
+	 * removes that nondeterminism.
+	 */
+	originServerTs?: number;
 }): { event: PDU; eventId: EventId } => {
 	const event: PDU = {
 		auth_events: params.authEvents,
 		content: params.content,
 		depth: params.depth,
 		hashes: { sha256: "" },
-		origin_server_ts: Date.now(),
+		origin_server_ts: params.originServerTs ?? Date.now(),
 		prev_events: params.prevEvents,
 		room_id: params.roomId,
 		sender: params.sender,
@@ -277,11 +449,16 @@ export const buildEvent = (params: {
 	}
 
 	event.hashes = { sha256: computeContentHash(event) };
-	const eventId = computeEventId(event);
+	const eventId = computeEventId(event, params.roomVersion);
 
 	if (params.signingKey) {
 		return {
-			event: signEvent(event, params.serverName, params.signingKey),
+			event: signEvent(
+				event,
+				params.serverName,
+				params.signingKey,
+				params.roomVersion,
+			),
 			eventId,
 		};
 	}
@@ -294,7 +471,7 @@ const getStateEventId = (
 	stateKey: string,
 ): EventId | undefined => {
 	const event = roomState.state_events.get(makeStateKey(type, stateKey));
-	return event ? computeEventId(event) : undefined;
+	return event ? computeEventId(event, roomState.room_version) : undefined;
 };
 
 export const selectAuthEvents = (
@@ -302,6 +479,13 @@ export const selectAuthEvents = (
 	stateKey: string | undefined,
 	roomState: RoomState,
 	sender: UserId,
+	/**
+	 * The content of the event being authed. Only needed for restricted-room
+	 * joins, where `join_authorised_via_users_server` selects an additional
+	 * `m.room.member` auth event (the authorising user). Optional so existing
+	 * callers that don't build restricted joins are unaffected.
+	 */
+	content?: JsonObject,
 ): EventId[] => {
 	const authEvents: EventId[] = [];
 
@@ -329,6 +513,29 @@ export const selectAuthEvents = (
 			);
 			if (targetMemberId) authEvents.push(targetMemberId);
 		}
+
+		// MSC3083 restricted-room joins. When a join event carries
+		// `join_authorised_via_users_server`, the m.room.member event of the
+		// authorising user is also needed to auth the join (it proves that user
+		// is joined and has invite power). Mirrors Synapse's
+		// `auth_types_for_event`, which adds (m.room.member, authorising_user)
+		// when the room version supports restricted join rules and the event is a
+		// join carrying the authorising-user field. We key this off the member
+		// content rather than the live join_rules so the auth chain is stable
+		// regardless of later join-rule changes.
+		if (content?.["membership"] === "join") {
+			const authorisingUser = content[
+				"join_authorised_via_users_server"
+			] as string | undefined;
+			if (authorisingUser && authorisingUser !== stateKey) {
+				const authUserMemberId = getStateEventId(
+					roomState,
+					"m.room.member",
+					authorisingUser,
+				);
+				if (authUserMemberId) authEvents.push(authUserMemberId);
+			}
+		}
 	}
 
 	return authEvents;
@@ -336,7 +543,7 @@ export const selectAuthEvents = (
 export const getPowerLevels = (
 	roomState: RoomState,
 ): RoomPowerLevelsContent => {
-	const plEvent = roomState.state_events.get("m.room.power_levels\0");
+	const plEvent = roomState.state_events.get("m.room.power_levels\x1f");
 	return plEvent
 		? (plEvent.content as unknown as RoomPowerLevelsContent)
 		: { users_default: 0, events_default: 0, state_default: 50 };
@@ -347,7 +554,7 @@ export const isRoomCreator = (
 	userId: UserId,
 	roomState: RoomState,
 ): boolean => {
-	const createEvent = roomState.state_events.get("m.room.create\0");
+	const createEvent = roomState.state_events.get("m.room.create\x1f");
 	if (!createEvent) return false;
 	if (createEvent.sender === userId) return true;
 	const additionalCreators = (createEvent.content as Record<string, unknown>)
@@ -364,10 +571,10 @@ export const getUserPowerLevel = (
 		return CREATOR_POWER_LEVEL;
 	}
 
-	const plEvent = roomState.state_events.get("m.room.power_levels\0");
+	const plEvent = roomState.state_events.get("m.room.power_levels\x1f");
 	if (!plEvent) {
 		// Before power_levels is set, the room creator has implicit PL 100
-		const createEvent = roomState.state_events.get("m.room.create\0");
+		const createEvent = roomState.state_events.get("m.room.create\x1f");
 		if (createEvent && createEvent.sender === userId) return 100;
 		return 0;
 	}
@@ -396,7 +603,7 @@ export const getMembership = (
 	roomState: RoomState,
 	userId: UserId,
 ): string | undefined => {
-	const memberEvent = roomState.state_events.get(`m.room.member\0${userId}`);
+	const memberEvent = roomState.state_events.get(`m.room.member\x1f${userId}`);
 	return (memberEvent?.content as Record<string, unknown> | undefined)
 		?.membership as string | undefined;
 };
@@ -421,7 +628,7 @@ const checkMembershipAuth = (event: PDU, roomState: RoomState): void => {
 			if (senderMembership === "join") return;
 			if (senderMembership === "invite") return;
 
-			const createEvent = roomState.state_events.get("m.room.create\0");
+			const createEvent = roomState.state_events.get("m.room.create\x1f");
 			if (
 				createEvent &&
 				createEvent.sender === event.sender &&
@@ -430,7 +637,7 @@ const checkMembershipAuth = (event: PDU, roomState: RoomState): void => {
 				return;
 			}
 
-			const joinRulesEvent = roomState.state_events.get("m.room.join_rules\0");
+			const joinRulesEvent = roomState.state_events.get("m.room.join_rules\x1f");
 			const joinRule = joinRulesEvent
 				? ((joinRulesEvent.content as Record<string, unknown>)
 						.join_rule as string)
@@ -481,28 +688,54 @@ const checkMembershipAuth = (event: PDU, roomState: RoomState): void => {
 		}
 
 		case "leave": {
+			// Self-leave: a user can always leave a room they are joined to or
+			// invited to (or have knocked on — accepting cancellation of a knock).
 			if (event.sender === targetUserId) {
-				if (senderMembership === "join" || senderMembership === "invite")
+				if (
+					senderMembership === "join" ||
+					senderMembership === "invite" ||
+					senderMembership === "knock"
+				)
 					return;
 				throw forbidden("Cannot leave a room you are not in");
 			}
-			// Kick: sender must be joined
+			// Changing another user's membership to leave is either a kick (target
+			// currently join/invite) or an unban (target currently banned). In both
+			// cases the sender must themselves be joined.
+			//
+			// This mirrors synapse's _is_membership_change_allowed
+			// (event_auth.py, `Membership.LEAVE` branch):
+			//   - if the target is banned and the sender's power level is below the
+			//     room ban level, reject (cannot unban);
+			//   - otherwise, if sender != target (a kick), require the sender to have
+			//     the kick power level AND a strictly higher power level than the
+			//     target.
+			// Notably, an unban (target_banned) is NOT subject to the kick-level /
+			// higher-than-target checks — having the ban power level is sufficient.
 			if (senderMembership !== "join") {
 				throw forbidden("Sender is not in the room");
 			}
-			// Target must actually be in the room (join or invite) to be kicked
-			if (targetMembership !== "join" && targetMembership !== "invite") {
+			const targetPl = getUserPowerLevel(targetUserId, roomState);
+			if (targetMembership === "ban") {
+				// Unban: sender needs the ban power level.
+				const banPl = pl.ban ?? 50;
+				if (senderPl < banPl) {
+					throw forbidden(`You cannot unban user ${targetUserId}.`);
+				}
+				return;
+			}
+			// Kick: target must currently be join, invite, or knock (rejecting a
+			// knock is a leave issued by a member with kick power).
+			if (
+				targetMembership !== "join" &&
+				targetMembership !== "invite" &&
+				targetMembership !== "knock"
+			) {
 				throw forbidden("Cannot kick a user who is not in the room");
 			}
 			const kickPl = pl.kick ?? 50;
-			if (senderPl < kickPl) {
-				throw forbidden(
-					`Insufficient power level to kick: need ${kickPl}, have ${senderPl}`,
-				);
-			}
-			const targetPl = getUserPowerLevel(targetUserId, roomState);
-			if (senderPl <= targetPl) {
-				throw forbidden("Cannot kick user with equal or higher power level");
+			if (senderPl < kickPl || senderPl <= targetPl) {
+				throw forbidden(`You cannot kick user ${targetUserId}.`);
 			}
 			return;
 		}
@@ -542,7 +775,7 @@ const checkMembershipAuth = (event: PDU, roomState: RoomState): void => {
 			}
 
 			const joinRulesEvent = roomState.state_events.get(
-				"m.room.join_rules\0",
+				"m.room.join_rules\x1f",
 			);
 			const knockJoinRule = joinRulesEvent
 				? ((joinRulesEvent.content as Record<string, unknown>)
@@ -643,9 +876,9 @@ export const checkEventAuth = (
 
 	// In v12, m.room.create must NOT be in auth_events
 	if (isV12Plus) {
-		const createEvent = roomState.state_events.get("m.room.create\0");
+		const createEvent = roomState.state_events.get("m.room.create\x1f");
 		if (createEvent) {
-			const createEventId = computeEventId(createEvent);
+			const createEventId = computeEventId(createEvent, roomState.room_version);
 			if (event.auth_events.includes(createEventId)) {
 				throw forbidden(
 					"m.room.create must not be referenced in auth_events in room version 12+",
@@ -679,7 +912,7 @@ export const checkEventAuth = (
 				| Record<string, number>
 				| undefined;
 			if (users) {
-				const createEvent = roomState.state_events.get("m.room.create\0");
+				const createEvent = roomState.state_events.get("m.room.create\x1f");
 				if (createEvent) {
 					const creator = createEvent.sender;
 					const additionalCreators = (
@@ -787,7 +1020,7 @@ export const requireJoinedRoom = async (
 
 export const isWorldReadable = (roomState: RoomState): boolean => {
 	const hvEvent = roomState.state_events.get(
-		"m.room.history_visibility\0",
+		"m.room.history_visibility\x1f",
 	);
 	if (!hvEvent) return false;
 	return (
@@ -807,7 +1040,7 @@ export const requireJoinedOrWorldReadable = async (
 		const membership = getMembership(room, userId);
 		if (membership === "join") return room;
 		if (membership === "leave") {
-			const hvEvent = room.state_events.get("m.room.history_visibility\0");
+			const hvEvent = room.state_events.get("m.room.history_visibility\x1f");
 			const hv = hvEvent
 				? (hvEvent.content as Record<string, unknown>).history_visibility
 				: undefined;
@@ -823,7 +1056,7 @@ export const countJoinedMembers = (
 ): number =>
 	[...stateEvents.entries()].filter(
 		([key, event]) =>
-			key.startsWith("m.room.member\0") &&
+			key.startsWith("m.room.member\x1f") &&
 			(event.content as Record<string, unknown>).membership === "join",
 	).length;
 
@@ -838,8 +1071,18 @@ export const getStateContent = (
 		: undefined;
 };
 
+/**
+ * Separator for packing several identifiers into one composite string key
+ * (state-event map keys, txn-idempotency keys, the various in-memory index
+ * maps). The ASCII Unit Separator (U+001F) is a single byte, never appears in
+ * Matrix identifiers (all printable ASCII), is compact, and — unlike the NUL
+ * byte this replaced — is accepted by PostgreSQL/MySQL text columns and query
+ * parameters. Keep pack and unpack symmetric: always split on this exact value.
+ */
+export const KEY_SEP = "\x1f";
+
 export const makeStateKey = (type: string, stateKey = ""): string =>
-	`${type}\0${stateKey}`;
+	`${type}${KEY_SEP}${stateKey}`;
 
 export interface EventContext {
 	roomState: RoomState;
@@ -857,8 +1100,37 @@ export const sendStateEvent = async (
 	content: JsonObject,
 	signingKey?: SigningKey,
 	federationClient?: FederationClient,
+	/**
+	 * Explicit `origin_server_ts` for the built event. Forwarded to
+	 * `buildEvent`. Pass this for v12 create events so the stored create event's
+	 * ID matches the room ID that was derived from a separately-built create
+	 * event (see the note on `buildEvent`'s `originServerTs`).
+	 */
+	originServerTs?: number,
 ): Promise<string> => {
-	const authEvents = selectAuthEvents(type, stateKey, ctx.roomState, sender);
+	const authEvents = selectAuthEvents(
+		type,
+		stateKey,
+		ctx.roomState,
+		sender,
+		content,
+	);
+	// Synapse `deduplicate_state_event`: sending a state event whose (type,
+	// state_key) already holds an identical content from the same sender is a
+	// no-op — return the existing event's ID rather than creating a new event.
+	// This makes e.g. re-joining an already-joined room idempotent (the same
+	// m.room.member event ID is returned), which clients/tests rely on.
+	const existingState = ctx.roomState.state_events.get(
+		makeStateKey(type, stateKey),
+	);
+	if (
+		existingState &&
+		existingState.sender === sender &&
+		canonicalJson(existingState.content) === canonicalJson(content)
+	) {
+		return computeEventId(existingState, ctx.roomState.room_version);
+	}
+
 	// When a signing key is supplied the event is signed by our server. Signing
 	// is additive: it injects `signatures` (and recomputes `hashes`) but does NOT
 	// change the event ID, which is derived from the redacted form (signatures and
@@ -875,6 +1147,8 @@ export const sendStateEvent = async (
 		authEvents,
 		serverName,
 		signingKey,
+		roomVersion: ctx.roomState.room_version,
+		originServerTs,
 	});
 
 	checkEventAuth(event, eventId, ctx.roomState);

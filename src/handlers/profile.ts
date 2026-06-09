@@ -13,7 +13,7 @@ const MAX_AVATAR_URL_BYTES = 1000;
 const extendedProfileFields = new Map<string, unknown>();
 
 const profileFieldKey = (userId: UserId, keyName: string): string =>
-	`${userId}\0${keyName}`;
+	`${userId}\x1f${keyName}`;
 
 const propagateProfileToRooms = async (
 	storage: Storage,
@@ -27,7 +27,7 @@ const propagateProfileToRooms = async (
 		const room = await storage.getRoom(roomId);
 		if (!room) continue;
 
-		const currentMember = room.state_events.get(`m.room.member\0${userId}`);
+		const currentMember = room.state_events.get(`m.room.member\x1f${userId}`);
 		if (!currentMember) continue;
 
 		const currentContent = currentMember.content as Record<string, unknown>;
@@ -49,6 +49,7 @@ const propagateProfileToRooms = async (
 			prevEvents: room.forward_extremities,
 			authEvents,
 			serverName,
+			roomVersion: room.room_version,
 		});
 
 		checkEventAuth(event, eventId, room);
@@ -60,7 +61,7 @@ const propagateProfileToRooms = async (
 
 /** Collect all extended profile fields for a user */
 const getExtendedFields = (userId: UserId): Record<string, unknown> => {
-	const prefix = `${userId}\0`;
+	const prefix = `${userId}\x1f`;
 	const fields: Record<string, unknown> = {};
 	for (const [key, value] of extendedProfileFields) {
 		if (key.startsWith(prefix)) {

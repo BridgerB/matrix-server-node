@@ -19,7 +19,7 @@ import type { EventId, RoomId, ServerName, UserId } from "../types/index.ts";
  * federated. `m.read.private` MUST NOT be sent to other servers per the spec,
  * so it is excluded here.
  */
-const sendReceiptEdu = async (
+export const sendReceiptEdu = async (
 	storage: Storage,
 	serverName: ServerName,
 	federationClient: FederationClient,

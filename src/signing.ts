@@ -134,11 +134,12 @@ export const signEvent = (
 	event: PDU,
 	serverName: ServerName,
 	key: SigningKey,
+	roomVersion?: string,
 ): PDU => {
 	const contentHash = computeContentHash(event);
 	const withHash: PDU = { ...event, hashes: { sha256: contentHash } };
 
-	const redacted = redactEvent(withHash);
+	const redacted = redactEvent(withHash, roomVersion);
 	const {
 		unsigned: _u,
 		signatures: _s,
@@ -162,8 +163,9 @@ export const verifyEventSignature = (
 	serverName: ServerName,
 	keyId: KeyId,
 	publicKeyBase64: string,
+	roomVersion?: string,
 ): boolean => {
-	const redacted = redactEvent(event);
+	const redacted = redactEvent(event, roomVersion);
 	const {
 		unsigned: _u,
 		signatures: _s,

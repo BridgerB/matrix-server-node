@@ -194,12 +194,12 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 
 			await conn.query(`
 				CREATE TABLE IF NOT EXISTS receipts (
-					room_id VARCHAR(255) NOT NULL,
-					user_id VARCHAR(255) NOT NULL,
+					room_id VARCHAR(255) CHARACTER SET ascii NOT NULL,
+					user_id VARCHAR(255) CHARACTER SET ascii NOT NULL,
 					event_id VARCHAR(255) NOT NULL,
-					receipt_type VARCHAR(255) NOT NULL,
+					receipt_type VARCHAR(255) CHARACTER SET ascii NOT NULL,
 					ts BIGINT NOT NULL,
-					thread_id VARCHAR(255) NOT NULL DEFAULT '',
+					thread_id VARCHAR(255) CHARACTER SET ascii NOT NULL DEFAULT '',
 					PRIMARY KEY (room_id, user_id, receipt_type, thread_id)
 				)
 			`);
@@ -363,10 +363,10 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 
 			await conn.query(`
 				CREATE TABLE IF NOT EXISTS key_backup_data (
-					user_id VARCHAR(255) NOT NULL,
-					version VARCHAR(64) NOT NULL,
-					room_id VARCHAR(255) NOT NULL,
-					session_id VARCHAR(255) NOT NULL,
+					user_id VARCHAR(255) CHARACTER SET ascii NOT NULL,
+					version VARCHAR(64) CHARACTER SET ascii NOT NULL,
+					room_id VARCHAR(255) CHARACTER SET ascii NOT NULL,
+					session_id VARCHAR(255) CHARACTER SET ascii NOT NULL,
 					key_json TEXT NOT NULL,
 					PRIMARY KEY (user_id, version, room_id, session_id)
 				)
@@ -580,8 +580,8 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 				],
 			);
 			for (const [key, event] of state.state_events) {
-				const [eventType, stateKey] = key.split("\0") as [string, string];
-				const eventId = computeEventId(event);
+				const [eventType, stateKey] = key.split("\x1f") as [string, string];
+				const eventId = computeEventId(event, state.room_version);
 				await conn.query(
 					`INSERT INTO state_events (room_id, event_type, state_key, event_id, event_json) VALUES (?, ?, ?, ?, ?)
 					 ON DUPLICATE KEY UPDATE event_id = VALUES(event_id), event_json = VALUES(event_json)`,
@@ -615,7 +615,7 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 		const stateMap = new Map<string, PDU>();
 		for (const sr of stateRows) {
 			stateMap.set(
-				`${sr.event_type}\0${sr.state_key}`,
+				`${sr.event_type}\x1f${sr.state_key}`,
 				this.parseJson(sr.event_json) as PDU,
 			);
 		}
@@ -746,7 +746,7 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 
 		const cached = this.roomCache.get(roomId);
 		if (cached) {
-			const key = `${event.type}\0${event.state_key ?? ""}`;
+			const key = `${event.type}\x1f${event.state_key ?? ""}`;
 			cached.state_events.set(key, event);
 		}
 
@@ -2463,7 +2463,7 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 		try {
 			await conn.beginTransaction();
 			for (const event of authChain) {
-				const eventId = computeEventId(event);
+				const eventId = computeEventId(event, roomVersion);
 				this.streamCounter++;
 				await conn.query(
 					"INSERT IGNORE INTO events (event_id, room_id, stream_pos, event_json) VALUES (?, ?, ?, ?)",
@@ -2474,7 +2474,7 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			let maxDepth = 0;
 			const extremities: EventId[] = [];
 			for (const event of stateEvents) {
-				const eventId = computeEventId(event);
+				const eventId = computeEventId(event, roomVersion);
 				this.streamCounter++;
 				await conn.query(
 					"INSERT IGNORE INTO events (event_id, room_id, stream_pos, event_json) VALUES (?, ?, ?, ?)",

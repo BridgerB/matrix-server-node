@@ -50,7 +50,7 @@ export const postRoomUpgrade =
 		const oldRoom = await requireJoinedRoom(storage, oldRoomId, userId);
 
 		const senderPl = getUserPowerLevel(userId, oldRoom);
-		const plEvent = oldRoom.state_events.get("m.room.power_levels\0");
+		const plEvent = oldRoom.state_events.get("m.room.power_levels\x1f");
 		const pl = plEvent
 			? (plEvent.content as unknown as RoomPowerLevelsContent)
 			: undefined;
@@ -64,17 +64,23 @@ export const postRoomUpgrade =
 		const newVersion = body.new_version as RoomVersion;
 		const v12Plus = isRoomVersion12Plus(newVersion);
 
-		const lastCreateEvent = oldRoom.state_events.get("m.room.create\0");
-		const lastCreateEventId = lastCreateEvent
-			? computeEventId(lastCreateEvent)
-			: ("" as EventId);
+		// MSC4291: when the REPLACEMENT room is v12+, its create event's
+		// `predecessor` reference omits `event_id` and carries only `room_id`
+		// (synapse `_calculate_upgraded_room_creation_content` is called with
+		// `tombstone_event_id=None` for msc4291_room_ids_as_hashes rooms). For
+		// pre-v12 replacement rooms we keep `event_id`, set to the OLD room's
+		// create event ID, preserving the prior behaviour.
+		const predecessor: JsonObject = { room_id: oldRoomId };
+		if (!v12Plus) {
+			const lastCreateEvent = oldRoom.state_events.get("m.room.create\x1f");
+			predecessor.event_id = lastCreateEvent
+				? computeEventId(lastCreateEvent, oldRoom.room_version)
+				: ("" as EventId);
+		}
 
 		const newCreateContent: JsonObject = {
 			room_version: body.new_version,
-			predecessor: {
-				room_id: oldRoomId,
-				event_id: lastCreateEventId,
-			},
+			predecessor,
 		};
 
 		// MSC4289: an upgrade to v12+ may carry `additional_creators` in the request
@@ -92,6 +98,9 @@ export const postRoomUpgrade =
 			}
 		}
 
+		// Shared timestamp so the stored create event's ID equals the derived v12
+		// room ID (see rooms.ts postCreateRoom for the rationale).
+		const createOriginServerTs = Date.now();
 		let newRoomId: RoomId;
 		if (v12Plus) {
 			const tempRoomId = "!placeholder:temp" as RoomId;
@@ -105,6 +114,8 @@ export const postRoomUpgrade =
 				prevEvents: [],
 				authEvents: [],
 				serverName,
+				roomVersion: newVersion,
+				originServerTs: createOriginServerTs,
 			});
 			const createForHash = { ...tempCreateEvent };
 			delete (createForHash as Record<string, unknown>).room_id;
@@ -136,6 +147,9 @@ export const postRoomUpgrade =
 			"m.room.create",
 			"",
 			newCreateContent,
+			undefined,
+			undefined,
+			createOriginServerTs,
 		);
 
 		await sendStateEvent(
@@ -151,7 +165,7 @@ export const postRoomUpgrade =
 		);
 
 		for (const stateType of STATE_TO_COPY) {
-			const oldEvent = oldRoom.state_events.get(`${stateType}\0`);
+			const oldEvent = oldRoom.state_events.get(`${stateType}\x1f`);
 			if (!oldEvent) continue;
 
 			const copiedContent: JsonObject = { ...oldEvent.content };
@@ -201,6 +215,7 @@ export const postRoomUpgrade =
 			prevEvents: [...oldRoom.forward_extremities],
 			authEvents: tombstoneAuthEvents,
 			serverName,
+			roomVersion: oldRoom.room_version,
 		});
 
 		checkEventAuth(tombstoneEvent, tombstoneEventId, oldRoom);
@@ -245,7 +260,7 @@ export async function migrateRoomPushRules(
 	const suffix = `:${serverName}`;
 	const localUsers = new Set<string>();
 	for (const [key, event] of oldRoom.state_events) {
-		if (!key.startsWith("m.room.member\0")) continue;
+		if (!key.startsWith("m.room.member\x1f")) continue;
 		const userId = event.state_key;
 		if (!userId || !userId.endsWith(suffix)) continue;
 		const membership = (event.content as { membership?: string }).membership;

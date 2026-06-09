@@ -1,8 +1,25 @@
-import { request as httpsRequest, type RequestOptions } from "node:https";
+import {
+	Agent,
+	request as httpsRequest,
+	type RequestOptions,
+} from "node:https";
 import type { SigningKey } from "../signing.ts";
 import { signJson } from "../signing.ts";
 import type { ServerName } from "../types/index.ts";
 import { resolveServer } from "./discovery.ts";
+
+/**
+ * Shared keep-alive HTTPS agent for all outbound federation requests. Without
+ * connection reuse every federation round-trip (make_join, send_join, /send,
+ * key fetches, backfill, …) pays a fresh TLS handshake, which is slow and, under
+ * the concurrent load of a full test run, a significant source of latency. A
+ * pooled keep-alive agent reuses connections per destination.
+ */
+const federationAgent = new Agent({
+	keepAlive: true,
+	maxSockets: 64,
+	rejectUnauthorized: false, // Federation often uses self-signed certs in dev
+});
 
 export class FederationClient {
 	serverName: ServerName;
@@ -37,6 +54,7 @@ export class FederationClient {
 			},
 			timeout: 10000,
 			rejectUnauthorized: false, // Federation often uses self-signed certs in dev
+			agent: federationAgent,
 		};
 
 		return new Promise((resolve, reject) => {

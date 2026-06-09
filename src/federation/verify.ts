@@ -30,6 +30,7 @@ const verifyServerSignature = async (
 	server: ServerName,
 	storage: Storage,
 	federationClient: FederationClient,
+	roomVersion?: string,
 ): Promise<void> => {
 	const serverSigs = event.signatures?.[server];
 	if (!serverSigs || Object.keys(serverSigs).length === 0) {
@@ -43,7 +44,10 @@ const verifyServerSignature = async (
 			keyId as KeyId,
 			federationClient,
 		);
-		if (pubKey && verifyEventSignature(event, server, keyId as KeyId, pubKey)) {
+		if (
+			pubKey &&
+			verifyEventSignature(event, server, keyId as KeyId, pubKey, roomVersion)
+		) {
 			return;
 		}
 	}
@@ -79,6 +83,7 @@ export const verifyOriginSignature = async (
 	_origin: ServerName,
 	storage: Storage,
 	federationClient: FederationClient,
+	roomVersion?: string,
 ): Promise<void> => {
 	const content = (event.content ?? {}) as Record<string, unknown>;
 	const membership = content.membership as string | undefined;
@@ -95,6 +100,7 @@ export const verifyOriginSignature = async (
 			domainFromId(event.sender),
 			storage,
 			federationClient,
+			roomVersion,
 		);
 	}
 

@@ -1,8 +1,11 @@
 import { badJson, forbidden, notFound } from "../errors.ts";
+import type { FederationClient } from "../federation/client.ts";
 import type { Handler } from "../router.ts";
+import type { SigningKey } from "../signing.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { DeviceId, UserId } from "../types/index.ts";
+import type { DeviceId, ServerName, UserId } from "../types/index.ts";
 import { withUIAA } from "../uiaa.ts";
+import { sendDeviceListUpdate } from "./e2ee.ts";
 
 /**
  * Account-data type prefix for MSC3890 per-device local notification settings.
@@ -78,21 +81,39 @@ export const getDevice =
 	};
 
 export const putDevice =
-	(storage: Storage): Handler =>
+	(
+		storage: Storage,
+		serverName?: ServerName,
+		_signingKey?: SigningKey,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const deviceId = req.params.deviceId as DeviceId;
 		const body = req.body as Record<string, unknown>;
 
-		const device = await storage.getDevice(req.userId as string, deviceId);
+		const userId = req.userId as UserId;
+		const device = await storage.getDevice(userId, deviceId);
 		if (!device) throw notFound("Device not found");
 
 		const displayName = body.display_name as string | undefined;
 		if (displayName !== undefined) {
-			await storage.updateDeviceDisplayName(
-				req.userId as string,
-				deviceId,
-				displayName,
-			);
+			await storage.updateDeviceDisplayName(userId, deviceId, displayName);
+
+			// A device's human-readable name changed: notify remote servers
+			// sharing a room with the user via an m.device_list_update EDU so a
+			// subsequent /keys/query there returns unsigned.device_display_name.
+			// Mirrors Synapse's DeviceHandler.update_device, which calls
+			// notify_device_update on a display-name change. Fire-and-forget so a
+			// failing/unreachable peer never affects this response.
+			if (serverName && federationClient) {
+				void sendDeviceListUpdate(
+					storage,
+					serverName,
+					federationClient,
+					userId,
+					deviceId,
+				).catch(() => {});
+			}
 		}
 
 		return { status: 200, body: {} };

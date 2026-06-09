@@ -165,6 +165,22 @@ export const getDefaultRules = (userId: UserId): PushRulesContent => ({
 					{ set_tweak: "highlight" },
 				],
 			},
+			{
+				// Legacy mention rule (Synapse `.m.rule.contains_user_name`): a
+				// message body containing the user's localpart at a word boundary is
+				// a highlight notification. This is what produces the mention
+				// highlights in TestThreadedReceipts, where messages embed the raw
+				// MXID (e.g. "Hello @bob:hs1!") rather than an `m.mentions` block.
+				rule_id: ".m.rule.contains_user_name",
+				default: true,
+				enabled: true,
+				pattern: userId.slice(1).split(":")[0] ?? userId,
+				actions: [
+					"notify",
+					{ set_tweak: "sound", value: "default" },
+					{ set_tweak: "highlight" },
+				],
+			},
 		],
 		room: [],
 		sender: [],

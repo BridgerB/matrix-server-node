@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { generateRoomId } from "../crypto.ts";
 import {
 	badJson,
@@ -22,14 +23,15 @@ import {
 	validateAdditionalCreators,
 } from "../events.ts";
 import type { FederationClient } from "../federation/client.ts";
-import { fanoutEvent } from "../federation/outbound.ts";
+import { fanoutEdu, fanoutEvent } from "../federation/outbound.ts";
 
 import type { Handler } from "../router.ts";
 import type { SigningKey } from "../signing.ts";
 import { signEvent } from "../signing.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { PDU } from "../types/events.ts";
+import type { EDU, PDU } from "../types/events.ts";
 import type {
+	DeviceId,
 	EventId,
 	MatrixErrorCode,
 	RoomId,
@@ -47,6 +49,16 @@ import type { RoomPowerLevelsContent } from "../types/state-events.ts";
  * to this room and has permission to issue invites. This user is recorded in a
  * restricted join event's `content.join_authorised_via_users_server`. Returns
  * undefined if no such local user exists.
+ *
+ * Mirrors synapse's `get_users_which_can_issue_invite` (handlers/room_member.py):
+ * a joined user can issue invites if they are a room creator (MSC4289, infinite
+ * power in v11/v12 — surfaced via `getUserPowerLevel`) OR their power level is at
+ * least the room's `invite` level. We pick the HIGHEST-power qualifying local
+ * user (ties broken by user ID) rather than the first one we happen to iterate.
+ * This makes the choice deterministic regardless of `state_events` Map ordering
+ * and prefers the most authoritative local user (e.g. a creator over a user that
+ * only marginally meets the invite level), which is the safest authoriser to
+ * record so the join passes auth on every participating server.
  */
 const findAuthorisingLocalUser = (
 	room: RoomState,
@@ -55,21 +67,68 @@ const findAuthorisingLocalUser = (
 	const pl = getPowerLevels(room);
 	const invitePl = pl.invite ?? 0;
 
+	let best: UserId | undefined;
+	let bestPl = -Infinity;
+
 	for (const [key, event] of room.state_events) {
-		if (!key.startsWith("m.room.member\0")) continue;
+		if (!key.startsWith("m.room.member\x1f")) continue;
 		const membership = (event.content as Record<string, unknown>)
 			.membership as string | undefined;
 		if (membership !== "join") continue;
 
-		const memberId = key.slice("m.room.member\0".length) as UserId;
+		const memberId = key.slice("m.room.member\x1f".length) as UserId;
 		const memberServer = memberId.split(":").slice(1).join(":");
 		if (memberServer !== localServerName) continue;
 
-		if (getUserPowerLevel(memberId, room) >= invitePl) {
-			return memberId;
+		const memberPl = getUserPowerLevel(memberId, room);
+		if (memberPl < invitePl) continue;
+
+		// Prefer the highest power level; break ties deterministically by the
+		// lexicographically smallest user ID so the same authoriser is chosen on
+		// every invocation regardless of Map iteration order.
+		if (memberPl > bestPl || (memberPl === bestPl && (!best || memberId < best))) {
+			best = memberId;
+			bestPl = memberPl;
 		}
 	}
-	return undefined;
+	return best;
+};
+
+/**
+ * Compute the set of REMOTE servers (excluding our own) that currently have a
+ * joined user able to issue invites in this room. When our server is resident in
+ * a restricted room but has no local user who can authorise a join (see
+ * `findAuthorisingLocalUser`), the join must be performed over federation via one
+ * of these servers — they are the only ones able to vouch for the joining user.
+ *
+ * Mirrors synapse's `_should_perform_remote_join`: when the local host is not in
+ * `get_servers_from_users(get_users_which_can_issue_invite(state))`, it returns
+ * those servers as the prospective remote-join hosts (handlers/room_member.py).
+ */
+const serversThatCanIssueInvite = (
+	room: RoomState,
+	localServerName: string,
+): ServerName[] => {
+	const pl = getPowerLevels(room);
+	const invitePl = pl.invite ?? 0;
+
+	const servers: ServerName[] = [];
+	for (const [key, event] of room.state_events) {
+		if (!key.startsWith("m.room.member\x1f")) continue;
+		const membership = (event.content as Record<string, unknown>)
+			.membership as string | undefined;
+		if (membership !== "join") continue;
+
+		const memberId = key.slice("m.room.member\x1f".length) as UserId;
+		if (getUserPowerLevel(memberId, room) < invitePl) continue;
+
+		const memberServer = memberId.split(":").slice(1).join(":");
+		if (!memberServer || memberServer === localServerName) continue;
+		if (!servers.includes(memberServer as ServerName)) {
+			servers.push(memberServer as ServerName);
+		}
+	}
+	return servers;
 };
 
 /**
@@ -89,14 +148,14 @@ const isServerResidentInRoom = (
 ): boolean => {
 	// Without the create event we never have authoritative room state and cannot
 	// build valid events locally.
-	if (!room.state_events.has("m.room.create\0")) return false;
+	if (!room.state_events.has("m.room.create\x1f")) return false;
 
 	for (const [key, event] of room.state_events) {
-		if (!key.startsWith("m.room.member\0")) continue;
+		if (!key.startsWith("m.room.member\x1f")) continue;
 		const membership = (event.content as Record<string, unknown>)
 			.membership as string | undefined;
 		if (membership !== "join") continue;
-		const memberId = key.slice("m.room.member\0".length);
+		const memberId = key.slice("m.room.member\x1f".length);
 		const memberServer = memberId.split(":").slice(1).join(":");
 		if (memberServer === localServerName) return true;
 	}
@@ -113,7 +172,7 @@ const userSatisfiesRestrictedAllow = async (
 	room: RoomState,
 	userId: UserId,
 ): Promise<boolean> => {
-	const joinRulesEvent = room.state_events.get("m.room.join_rules\0");
+	const joinRulesEvent = room.state_events.get("m.room.join_rules\x1f");
 	if (!joinRulesEvent) return false;
 	const allow = (joinRulesEvent.content as Record<string, unknown>).allow;
 	if (!Array.isArray(allow)) return false;
@@ -130,6 +189,94 @@ const userSatisfiesRestrictedAllow = async (
 		if (getMembership(allowedRoom, userId) === "join") return true;
 	}
 	return false;
+};
+
+/**
+ * Collect the remote servers that should be told about a membership change for
+ * `targetUserId`, computed from the CURRENT room state (i.e. before the change
+ * is stored). This is the union of:
+ *   - every remote server currently resident in the room (join/invite/knock),
+ *     mirroring `getServersInRoom`, and
+ *   - the target user's own server.
+ *
+ * The target's server is included explicitly because a leave (kick/unban/invite
+ * rescission) flips the target's membership to `leave`/`ban` and, once stored,
+ * `getServersInRoom` no longer counts that server. Without capturing it up front
+ * the very server that needs to observe the departure would be dropped from the
+ * fanout (the root cause of TestUnbanViaInvite and the "rescind invite over
+ * federation" case of TestFederationRoomsInvite). Our own server is excluded.
+ */
+const collectMembershipDestinations = async (
+	storage: Storage,
+	serverName: string,
+	roomId: RoomId,
+	targetUserId: UserId,
+): Promise<ServerName[]> => {
+	const destinations = new Set<ServerName>();
+
+	let servers: ServerName[] = [];
+	try {
+		servers = await storage.getServersInRoom(roomId);
+	} catch {
+		servers = [];
+	}
+	for (const s of servers) {
+		if (s && s !== serverName) destinations.add(s as ServerName);
+	}
+
+	const targetServer = targetUserId.split(":").slice(1).join(":");
+	if (targetServer && targetServer !== serverName) {
+		destinations.add(targetServer as ServerName);
+	}
+
+	return [...destinations];
+};
+
+/**
+ * Deliver an already-signed event to an explicit list of remote servers via PUT
+ * /_matrix/federation/v1/send/{txnId}. Unlike `fanoutEvent`, the destination set
+ * is supplied by the caller rather than recomputed from current room state, so it
+ * can include servers that the membership change has just removed from the room
+ * (e.g. the kicked/unbanned user's server). Per-destination delivery is
+ * fire-and-forget and never throws.
+ */
+const deliverEventToServers = async (
+	serverName: string,
+	federationClient: FederationClient,
+	event: PDU,
+	eventId: EventId,
+	destinations: ServerName[],
+): Promise<void> => {
+	const targets = destinations.filter((s) => s && s !== serverName);
+	for (const destination of targets) {
+		const txnId = randomBytes(16).toString("base64url");
+		const body = {
+			origin: serverName,
+			origin_server_ts: Date.now(),
+			pdus: [event],
+			edus: [],
+		};
+		void federationClient
+			.request(
+				destination,
+				"PUT",
+				`/_matrix/federation/v1/send/${encodeURIComponent(txnId)}`,
+				body,
+			)
+			.then((resp) => {
+				if (resp.status >= 400) {
+					console.error(
+						`deliverEventToServers: ${destination} rejected ${eventId} (status ${resp.status})`,
+					);
+				}
+			})
+			.catch((err) => {
+				console.error(
+					`deliverEventToServers: delivery of ${eventId} to ${destination} failed:`,
+					(err as Error).message,
+				);
+			});
+	}
 };
 
 export const postCreateRoom =
@@ -182,6 +329,13 @@ export const postCreateRoom =
 		}
 
 		let roomId: string;
+
+		// One timestamp shared between the temporary create event (used to derive
+		// the v12 room ID) and the actual stored create event, so the stored
+		// create event's ID equals the room ID (MSC4291). Without this, the two
+		// builds call Date.now() independently and a millisecond boundary between
+		// them makes room_id != create event ID (flaky v12 room creation).
+		const createOriginServerTs = Date.now();
 
 		const preset =
 			body.preset ??
@@ -245,6 +399,8 @@ export const postCreateRoom =
 				prevEvents: [],
 				authEvents: [],
 				serverName,
+				roomVersion,
+				originServerTs: createOriginServerTs,
 			});
 			// Remove room_id from the temp event before hashing for v12
 			const createForHash = { ...tempCreateEvent };
@@ -274,6 +430,8 @@ export const postCreateRoom =
 			"",
 			createContent,
 			signingKey,
+			federationClient,
+			createOriginServerTs,
 		);
 
 		await sendStateEvent(
@@ -563,10 +721,26 @@ const sendMembershipEvent = async (
 		prevEvents: [...room.forward_extremities],
 	};
 
+	// Capture the destination servers BEFORE applying the change. For a
+	// leave/kick/ban the target's membership flips to leave/ban, after which
+	// getServersInRoom (which only counts join/invite/knock) would no longer
+	// include the target's home server — so the normal fanout in sendStateEvent
+	// would never tell that server (and thus the affected user) about their own
+	// removal. Collect the target's server up-front and deliver explicitly.
+	const destinations =
+		signingKey && federationClient
+			? await collectMembershipDestinations(
+					storage,
+					serverName,
+					roomId,
+					targetUserId,
+				)
+			: [];
+
 	// sendStateEvent signs the event (when a key is given) and fans it out to
 	// remote servers in the room (when a federation client is given), so local
 	// membership changes (join/leave/kick/ban) propagate to other servers.
-	return sendStateEvent(
+	const eventId = await sendStateEvent(
 		storage,
 		serverName,
 		ctx,
@@ -577,6 +751,96 @@ const sendMembershipEvent = async (
 		signingKey,
 		federationClient,
 	);
+
+	// Explicitly deliver to the pre-change destination set (covers the target's
+	// own server for removals). Dedup with the normal fanout is handled by the
+	// receiver (events already known are ignored).
+	if (destinations.length > 0 && signingKey && federationClient) {
+		const stored = await storage.getEvent(eventId as EventId);
+		if (stored) {
+			await deliverEventToServers(
+				serverName,
+				federationClient,
+				stored.event,
+				eventId as EventId,
+				destinations,
+			);
+		}
+	}
+
+	return eventId;
+};
+
+// Monotonic per-process counter for device-list update stream IDs emitted when
+// a local user joins a room that brings in new remote servers. The spec only
+// requires stream_id to be a monotonically increasing integer per user; a
+// process-wide counter satisfies that, and the Complement join test only
+// asserts on user_id/device_id.
+let deviceListJoinStreamCounter = 0;
+
+/**
+ * After a LOCAL user joins a room, notify the remote servers now resident in
+ * that room about the user's device list by sending an `m.device_list_update`
+ * EDU for each of the user's devices. This is required so a remote server that
+ * was not previously receiving updates for this user (because it did not share
+ * a room with them) learns of the user's devices once they join a shared room.
+ *
+ * Mirrors Synapse's DeviceHandler.notify_device_update (handlers/device.py):
+ * whenever a user joins a room containing servers that are not already
+ * receiving updates for that user's device list, those servers must be sent an
+ * `m.device_list_update` EDU (see Synapse PR #16875). We fan the EDU out via
+ * `fanoutEdu`, which resolves the remote servers resident in the joined room.
+ *
+ * Fire-and-forget: callers invoke this without awaiting its effect on the
+ * client response, and `fanoutEdu` swallows per-destination delivery failures.
+ */
+const notifyDeviceListUpdateOnJoin = async (
+	storage: Storage,
+	serverName: string,
+	signingKey: SigningKey | undefined,
+	federationClient: FederationClient | undefined,
+	roomId: RoomId,
+	userId: UserId,
+): Promise<void> => {
+	if (!signingKey || !federationClient) return;
+
+	// Only the joining user's own server announces that user's devices.
+	const userServer = userId.split(":").slice(1).join(":");
+	if (userServer !== serverName) return;
+
+	// Enumerate the user's devices. The device list update is per-device; when
+	// the device has uploaded E2EE keys we include them so the remote can
+	// populate /keys/query without a round-trip, mirroring Synapse.
+	const devices = await storage.getAllDevices(userId);
+	if (devices.length === 0) return;
+
+	for (const device of devices) {
+		const deviceId = device.device_id as DeviceId;
+		const streamId = ++deviceListJoinStreamCounter;
+		const content: Record<string, unknown> = {
+			user_id: userId,
+			device_id: deviceId,
+			stream_id: streamId,
+			prev_id: [],
+			deleted: false,
+		};
+		if (device.display_name) content.device_display_name = device.display_name;
+		const keys = await storage.getDeviceKeys(userId, deviceId);
+		if (keys) content.keys = keys;
+
+		const edu: EDU = {
+			edu_type: "m.device_list_update",
+			content: content as EDU["content"],
+		};
+		await fanoutEdu(
+			storage,
+			serverName,
+			signingKey,
+			federationClient,
+			roomId,
+			edu,
+		);
+	}
 };
 
 export const postJoin =
@@ -591,12 +855,47 @@ export const postJoin =
 		if (!roomIdOrAlias) throw badJson("Missing room ID or alias");
 
 		let roomId: string;
+		const aliasServers: string[] = [];
 		if (roomIdOrAlias.startsWith("#")) {
 			const resolved = await storage.getRoomByAlias(roomIdOrAlias);
-			if (!resolved) throw notFound(`Room alias ${roomIdOrAlias} not found`);
-			roomId = resolved.room_id;
+			if (resolved) {
+				roomId = resolved.room_id;
+				aliasServers.push(...resolved.servers);
+			} else {
+				// A remote alias must be resolved over federation via the alias's
+				// home server (GET /_matrix/federation/v1/query/directory).
+				const aliasDomain = roomIdOrAlias.slice(
+					roomIdOrAlias.indexOf(":") + 1,
+				);
+				if (aliasDomain && aliasDomain !== serverName && federationClient) {
+					const dirRes = await federationClient.request(
+						aliasDomain as ServerName,
+						"GET",
+						`/_matrix/federation/v1/query/directory?room_alias=${encodeURIComponent(roomIdOrAlias)}`,
+					);
+					const dir = dirRes.body as {
+						room_id?: string;
+						servers?: string[];
+					};
+					if (dirRes.status !== 200 || !dir.room_id) {
+						throw notFound(`Room alias ${roomIdOrAlias} not found`);
+					}
+					roomId = dir.room_id;
+					aliasServers.push(...(dir.servers ?? [aliasDomain]));
+				} else {
+					throw notFound(`Room alias ${roomIdOrAlias} not found`);
+				}
+			}
 		} else {
 			roomId = roomIdOrAlias;
+		}
+
+		// Make any servers learned from alias resolution available to the
+		// federation-join fallback (alongside ?server_name= query params).
+		for (const s of aliasServers) {
+			if (s && !req.query.getAll("server_name").includes(s)) {
+				req.query.append("server_name", s);
+			}
 		}
 
 		const userId = req.userId as string;
@@ -614,8 +913,13 @@ export const postJoin =
 
 		// Attempt a federation join through any of the candidate servers. Used
 		// both when the room is unknown locally and when the room is known but we
-		// are not resident (e.g. we only hold a stripped invite).
-		const attemptFederationJoin = async (): Promise<{
+		// are not resident (e.g. we only hold a stripped invite). `priorityServers`
+		// are tried first: for a restricted room where we are resident but cannot
+		// authorise locally, these are the servers known to have a user who can
+		// issue invites, so they must be preferred over the generic candidates.
+		const attemptFederationJoin = async (
+			priorityServers: ServerName[] = [],
+		): Promise<{
 			status: number;
 			body: { room_id: string };
 		}> => {
@@ -623,7 +927,8 @@ export const postJoin =
 				throw roomNotFound();
 			}
 
-			// Candidate servers to contact:
+			// Candidate servers to contact, in priority order:
+			//  0. servers known to be able to authorise this restricted join
 			//  1. ?server_name= query params (Complement passes these)
 			//  2. the server in the room ID
 			//  3. servers of any remote users who invited us (so an invite from a
@@ -634,16 +939,27 @@ export const postJoin =
 				: undefined;
 
 			const serversToTry: string[] = [];
-			for (const s of serverNameParams) {
-				if (!serversToTry.includes(s)) serversToTry.push(s);
+			for (const s of priorityServers) {
+				if (s !== serverName && !serversToTry.includes(s)) {
+					serversToTry.push(s);
+				}
 			}
-			if (roomServer && !serversToTry.includes(roomServer)) {
+			for (const s of serverNameParams) {
+				if (s !== serverName && !serversToTry.includes(s)) {
+					serversToTry.push(s);
+				}
+			}
+			if (
+				roomServer &&
+				roomServer !== serverName &&
+				!serversToTry.includes(roomServer)
+			) {
 				serversToTry.push(roomServer);
 			}
 			const existing = await storage.getRoom(roomId);
 			if (existing) {
 				const inviteEvent = existing.state_events.get(
-					`m.room.member\0${userId}`,
+					`m.room.member\x1f${userId}`,
 				);
 				const inviter = inviteEvent?.sender;
 				if (typeof inviter === "string") {
@@ -704,7 +1020,7 @@ export const postJoin =
 			// content.join_authorised_via_users_server. Without it the join event
 			// fails auth.
 			const joinContent: JsonObject = { ...extraJoinContent };
-			const joinRulesEvent = room.state_events.get("m.room.join_rules\0");
+			const joinRulesEvent = room.state_events.get("m.room.join_rules\x1f");
 			const joinRule = joinRulesEvent
 				? ((joinRulesEvent.content as Record<string, unknown>)
 						.join_rule as string)
@@ -715,28 +1031,42 @@ export const postJoin =
 				currentMembership !== "join" &&
 				currentMembership !== "invite"
 			) {
-				const satisfies = await userSatisfiesRestrictedAllow(
-					storage,
-					room,
-					userId as UserId,
-				);
-				if (!satisfies) {
-					throw forbidden(
-						"You are not a member of any room that grants access to this room",
-					);
-				}
+				// Per synapse's _should_perform_remote_join, the decision of
+				// local-vs-remote join is made FIRST, based purely on whether this
+				// server has a local user who can issue invites. The restricted
+				// allow-rule check (does the joining user belong to an allowed
+				// room?) is only performed when we are going to do the LOCAL join —
+				// in the remote-join case the authorising remote server validates it
+				// for us, and we may not even be resident in the allowed room (e.g.
+				// the joining user is only joined to it on another server).
 				const authoriser = findAuthorisingLocalUser(room, serverName);
 				if (!authoriser) {
-					// We have no local user able to authorise; fall through to a
-					// remote join (handled below) when federation is available.
+					// We are resident in this restricted room but have no local
+					// user able to authorise the join. The join must then be
+					// performed over federation via one of the servers that DOES
+					// have a user who can issue invites. Prefer those servers; fall
+					// back to the generic candidates (?server_name=, room server)
+					// inside attemptFederationJoin.
 					if (signingKey && federationClient) {
-						// no-op: drop through to federation path
-					} else {
-						throw forbidden(
-							"No local user able to authorise this join",
+						return attemptFederationJoin(
+							serversThatCanIssueInvite(room, serverName),
 						);
 					}
+					throw forbidden("No local user able to authorise this join");
 				} else {
+					// We will do a local join. Now enforce the allow rules: the
+					// joining user must belong to one of the allowed rooms we can
+					// see, otherwise the local join must be refused.
+					const satisfies = await userSatisfiesRestrictedAllow(
+						storage,
+						room,
+						userId as UserId,
+					);
+					if (!satisfies) {
+						throw forbidden(
+							"You are not a member of any room that grants access to this room",
+						);
+					}
 					joinContent.join_authorised_via_users_server = authoriser;
 					await sendMembershipEvent(
 						storage,
@@ -751,6 +1081,14 @@ export const postJoin =
 						federationClient,
 					);
 					await clearForgottenMarker(storage, userId, roomId);
+					void notifyDeviceListUpdateOnJoin(
+						storage,
+						serverName,
+						signingKey,
+						federationClient,
+						roomId as RoomId,
+						userId as UserId,
+					).catch(() => {});
 					return { status: 200, body: { room_id: roomId } };
 				}
 			} else {
@@ -768,6 +1106,14 @@ export const postJoin =
 					federationClient,
 				);
 				await clearForgottenMarker(storage, userId, roomId);
+				void notifyDeviceListUpdateOnJoin(
+					storage,
+					serverName,
+					signingKey,
+					federationClient,
+					roomId as RoomId,
+					userId as UserId,
+				).catch(() => {});
 				return { status: 200, body: { room_id: roomId } };
 			}
 		}
@@ -794,8 +1140,18 @@ const performFederationJoin = async (
 
 	if (makeJoinResp.status !== 200) {
 		const respBody = makeJoinResp.body as Record<string, unknown> | undefined;
-		throw new Error(
-			`make_join failed: ${respBody?.error ?? respBody?.errcode ?? `status ${makeJoinResp.status}`}`,
+		// Propagate the remote server's client-meaningful error (e.g. a knock room
+		// rejecting an uninvited join with 403 M_FORBIDDEN) rather than letting a
+		// plain Error become a 500. Map 5xx upstream errors to 502.
+		const mjStatus =
+			makeJoinResp.status >= 400 && makeJoinResp.status < 500
+				? makeJoinResp.status
+				: 502;
+		throw new MatrixError(
+			(respBody?.errcode as MatrixErrorCode) ?? "M_UNKNOWN",
+			(respBody?.error as string) ??
+				`make_join failed: status ${makeJoinResp.status}`,
+			mjStatus,
 		);
 	}
 
@@ -820,8 +1176,9 @@ const performFederationJoin = async (
 		template,
 		serverName as ServerName,
 		signingKey,
+		roomVersion,
 	);
-	const eventId = computeEventId(signedEvent);
+	const eventId = computeEventId(signedEvent, roomVersion);
 
 	// 3. send_join — send the signed event to the remote server
 	const sendJoinResp = await federationClient.request(
@@ -833,8 +1190,15 @@ const performFederationJoin = async (
 
 	if (sendJoinResp.status !== 200) {
 		const respBody = sendJoinResp.body as Record<string, unknown> | undefined;
-		throw new Error(
-			`send_join failed: ${respBody?.error ?? respBody?.errcode ?? `status ${sendJoinResp.status}`}`,
+		const sjStatus =
+			sendJoinResp.status >= 400 && sendJoinResp.status < 500
+				? sendJoinResp.status
+				: 502;
+		throw new MatrixError(
+			(respBody?.errcode as MatrixErrorCode) ?? "M_UNKNOWN",
+			(respBody?.error as string) ??
+				`send_join failed: status ${sendJoinResp.status}`,
+			sjStatus,
 		);
 	}
 
@@ -875,6 +1239,19 @@ const performFederationJoin = async (
 		room.forward_extremities = [eventId as EventId];
 		room.depth = Math.max(room.depth, signedEvent.depth + 1);
 	}
+
+	// We have just joined a remote-owned room, so its remote servers (previously
+	// unknown to us, hence not receiving this user's device-list updates) must
+	// now be told about the local user's devices via an m.device_list_update EDU.
+	// See notifyDeviceListUpdateOnJoin / Synapse handlers/device.py.
+	void notifyDeviceListUpdateOnJoin(
+		storage,
+		serverName,
+		signingKey,
+		federationClient,
+		roomId,
+		userId as UserId,
+	).catch(() => {});
 
 	return { status: 200, body: { room_id: roomId } };
 };
@@ -980,6 +1357,13 @@ const performFederationLeave = async (
 	const template = makeLeaveBody.event;
 	if (!template) throw new Error("make_leave response missing event template");
 
+	// Fall back to the locally-known room version if make_leave omits it, then to
+	// our server default. The signature/ID must use the room's redaction rules.
+	const roomVersion =
+		makeLeaveBody.room_version ??
+		(await storage.getRoom(roomId))?.room_version ??
+		"10";
+
 	if (!template.room_id) {
 		(template as unknown as Record<string, unknown>).room_id = roomId;
 	}
@@ -989,8 +1373,13 @@ const performFederationLeave = async (
 	template.content = content as PDU["content"];
 	template.origin_server_ts = Date.now();
 
-	const signedEvent = signEvent(template, serverName as ServerName, signingKey);
-	const eventId = computeEventId(signedEvent);
+	const signedEvent = signEvent(
+		template,
+		serverName as ServerName,
+		signingKey,
+		roomVersion,
+	);
+	const eventId = computeEventId(signedEvent, roomVersion);
 
 	const sendLeaveResp = await federationClient.request(
 		remoteServer,
@@ -1127,6 +1516,7 @@ const performOutboundInvite = async (
 		authEvents,
 		serverName: serverName as ServerName,
 		signingKey,
+		roomVersion: room.room_version,
 	});
 
 	// Local auth check before sending — the inviter must have permission.
@@ -1320,6 +1710,11 @@ const performFederationKnock = async (
 	const template = makeKnockBody.event;
 	if (!template) throw new Error("make_knock response missing event template");
 
+	const roomVersion =
+		makeKnockBody.room_version ??
+		(await storage.getRoom(roomId))?.room_version ??
+		"10";
+
 	if (!template.room_id) {
 		(template as unknown as Record<string, unknown>).room_id = roomId;
 	}
@@ -1329,8 +1724,13 @@ const performFederationKnock = async (
 	template.content = content as PDU["content"];
 	template.origin_server_ts = Date.now();
 
-	const signedEvent = signEvent(template, serverName as ServerName, signingKey);
-	const eventId = computeEventId(signedEvent);
+	const signedEvent = signEvent(
+		template,
+		serverName as ServerName,
+		signingKey,
+		roomVersion,
+	);
+	const eventId = computeEventId(signedEvent, roomVersion);
 
 	const sendKnockResp = await federationClient.request(
 		remoteServer,
@@ -1401,7 +1801,23 @@ export const postKick =
 		const roomId = req.params.roomId as string;
 		const body = req.body as { user_id?: string; reason?: string } | undefined;
 		if (!body?.user_id) throw missingParam("Missing 'user_id'");
-		await sendMembershipEvent(
+
+		// Capture the kicked user's server BEFORE their membership flips to `leave`.
+		// When the target is a remote user who was only *invited* (an invite
+		// rescission, see TestFederationRoomsInvite "Inviter user can rescind invite
+		// over federation"), that server is in the room solely because of this
+		// pending invite. Once we store the leave, `getServersInRoom` (used by the
+		// normal fanout inside sendMembershipEvent) no longer counts them, so the
+		// rescission would never reach them. We therefore deliver to the target's
+		// server explicitly after sending.
+		const extraDestinations = await collectMembershipDestinations(
+			storage,
+			serverName,
+			roomId as RoomId,
+			body.user_id as UserId,
+		);
+
+		const eventId = await sendMembershipEvent(
 			storage,
 			serverName,
 			roomId,
@@ -1413,6 +1829,22 @@ export const postKick =
 			signingKey,
 			federationClient,
 		);
+
+		// Deliver the leave to the kicked user's server even though it is no longer
+		// resident per the post-kick state. The stored leave event is fetched back
+		// so we forward exactly what was persisted (signed form).
+		if (signingKey && federationClient && extraDestinations.length > 0) {
+			const stored = await storage.getEvent(eventId as EventId);
+			if (stored) {
+				await deliverEventToServers(
+					serverName,
+					federationClient,
+					stored.event,
+					eventId as EventId,
+					extraDestinations,
+				);
+			}
+		}
 		return { status: 200, body: {} };
 	};
 
@@ -1443,7 +1875,12 @@ export const postBan =
 	};
 
 export const postUnban =
-	(storage: Storage, serverName: string): Handler =>
+	(
+		storage: Storage,
+		serverName: string,
+		signingKey?: SigningKey,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const roomId = req.params.roomId as string;
 		const body = req.body as { user_id?: string; reason?: string } | undefined;
@@ -1485,6 +1922,23 @@ export const postUnban =
 			room,
 			sender as UserId,
 		);
+		// Capture the set of remote servers that must be told about the unban
+		// BEFORE we mutate room state. The banned target's own server is the most
+		// important destination: it currently has the user as `ban`, and unless it
+		// observes this `leave` it will keep rejecting any subsequent re-invite as
+		// "user is banned" (see TestUnbanViaInvite, where hs1 must see the unban
+		// before hs2's re-invite is accepted). `getServersInRoom` ignores banned
+		// members, so the target's server would otherwise be missed entirely.
+		const unbanDestinations = await collectMembershipDestinations(
+			storage,
+			serverName,
+			roomId as RoomId,
+			targetUserId as UserId,
+		);
+
+		// Sign the leave (when federation is enabled) so it is acceptable to remote
+		// servers — they reject unsigned PDUs. Signing is additive and does not
+		// change the event ID, so storage and federation agree on the same ID.
 		const { event, eventId } = buildEvent({
 			roomId: room.room_id as RoomId,
 			sender: sender as UserId,
@@ -1495,11 +1949,26 @@ export const postUnban =
 			prevEvents: [...room.forward_extremities],
 			authEvents,
 			serverName: serverName as ServerName,
+			roomVersion: room.room_version,
+			signingKey,
 		});
 
 		await storage.setStateEvent(room.room_id, event, eventId);
 		room.depth = room.depth + 1;
 		room.forward_extremities = [eventId];
+
+		// Fan the unban out to the destinations captured above. We deliver to the
+		// pre-computed set (including the now-unbanned user's server) rather than
+		// relying on the post-mutation `getServersInRoom`, which omits the target.
+		if (signingKey && federationClient) {
+			await deliverEventToServers(
+				serverName,
+				federationClient,
+				event,
+				eventId as EventId,
+				unbanDestinations,
+			);
+		}
 
 		return { status: 200, body: {} };
 	};

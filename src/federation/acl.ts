@@ -6,7 +6,7 @@ export const isServerAllowedByAcl = (
 	serverName: ServerName,
 	roomState: RoomState,
 ): boolean => {
-	const aclEvent = roomState.state_events.get("m.room.server_acl\0");
+	const aclEvent = roomState.state_events.get("m.room.server_acl\x1f");
 	if (!aclEvent) return true;
 
 	const content = aclEvent.content as Record<string, unknown>;

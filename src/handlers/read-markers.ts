@@ -1,12 +1,18 @@
 import { badJson, notFound } from "../errors.ts";
 import { requireJoinedRoom } from "../events.ts";
+import type { FederationClient } from "../federation/client.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { EventId, RoomId, UserId } from "../types/index.ts";
+import type { EventId, RoomId, ServerName, UserId } from "../types/index.ts";
 import type { JsonObject } from "../types/json.ts";
+import { sendReceiptEdu } from "./receipts.ts";
 
 export const postReadMarkers =
-	(storage: Storage): Handler =>
+	(
+		storage: Storage,
+		serverName?: ServerName,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const roomId = req.params.roomId as RoomId;
 		const userId = req.userId as UserId;
@@ -46,6 +52,21 @@ export const postReadMarkers =
 				"m.read",
 				now,
 			);
+			// Federate the public read receipt to remote servers in the room
+			// (private receipts below are never federated).
+			if (serverName && federationClient) {
+				void sendReceiptEdu(
+					storage,
+					serverName,
+					federationClient,
+					roomId,
+					userId,
+					read as EventId,
+					"m.read",
+					now,
+					undefined,
+				).catch(() => {});
+			}
 		}
 
 		if (readPrivate) {

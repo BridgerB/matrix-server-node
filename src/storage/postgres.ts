@@ -506,8 +506,8 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				],
 			);
 			for (const [key, event] of state.state_events) {
-				const [eventType, stateKey] = key.split("\0") as [string, string];
-				const eventId = computeEventId(event);
+				const [eventType, stateKey] = key.split("\x1f") as [string, string];
+				const eventId = computeEventId(event, state.room_version);
 				await client.query(
 					`INSERT INTO state_events (room_id, event_type, state_key, event_id, event_json) VALUES ($1, $2, $3, $4, $5)
 					 ON CONFLICT (room_id, event_type, state_key) DO UPDATE SET event_id = EXCLUDED.event_id, event_json = EXCLUDED.event_json`,
@@ -541,7 +541,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		);
 		const stateMap = new Map<string, PDU>();
 		for (const sr of stateRows) {
-			stateMap.set(`${sr.event_type}\0${sr.state_key}`, sr.event_json);
+			stateMap.set(`${sr.event_type}\x1f${sr.state_key}`, sr.event_json);
 		}
 
 		const room: RoomState = {
@@ -672,7 +672,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 
 		const cached = this.roomCache.get(roomId);
 		if (cached) {
-			const key = `${event.type}\0${event.state_key ?? ""}`;
+			const key = `${event.type}\x1f${event.state_key ?? ""}`;
 			cached.state_events.set(key, event);
 		}
 
@@ -2350,7 +2350,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		try {
 			await client.query("BEGIN");
 			for (const event of authChain) {
-				const eventId = computeEventId(event);
+				const eventId = computeEventId(event, roomVersion);
 				this.streamCounter++;
 				await client.query(
 					"INSERT INTO events (event_id, room_id, stream_pos, event_json) VALUES ($1, $2, $3, $4) ON CONFLICT (event_id) DO NOTHING",
@@ -2361,7 +2361,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			let maxDepth = 0;
 			const extremities: EventId[] = [];
 			for (const event of stateEvents) {
-				const eventId = computeEventId(event);
+				const eventId = computeEventId(event, roomVersion);
 				this.streamCounter++;
 				await client.query(
 					"INSERT INTO events (event_id, room_id, stream_pos, event_json) VALUES ($1, $2, $3, $4) ON CONFLICT (event_id) DO NOTHING",

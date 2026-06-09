@@ -265,7 +265,7 @@ const buildRequiredState = async (
 		if (eventType === "*" && stateKey === "*") {
 			const allState = await storage.getAllState(roomId);
 			for (const s of allState) {
-				const key = `${s.event.type}\0${s.event.state_key ?? ""}`;
+				const key = `${s.event.type}\x1f${s.event.state_key ?? ""}`;
 				if (!seenKeys.has(key)) {
 					seenKeys.add(key);
 					events.push(pduToClientEvent(s.event, s.eventId));
@@ -279,7 +279,7 @@ const buildRequiredState = async (
 			const allState = await storage.getAllState(roomId);
 			for (const s of allState) {
 				if (s.event.type === eventType) {
-					const key = `${s.event.type}\0${s.event.state_key ?? ""}`;
+					const key = `${s.event.type}\x1f${s.event.state_key ?? ""}`;
 					if (!seenKeys.has(key)) {
 						seenKeys.add(key);
 						events.push(pduToClientEvent(s.event, s.eventId));
@@ -290,7 +290,7 @@ const buildRequiredState = async (
 		}
 
 		// Specific type and key
-		const key = `${eventType}\0${stateKey}`;
+		const key = `${eventType}\x1f${stateKey}`;
 		if (seenKeys.has(key)) continue;
 		const stateEvent = await storage.getStateEvent(roomId, eventType, stateKey);
 		if (stateEvent) {

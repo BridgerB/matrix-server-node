@@ -15,6 +15,8 @@ export interface UnsignedData {
 	age?: number;
 	transaction_id?: TransactionId;
 	prev_content?: JsonObject;
+	prev_sender?: UserId;
+	replaces_state?: EventId;
 	redacted_because?: ClientEvent;
 	"m.relations"?: Record<string, JsonValue>;
 }

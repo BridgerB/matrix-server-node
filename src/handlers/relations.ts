@@ -303,6 +303,10 @@ const fetchRemote = async (
 ): Promise<{ event: PDU; eventId: EventId } | undefined> => {
 	if (!federationClient || !roomId) return undefined;
 
+	// Use the room's version so spidered events get version-aware IDs that match
+	// what the remote server (and our own storage) compute.
+	const roomVersion = (await storage.getRoom(roomId))?.room_version;
+
 	const servers = (await storage.getServersInRoom(roomId))
 		.filter((s) => s !== serverName)
 		.slice(0, 5);
@@ -336,12 +340,12 @@ const fetchRemote = async (
 		};
 		// Persist auth chain first so referenced auth events exist, then events.
 		for (const ev of payload.auth_chain ?? []) {
-			const id = computeEventId(ev);
+			const id = computeEventId(ev, roomVersion);
 			if (!(await storage.getEvent(id))) await storage.storeEvent(ev, id);
 		}
 		let found: { event: PDU; eventId: EventId } | undefined;
 		for (const ev of payload.events ?? []) {
-			const id = computeEventId(ev);
+			const id = computeEventId(ev, roomVersion);
 			const entry = { event: ev, eventId: id };
 			if (!(await storage.getEvent(id))) await storage.storeEvent(ev, id);
 			indexIntoGraph(graph, entry);

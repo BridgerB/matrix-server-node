@@ -431,7 +431,16 @@ export const registerRoutes = (
 
 	router.get("/_matrix/client/v3/devices", getDevices(storage), auth);
 	router.get("/_matrix/client/v3/devices/:deviceId", getDevice(storage), auth);
-	router.put("/_matrix/client/v3/devices/:deviceId", putDevice(storage), auth);
+	router.put(
+		"/_matrix/client/v3/devices/:deviceId",
+		putDevice(
+			storage,
+			serverName as ServerName,
+			signingKey,
+			federationClient,
+		),
+		auth,
+	);
 	router.delete(
 		"/_matrix/client/v3/devices/:deviceId",
 		deleteDevice(storage),
@@ -518,7 +527,7 @@ export const registerRoutes = (
 	);
 	router.post(
 		"/_matrix/client/v3/rooms/:roomId/unban",
-		postUnban(storage, serverName),
+		postUnban(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.post(
@@ -585,7 +594,7 @@ export const registerRoutes = (
 	);
 	router.get(
 		"/_matrix/client/v3/rooms/:roomId/messages",
-		getMessages(storage),
+		getMessages(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.get(
@@ -621,7 +630,7 @@ export const registerRoutes = (
 
 	router.put(
 		"/_matrix/client/v3/rooms/:roomId/redact/:eventId/:txnId",
-		postRedact(storage, serverName),
+		postRedact(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 
@@ -714,7 +723,7 @@ export const registerRoutes = (
 
 	router.post(
 		"/_matrix/client/v3/rooms/:roomId/read_markers",
-		postReadMarkers(storage),
+		postReadMarkers(storage, serverName as ServerName, federationClient),
 		auth,
 	);
 
@@ -1393,7 +1402,7 @@ export const registerRoutes = (
 	);
 	router.get(
 		"/_matrix/client/r0/rooms/:roomId/messages",
-		getMessages(storage),
+		getMessages(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.get(
@@ -1465,7 +1474,7 @@ export const registerRoutes = (
 	);
 	router.put(
 		"/_matrix/client/r0/rooms/:roomId/redact/:eventId/:txnId",
-		postRedact(storage, serverName),
+		postRedact(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.get("/_matrix/client/r0/pushrules", getAllPushRules(storage), auth);
@@ -1560,7 +1569,7 @@ export const registerRoutes = (
 	);
 	router.post(
 		"/_matrix/client/r0/rooms/:roomId/unban",
-		postUnban(storage, serverName),
+		postUnban(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.post(

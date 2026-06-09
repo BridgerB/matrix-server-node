@@ -11,6 +11,7 @@ import {
 	getPowerLevels,
 	getUserPowerLevel,
 	selectAuthEvents,
+	stripV12CreateRoomId,
 } from "../../events.ts";
 import { isServerAllowedByAcl } from "../../federation/acl.ts";
 import type { FederationClient } from "../../federation/client.ts";
@@ -132,12 +133,12 @@ const findAuthorisingLocalUser = (
 	const invitePl = pl.invite ?? 0;
 
 	for (const [key, event] of room.state_events) {
-		if (!key.startsWith("m.room.member\0")) continue;
+		if (!key.startsWith("m.room.member\x1f")) continue;
 		const membership = (event.content as Record<string, unknown>)
 			.membership as string | undefined;
 		if (membership !== "join") continue;
 
-		const memberId = key.slice("m.room.member\0".length) as UserId;
+		const memberId = key.slice("m.room.member\x1f".length) as UserId;
 		// Only local users can authorise a local-style join on this server.
 		const memberServer = memberId.split(":").slice(1).join(":");
 		if (memberServer !== localServerName) continue;
@@ -159,7 +160,7 @@ const userSatisfiesRestrictedAllow = async (
 	room: RoomState,
 	userId: UserId,
 ): Promise<boolean> => {
-	const joinRulesEvent = room.state_events.get("m.room.join_rules\0");
+	const joinRulesEvent = room.state_events.get("m.room.join_rules\x1f");
 	if (!joinRulesEvent) return false;
 	const allow = (joinRulesEvent.content as Record<string, unknown>).allow;
 	if (!Array.isArray(allow)) return false;
@@ -186,7 +187,7 @@ export const getMakeJoin =
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
 
-		const createContent = room.state_events.get("m.room.create\0")?.content as
+		const createContent = room.state_events.get("m.room.create\x1f")?.content as
 			| Record<string, unknown>
 			| undefined;
 		if (createContent?.federate === false)
@@ -195,7 +196,7 @@ export const getMakeJoin =
 		if (!isServerAllowedByAcl(req.origin as ServerName, room))
 			throw forbidden("Server is denied by ACL");
 
-		const joinRulesEvent = room.state_events.get("m.room.join_rules\0");
+		const joinRulesEvent = room.state_events.get("m.room.join_rules\x1f");
 		const joinRule = joinRulesEvent
 			? ((joinRulesEvent.content as Record<string, unknown>)
 					.join_rule as string)
@@ -244,6 +245,33 @@ export const getMakeJoin =
 
 		const authEvents = selectAuthEvents("m.room.member", userId, room, userId);
 
+		// For a restricted join authorised via a local user, the join event's
+		// auth_events MUST also reference that authorising user's m.room.member
+		// event (synapse auth_types_for_event: restricted_join_rule + JOIN +
+		// AUTHORISING_USER adds `(m.room.member, authorising_user)`). Without it,
+		// a resident server receiving this join over federation (e.g. hs2 in
+		// TestRestrictedRoomsRemoteJoinFailOver) cannot prove the authorising user
+		// is joined and therefore rejects the join, so other members never observe
+		// the new join. selectAuthEvents only adds the *sender's* membership, so
+		// append the authoriser's membership here.
+		const authoriserUserId = content.join_authorised_via_users_server as
+			| UserId
+			| undefined;
+		if (authoriserUserId) {
+			const authoriserMember = room.state_events.get(
+				`m.room.member\x1f${authoriserUserId}`,
+			);
+			if (authoriserMember) {
+				const authoriserMemberId = computeEventId(
+					authoriserMember,
+					room.room_version,
+				);
+				if (!authEvents.includes(authoriserMemberId)) {
+					authEvents.push(authoriserMemberId);
+				}
+			}
+		}
+
 		const template: Partial<PDU> = {
 			auth_events: authEvents,
 			content: content as PDU["content"],
@@ -281,7 +309,7 @@ const buildPartialStateEvents = (
 	room: RoomState,
 	joiningUser: UserId,
 ): PDU[] => {
-	const memberPrefix = "m.room.member\0";
+	const memberPrefix = "m.room.member\x1f";
 	const result: PDU[] = [];
 
 	// 1. All non-member state events.
@@ -305,8 +333,8 @@ const buildPartialStateEvents = (
 	pushMember(joiningUser);
 
 	// 3. Heroes, only when the room has no name / canonical alias.
-	const hasName = room.state_events.has("m.room.name\0");
-	const hasCanonicalAlias = room.state_events.has("m.room.canonical_alias\0");
+	const hasName = room.state_events.has("m.room.name\x1f");
+	const hasCanonicalAlias = room.state_events.has("m.room.canonical_alias\x1f");
 	if (!hasName && !hasCanonicalAlias) {
 		const joined: { userId: string; ts: number }[] = [];
 		const invited: { userId: string; ts: number }[] = [];
@@ -360,7 +388,13 @@ export const putSendJoin =
 		}
 
 		try {
-			await verifyOriginSignature(event, origin, storage, federationClient);
+			await verifyOriginSignature(
+				event,
+				origin,
+				storage,
+				federationClient,
+				room.room_version,
+			);
 		} catch (err) {
 			if (err instanceof MatrixError) throw err;
 			throw forbidden(
@@ -370,7 +404,7 @@ export const putSendJoin =
 
 		let eventId: EventId;
 		try {
-			eventId = computeEventId(event);
+			eventId = computeEventId(event, room.room_version);
 		} catch (err) {
 			throw new MatrixError(
 				"M_BAD_JSON",
@@ -385,7 +419,12 @@ export const putSendJoin =
 
 		let coSigned: PDU;
 		try {
-			coSigned = signEvent(event, serverName as ServerName, signingKey);
+			coSigned = signEvent(
+				event,
+				serverName as ServerName,
+				signingKey,
+				room.room_version,
+			);
 		} catch (err) {
 			throw new MatrixError(
 				"M_UNKNOWN",
@@ -398,10 +437,17 @@ export const putSendJoin =
 		room.depth = Math.max(room.depth, event.depth + 1);
 		room.forward_extremities = [eventId];
 
-		// Ensure every state event we return carries room_id (v12 create events
-		// derive their room_id from the hash and may lack it in the stored body).
-		const withRoomId = (se: PDU): PDU =>
-			se.room_id ? se : ({ ...se, room_id: roomId } as PDU);
+		// Ensure every NON-create state event we return carries room_id (so the
+		// receiver can store it). For a v12+ m.room.create event we do the OPPOSITE:
+		// strip any room_id, because MSC4291 makes the room ID the create event's
+		// reference hash and gomatrixserverlib keeps room_id when redacting — a
+		// create event federated WITH room_id would hash to a different ID than the
+		// room ID (see stripV12CreateRoomId).
+		const withRoomId = (se: PDU): PDU => {
+			const stripped = stripV12CreateRoomId(se);
+			if (stripped !== se) return stripped; // was a v12 create event
+			return se.room_id ? se : ({ ...se, room_id: roomId } as PDU);
+		};
 
 		// MSC3706 / partial-state send_join: if the joining server set the
 		// `omit_members=true` query param (only honoured on the v2 endpoint, which
@@ -432,9 +478,11 @@ export const putSendJoin =
 		} catch {
 			authChain = [];
 		}
-		authChain = authChain.map((ae) =>
-			ae.room_id ? ae : ({ ...ae, room_id: roomId } as PDU),
-		);
+		authChain = authChain.map((ae) => {
+			const stripped = stripV12CreateRoomId(ae);
+			if (stripped !== ae) return stripped; // v12 create: must not carry room_id
+			return ae.room_id ? ae : ({ ...ae, room_id: roomId } as PDU);
+		});
 
 		let servers: ServerName[];
 		try {
@@ -442,6 +490,28 @@ export const putSendJoin =
 		} catch {
 			servers = [serverName as ServerName];
 		}
+
+		// Distribute the new join to the OTHER servers participating in the room.
+		// Synapse's federation_server.on_send_join persists the join via the normal
+		// event-persistence path, which drives the federation sender to relay the
+		// new membership to every other resident server. Without this, a third
+		// homeserver already in the room never observes the joiner.
+		//
+		// This is exactly what TestRestrictedRoomsRemoteJoinFailOver relies on:
+		// charlie (hs3) joins the restricted room via send_join to hs1, and bob
+		// (hs2) — already resident — must then see charlie's join over federation
+		// (`bob.MustSyncUntil(SyncJoinedTo(charlie))`). We fan out the fully
+		// co-signed join event; fanoutEvent excludes our own server, and the
+		// joining origin server (which already holds the event) simply dedups it.
+		await fanoutEvent(
+			storage,
+			serverName,
+			signingKey,
+			federationClient,
+			roomId,
+			coSigned,
+			eventId,
+		);
 
 		const responseBody = {
 			origin: serverName,
@@ -521,10 +591,35 @@ export const putSendLeave =
 			(event as unknown as Record<string, unknown>).room_id = roomId;
 		}
 
-		await verifyOriginSignature(event, origin, storage, federationClient);
+		await verifyOriginSignature(
+			event,
+			origin,
+			storage,
+			federationClient,
+			room.room_version,
+		);
 
-		const eventId = computeEventId(event);
+		const eventId = computeEventId(event, room.room_version);
 		checkEventAuth(event, eventId, room);
+
+		// A leave can arrive in two shapes:
+		//   (a) a previously *joined* member leaving — this is a genuine event in
+		//       our DAG (its prev_events descend from events we hold), so it should
+		//       advance depth/forward_extremities like any other event; or
+		//   (b) an *out-of-band* membership: a user who was only invited or knocked
+		//       rejecting/rescinding that invite/knock. Its depth and prev_events
+		//       are expressed in the leaving server's view, not ours. Storing it as
+		//       the room's forward extremity would corrupt our DAG — exactly the
+		//       hazard putFederationInvite documents for remote invites — because a
+		//       subsequent locally-created event would chain off a foreign event
+		//       whose ancestry we may not hold. Synapse persists case (b) as an
+		//       out-of-band membership (outlier) that updates only the membership
+		//       state, never the forward extremities.
+		//
+		// Decide based on the leaving user's CURRENT membership before we overwrite
+		// it: only a prior "join" is a real DAG leave.
+		const priorMembership = getMembership(room, event.sender);
+		const isDagLeave = priorMembership === "join";
 
 		// Persist the leave BEFORE we read the resident-server set for fanout. A
 		// rejected invite removes the leaving server from the room, but other
@@ -537,8 +632,10 @@ export const putSendLeave =
 		// silently swallows invite rejections and other participants never observe
 		// the leave (TestFederationRejectInvite).
 		await storage.setStateEvent(roomId, event, eventId);
-		room.depth = Math.max(room.depth, event.depth + 1);
-		room.forward_extremities = [eventId];
+		if (isDagLeave) {
+			room.depth = Math.max(room.depth, event.depth + 1);
+			room.forward_extremities = [eventId];
+		}
 
 		// Distribute the leave to the other servers participating in the room. The
 		// event is already signed by the leaving server, so it can be relayed
@@ -608,16 +705,49 @@ export const putFederationInvite =
 			);
 		}
 
+		// The invite must name the room it applies to. Without a room_id we
+		// cannot persist the membership or seed a room from the stripped state, and
+		// storage.getRoom(undefined) would silently fall through to the seed branch
+		// and create a malformed room keyed on `undefined`. Synapse's
+		// on_invite_request reads event.room_id authoritatively; reject up front if
+		// it's missing or not a string.
+		if (typeof event.room_id !== "string") {
+			throw new MatrixError(
+				"M_BAD_JSON",
+				"The invite event did not have a room_id",
+				400,
+			);
+		}
+
 		const targetServer = domainOf(event.state_key);
 		if (targetServer !== serverName)
 			throw forbidden("Invited user is not on this server");
 
-		await verifyOriginSignature(event, origin, storage, federationClient);
+		// Determine the room version for version-aware redaction/signing. We may
+		// not be resident in this room yet, so prefer the room's stored version,
+		// then the body's `room_version`, defaulting to "10" (the seed default used
+		// below when importing a minimal room from the stripped state).
+		const existingRoom = await storage.getRoom(event.room_id);
+		const inviteRoomVersion =
+			existingRoom?.room_version ?? body.room_version ?? "10";
+
+		await verifyOriginSignature(
+			event,
+			origin,
+			storage,
+			federationClient,
+			inviteRoomVersion,
+		);
 
 		// Co-sign the invite so the inviting server (and the invitee's client)
 		// have our signature vouching that the invite was received here.
-		const coSigned = signEvent(event, serverName as ServerName, signingKey);
-		const eventId = computeEventId(coSigned);
+		const coSigned = signEvent(
+			event,
+			serverName as ServerName,
+			signingKey,
+			inviteRoomVersion,
+		);
+		const eventId = computeEventId(coSigned, inviteRoomVersion);
 
 		// The inviting server provides stripped room state so the invitee can see
 		// room metadata (name, join_rules, ...) before joining. It may be sent
@@ -632,7 +762,7 @@ export const putFederationInvite =
 		unsigned.invite_room_state = strippedState;
 		coSigned.unsigned = unsigned as PDU["unsigned"];
 
-		const room = await storage.getRoom(event.room_id);
+		const room = existingRoom;
 		if (!room) {
 			// We are not resident in this room. Seed a minimal room from the
 			// stripped state (create/join_rules/name/...) plus the invite member
@@ -667,9 +797,21 @@ export const putFederationInvite =
 				[],
 			);
 		} else {
+			// We are already resident in this room. The invite is an *out-of-band*
+			// membership originating from the inviting server's DAG: its depth and
+			// prev_events are expressed in that server's view, not ours. Storing it
+			// as the room's forward extremity (as a normal locally-created event)
+			// would corrupt our DAG — any subsequent local event (e.g. the invitee
+			// later joining via this resident server) would chain off a foreign
+			// event whose ancestors we may not hold, producing an event other
+			// servers reject. Synapse persists a remote invite as an out-of-band
+			// membership (handlers/federation.py on_invite_request →
+			// persist_events with `outliers`) that updates only the membership
+			// state, never the room's forward extremities. We mirror that: write
+			// the membership state event so /sync and GET .../state reflect the
+			// invite, but leave depth/forward_extremities untouched so the local
+			// DAG stays consistent.
 			await storage.setStateEvent(event.room_id, coSigned, eventId);
-			room.depth = Math.max(room.depth, event.depth + 1);
-			room.forward_extremities = [eventId];
 		}
 
 		return {
@@ -692,7 +834,7 @@ export const getMakeKnock =
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
 
-		const createContent = room.state_events.get("m.room.create\0")?.content as
+		const createContent = room.state_events.get("m.room.create\x1f")?.content as
 			| Record<string, unknown>
 			| undefined;
 		if (createContent?.federate === false)
@@ -701,7 +843,7 @@ export const getMakeKnock =
 		if (!isServerAllowedByAcl(req.origin as ServerName, room))
 			throw forbidden("Server is denied by ACL");
 
-		const joinRulesEvent = room.state_events.get("m.room.join_rules\0");
+		const joinRulesEvent = room.state_events.get("m.room.join_rules\x1f");
 		const joinRule = joinRulesEvent
 			? ((joinRulesEvent.content as Record<string, unknown>)
 					.join_rule as string)
@@ -778,7 +920,7 @@ export const putSendKnock =
 		}
 
 		// The knocking room version must actually support knocking.
-		const joinRulesEvent = room.state_events.get("m.room.join_rules\0");
+		const joinRulesEvent = room.state_events.get("m.room.join_rules\x1f");
 		const joinRule = joinRulesEvent
 			? ((joinRulesEvent.content as Record<string, unknown>).join_rule as string)
 			: "invite";
@@ -789,9 +931,15 @@ export const putSendKnock =
 		if (!isServerAllowedByAcl(origin as ServerName, room))
 			throw forbidden("Server is denied by ACL");
 
-		await verifyOriginSignature(event, origin, storage, federationClient);
+		await verifyOriginSignature(
+			event,
+			origin,
+			storage,
+			federationClient,
+			room.room_version,
+		);
 
-		const eventId = computeEventId(event);
+		const eventId = computeEventId(event, room.room_version);
 		checkEventAuth(event, eventId, room);
 
 		await storage.setStateEvent(roomId, event, eventId);

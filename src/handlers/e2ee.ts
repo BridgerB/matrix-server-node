@@ -32,7 +32,7 @@ let deviceListStreamCounter = 0;
  * of "hosts" sharing a room with the user and enqueues a device-list-update
  * EDU (transaction_manager.py packs EDUs into the outgoing transaction body).
  */
-const sendDeviceListUpdate = async (
+export const sendDeviceListUpdate = async (
 	storage: Storage,
 	serverName: ServerName,
 	federationClient: FederationClient,
@@ -72,6 +72,13 @@ const sendDeviceListUpdate = async (
 		deleted: false,
 	};
 	if (keys) content.keys = keys;
+	// Per the spec, the EDU should carry the device's human-readable name so a
+	// display-name change propagates to remote servers (see
+	// TestDeviceListsUpdateOverFederation's spec quote: "...changes in device
+	// information such as the device's human-readable name"). Mirrors Synapse's
+	// DeviceHandler, which includes `device_display_name` in the federated update.
+	const device = await storage.getDevice(userId, deviceId);
+	if (device?.display_name) content.device_display_name = device.display_name;
 
 	const edu = { edu_type: "m.device_list_update", content };
 
@@ -596,13 +603,25 @@ export const getKeysChanges =
 			}
 		}
 
-		const changed = [...changedInWindow].filter((u) => sharedUsers.has(u));
+		// `changed`: users with a device-list change in the window who STILL share
+		// a joined room with us (their keys are worth re-fetching).
+		// `left`: users with a change in the window who NO LONGER share any joined
+		// room with us — the client should drop their cached device list. Mirrors
+		// Synapse's DeviceHandler.get_user_ids_changed, which partitions the
+		// changed set into `changed` and `left` by current room-sharing. (The
+		// requester is never reported in `left`.)
+		const changed: UserId[] = [];
+		const left: UserId[] = [];
+		for (const u of changedInWindow) {
+			if (sharedUsers.has(u)) changed.push(u);
+			else if (u !== userId) left.push(u);
+		}
 
 		return {
 			status: 200,
 			body: {
 				changed,
-				left: [],
+				left,
 			},
 		};
 	};

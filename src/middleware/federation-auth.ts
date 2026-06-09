@@ -59,7 +59,12 @@ export const requireFederationAuth =
 
 		const signedObj: Record<string, unknown> = {
 			method: req.method,
-			uri: req.path + (req.query.toString() ? `?${req.query.toString()}` : ""),
+			// The signed URI is the request target EXACTLY as the origin sent it.
+			// Re-serialising via URLSearchParams.toString() re-encodes query
+			// strings differently (e.g. `@`/`:` in a user_id, or `+` vs %20) and
+			// breaks signature verification for any federation GET with a query
+			// string (query/profile, query/directory, …). Use the raw URL.
+			uri: req.raw.url ?? req.path,
 			origin: params.origin,
 			destination: params.destination,
 		};

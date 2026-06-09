@@ -407,6 +407,12 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 	}
 
 	async createSession(session: StoredSession): Promise<void> {
+		this.insertSessionRow(session);
+		// A new device/session was added: notify device-list subscribers.
+		await this.recordDeviceKeyChange(session.user_id);
+	}
+
+	private insertSessionRow(session: StoredSession): void {
 		this.stmts.insertSession.run(
 			session.access_token,
 			session.refresh_token ?? null,
@@ -447,11 +453,18 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 	}
 
 	async deleteSession(token: AccessToken): Promise<void> {
+		const session = await this.getSessionByAccessToken(token);
 		this.db.prepare("DELETE FROM sessions WHERE access_token = ?").run(token);
+		// A device/session was removed: notify device-list subscribers.
+		if (session) {
+			await this.recordDeviceKeyChange(session.user_id);
+		}
 	}
 
 	async deleteAllSessions(userId: UserId): Promise<void> {
 		this.db.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
+		// Devices were removed: notify device-list subscribers.
+		await this.recordDeviceKeyChange(userId);
 	}
 
 	async rotateToken(
@@ -463,7 +476,12 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		const session = await this.getSessionByAccessToken(oldAccessToken);
 		if (!session) return undefined;
 
-		await this.deleteSession(oldAccessToken);
+		// Token rotation keeps the same device, so it must NOT signal a
+		// device-list change. Use the raw row helpers, not the instrumented
+		// deleteSession/createSession.
+		this.db
+			.prepare("DELETE FROM sessions WHERE access_token = ?")
+			.run(oldAccessToken);
 
 		const updated: StoredSession = {
 			...session,
@@ -472,7 +490,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			expires_at: expiresAt,
 		};
 
-		await this.createSession(updated);
+		this.insertSessionRow(updated);
 		return updated;
 	}
 
@@ -534,8 +552,8 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			);
 
 		for (const [key, event] of state.state_events) {
-			const [eventType, stateKey] = key.split("\0") as [string, string];
-			const eventId = computeEventId(event);
+			const [eventType, stateKey] = key.split("\x1f") as [string, string];
+			const eventId = computeEventId(event, state.room_version);
 			this.stmts.insertStateEvent.run(
 				state.room_id,
 				eventType,
@@ -570,7 +588,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		const stateMap = new Map<string, PDU>();
 		for (const sr of stateRows) {
 			stateMap.set(
-				`${sr.event_type}\0${sr.state_key}`,
+				`${sr.event_type}\x1f${sr.state_key}`,
 				JSON.parse(sr.event_json),
 			);
 		}
@@ -700,6 +718,28 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		event: PDU,
 		eventId: EventId,
 	): Promise<void> {
+		// When this state event replaces a previous one of the same
+		// (type, state_key), stamp the new event's unsigned with the prior
+		// state per the spec: prev_content / prev_sender / replaces_state.
+		// `unsigned` is excluded from content-hash / event-ID / signature
+		// computation, so mutating it here is safe and does not alter eventId.
+		// The mutated event is serialized into both the state_events row and the
+		// events row (via storeEvent), so the unsigned fields are persisted.
+		const previousRow = this.stmts.getStateEvent.get(
+			roomId,
+			event.type,
+			event.state_key ?? "",
+		) as { event_id: string; event_json: string } | undefined;
+		if (previousRow && previousRow.event_id !== eventId) {
+			const previous = JSON.parse(previousRow.event_json) as PDU;
+			event.unsigned = {
+				...(event.unsigned ?? {}),
+				prev_content: previous.content,
+				prev_sender: previous.sender,
+				replaces_state: previousRow.event_id as EventId,
+			};
+		}
+
 		this.stmts.insertStateEvent.run(
 			roomId,
 			event.type,
@@ -711,7 +751,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		// Update cached room state in-place (handler relies on reference sharing)
 		const cached = this.roomCache.get(roomId);
 		if (cached) {
-			const key = `${event.type}\0${event.state_key ?? ""}`;
+			const key = `${event.type}\x1f${event.state_key ?? ""}`;
 			cached.state_events.set(key, event);
 		}
 
@@ -891,12 +931,20 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				"UPDATE sessions SET display_name = ? WHERE user_id = ? AND device_id = ?",
 			)
 			.run(displayName, userId, deviceId);
+		// A device's display name changed: notify device-list subscribers.
+		// Mirrors Synapse's DeviceHandler, where update_device (display-name
+		// change) calls notify_device_update so local /sync device_lists.changed
+		// and /keys/changes, plus federated m.device_list_update, pick up the
+		// change.
+		await this.recordDeviceKeyChange(userId);
 	}
 
 	async deleteDeviceSession(userId: UserId, deviceId: DeviceId): Promise<void> {
 		this.db
 			.prepare("DELETE FROM sessions WHERE user_id = ? AND device_id = ?")
 			.run(userId, deviceId);
+		// A device was removed: notify device-list subscribers.
+		await this.recordDeviceKeyChange(userId);
 	}
 
 	async updatePassword(userId: UserId, newPasswordHash: string): Promise<void> {
@@ -2327,9 +2375,11 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 	}
 
 	async getServersInRoom(roomId: RoomId): Promise<ServerName[]> {
+		// Include servers of any join/invite/knock member so that federation
+		// fanout reaches invited and knocking participants.
 		const rows = this.db
 			.prepare(
-				"SELECT state_key FROM state_events WHERE room_id = ? AND event_type = 'm.room.member' AND json_extract(event_json, '$.content.membership') = 'join'",
+				"SELECT state_key FROM state_events WHERE room_id = ? AND event_type = 'm.room.member' AND json_extract(event_json, '$.content.membership') IN ('join', 'invite', 'knock')",
 			)
 			.all(roomId) as { state_key: string }[];
 
@@ -2454,7 +2504,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 	): Promise<void> {
 		this.db.transaction(() => {
 			for (const event of authChain) {
-				const eventId = computeEventId(event);
+				const eventId = computeEventId(event, roomVersion);
 				this.streamCounter++;
 				this.stmts.insertEvent.run(
 					eventId,
@@ -2468,7 +2518,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			const extremities: EventId[] = [];
 
 			for (const event of stateEvents) {
-				const eventId = computeEventId(event);
+				const eventId = computeEventId(event, roomVersion);
 				this.streamCounter++;
 				this.stmts.insertEvent.run(
 					eventId,

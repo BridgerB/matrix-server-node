@@ -615,7 +615,7 @@ const buildLeaveRoom = async (
 	const stateAtLeave = new Map<string, { event: PDU; eventId: EventId }>();
 	for (const entry of upToLeave) {
 		if (entry.event.state_key !== undefined) {
-			const key = `${entry.event.type}\0${entry.event.state_key}`;
+			const key = `${entry.event.type}\x1f${entry.event.state_key}`;
 			stateAtLeave.set(key, entry);
 		}
 	}
@@ -669,12 +669,17 @@ const buildLeaveRoom = async (
 		pduToClientEvent(e.event, e.eventId),
 	);
 
+	// prev_batch must always be present so clients can paginate the archived
+	// timeline. The current stream position is a valid backward-pagination
+	// token here.
+	const prevBatch = String(await storage.getStreamPosition());
 	const room: LeftRoom = {
 		state:
 			stateClientEvents.length > 0 ? { events: stateClientEvents } : undefined,
 		timeline: {
 			events: timelineClientEvents,
-			limited: limited || undefined,
+			limited,
+			prev_batch: prevBatch,
 		},
 	};
 	return room;
@@ -730,38 +735,59 @@ const buildInitialSync = async (
 			continue;
 		}
 		if (membership === "join") {
-			const result = await storage.getEventsByRoom(
+			// Load the FULL room timeline (ascending, by stream/recency order), TRUNCATE
+			// to the most-recent `timelineLimit` events FIRST, then apply the sync
+			// timeline filter to that tail. This mirrors Synapse's initial-sync
+			// `_load_filtered_recents`, which selects the recent window by ordering and
+			// filters it — it does NOT filter the room's entire history and then keep the
+			// last N of whatever survived. The distinction matters when an event arrives
+			// late (high stream position) but is older by the room ordering, e.g. a state
+			// event forked at an earlier point in the DAG: it must NOT win the limited
+			// timeline tail over genuinely newer messages. Such a state event is then the
+			// current head and surfaces in the `state` block via `getAllState`
+			// (TestSyncOmitsStateChangeOnFilteredEvents). Rooms are small here so loading
+			// the whole timeline and slicing in-memory is fine.
+			const fullWindow = await storage.getEventsByRoomSince(
 				roomId,
-				filter.timelineLimit,
-				undefined,
-				"b",
+				0,
+				100000,
 			);
-			const timelineEvents = result.events.reverse();
 
 			const allState = await storage.getAllState(roomId);
 
-			let timelineClientEvents = timelineEvents.map((e) =>
-				pduToClientEvent(e.event, e.eventId),
-			);
+			let candidates = fullWindow.events.map((e) => ({
+				streamPos: e.streamPos,
+				clientEvent: pduToClientEvent(e.event, e.eventId),
+			}));
 
 			if (ignoredUsers.size > 0) {
-				timelineClientEvents = timelineClientEvents.filter(
+				candidates = candidates.filter(
 					(e) =>
-						e.state_key !== undefined ||
-						!ignoredUsers.has(e.sender),
+						e.clientEvent.state_key !== undefined ||
+						!ignoredUsers.has(e.clientEvent.sender),
 				);
 			}
 
-			// Apply the timeline filter (types/not_types/senders/contains_url).
-			// State events removed here must still surface in the `state` block, so
-			// the set we exclude from state is computed from the *filtered* timeline
-			// below — not from the raw window. (Matches Synapse `_calculate_state`,
-			// where `state = current_state - timeline_contains` and
-			// `timeline_contains` is the post-filter timeline.)
-			timelineClientEvents = applyTimelineFilter(
-				timelineClientEvents,
-				filter.timelineFilter,
-			);
+			// Truncate to the timeline limit (most-recent events by stream order) BEFORE
+			// filtering. `limited` reflects whether older history was dropped.
+			const limited = candidates.length > filter.timelineLimit;
+			const recentWindow = limited
+				? candidates.slice(candidates.length - filter.timelineLimit)
+				: candidates;
+
+			// Apply the timeline filter to the truncated tail. State events removed here
+			// still surface in the `state` block, since that block is computed as current
+			// state minus the delivered timeline (Synapse `_calculate_state`: `state =
+			// current_state - timeline_contains`, where `timeline_contains` is the
+			// post-filter timeline actually sent down). An event filtered out of the tail
+			// (or never in the tail at all) therefore reappears in `state` when it is
+			// current state.
+			const kept = filter.timelineFilter
+				? recentWindow.filter((e) =>
+					matchesRoomEventFilter(e.clientEvent, filter.timelineFilter),
+					)
+				: recentWindow;
+			let timelineClientEvents = kept.map((e) => e.clientEvent);
 
 			// Events still present in the timeline after filtering are already known
 			// to the client, so they are excluded from the `state` block.
@@ -802,21 +828,16 @@ const buildInitialSync = async (
 			);
 			stampMembership(timelineClientEvents, membershipMap);
 
-			const totalEvents = await storage.getEventsByRoom(
-				roomId,
-				filter.timelineLimit + 1,
-				undefined,
-				"b",
-			);
-			const limited = totalEvents.events.length > filter.timelineLimit;
-
-			// prev_batch is always present. For a limited timeline it points at the
-			// start of the window (so /messages?dir=b backfills older events); for an
-			// unlimited timeline it is the current stream position, which also serves
-			// as a valid `at` token for GET /members?at=… (state as of this sync).
+			// prev_batch is always present. For a limited timeline it points just
+			// before the first kept event (so /messages?dir=b backfills the older —
+			// and any filtered-out — history); for an unlimited timeline it is the
+			// current stream position, which is also a valid `at` token for
+			// GET /members?at=… (state as of this sync).
+			const firstKeptStreamPos =
+				kept.length > 0 ? kept[0]!.streamPos : undefined;
 			const prevBatch =
-				limited && result.end !== undefined
-					? String(result.end)
+				limited && firstKeptStreamPos !== undefined
+					? String(firstKeptStreamPos - 1)
 					: String(await storage.getStreamPosition());
 
 			const summary = await buildRoomSummary(storage, roomId, userId);
@@ -826,7 +847,7 @@ const buildInitialSync = async (
 				state: stateEvents.length > 0 ? { events: stateEvents } : undefined,
 				timeline: {
 					events: timelineClientEvents,
-					limited: limited || undefined,
+					limited,
 					prev_batch: prevBatch,
 				},
 			};
@@ -981,37 +1002,109 @@ const buildIncrementalSync = async (
 	// the syncing client needs to fetch their device list because it now shares a
 	// room with them. See handlers/device.py:755-762.
 	const newlyJoinedOrInvitedUsers = new Set<UserId>();
+	// Users who left a room we share within this window (their final membership
+	// transition in the window is leave/ban), plus all users in rooms WE left
+	// this window. Per Synapse `DeviceHandler.get_user_ids_changed`
+	// (handlers/device.py:769-780) these become `device_lists.left` once we
+	// confirm they no longer share ANY currently-joined room with us.
+	const newlyLeftUsers = new Set<UserId>();
 	const userRules = await getOrInitRules(storage, userId);
 	const ignoredUsers = await getIgnoredUsers(storage, userId);
 	const ignoredInviteSenders = await getIgnoredInviteSenders(storage, userId);
 
 	for (const { roomId, membership } of userRooms) {
 		if (membership === "join") {
-			const { events: newEvents, limited } = await storage.getEventsByRoomSince(
+			// Determine whether the syncing user *newly joined* this room within the
+			// current window (their own join member event has stream_pos > since).
+			// Synapse treats such a room specially (handlers/sync.py
+			// `_load_filtered_recents`): it ignores the `since` token when loading the
+			// timeline (so the user receives a backlog of recent history they couldn't
+			// see before joining) and always marks the batch `limited` so the client
+			// paginates the gap. A plain delta from `since` would only show events that
+			// arrived after the join, omitting pre-join history the user is now allowed
+			// to read.
+			const windowForJoinCheck = await storage.getEventsByRoomSince(
 				roomId,
 				since,
-				filter.timelineLimit,
+				100000,
 			);
+			let selfNewlyJoinedRoom = false;
+			for (const { event } of windowForJoinCheck.events) {
+				if (
+					event.type === "m.room.member" &&
+					event.state_key === userId &&
+					(event.content as Record<string, unknown>).membership === "join"
+				) {
+					selfNewlyJoinedRoom = true;
+				}
+			}
 
-			let timelineClientEvents = newEvents.map((e) =>
-				pduToClientEvent(e.event, e.eventId),
-			);
+			// Build the candidate timeline (ascending, carrying stream positions). For
+			// a newly-joined room we load the whole room history (like an initial
+			// sync); otherwise the delta since `since`. We then apply the sync
+			// timeline filter BEFORE truncating to the limit (Synapse
+			// `_load_filtered_recents`), so `limited` reflects the post-filter set.
+			let candidates: { streamPos: number; clientEvent: ClientEvent }[];
+			// A gap reported by storage (more events than the limit existed in the
+			// raw window) forces `limited` even if the filter shrinks the set, so the
+			// client paginates the dropped history.
+			let storageGap: boolean;
+			if (selfNewlyJoinedRoom) {
+				// Whole room history; truncation/limited handled below. A newly-joined
+				// room is always limited so the client paginates the pre-join gap.
+				const fullWindow = await storage.getEventsByRoomSince(
+					roomId,
+					0,
+					100000,
+				);
+				candidates = fullWindow.events.map((e) => ({
+					streamPos: e.streamPos,
+					clientEvent: pduToClientEvent(e.event, e.eventId),
+				}));
+				storageGap = true;
+			} else {
+				// Load the full delta since `since` (no storage-side truncation) so the
+				// timeline filter is applied before we truncate to the limit.
+				const res = await storage.getEventsByRoomSince(
+					roomId,
+					since,
+					100000,
+				);
+				candidates = res.events.map((e) => ({
+					streamPos: e.streamPos,
+					clientEvent: pduToClientEvent(e.event, e.eventId),
+				}));
+				storageGap = false;
+			}
 
 			if (ignoredUsers.size > 0) {
-				timelineClientEvents = timelineClientEvents.filter(
+				candidates = candidates.filter(
 					(e) =>
-						e.state_key !== undefined ||
-						!ignoredUsers.has(e.sender),
+						e.clientEvent.state_key !== undefined ||
+						!ignoredUsers.has(e.clientEvent.sender),
 				);
 			}
 
 			// Apply the timeline filter. State events removed by the filter must
 			// still be reported in the `state` block (see Synapse `_calculate_state`),
 			// so the exclusion set below is computed from the filtered timeline.
-			timelineClientEvents = applyTimelineFilter(
-				timelineClientEvents,
-				filter.timelineFilter,
-			);
+			const filteredCandidates = filter.timelineFilter
+				? candidates.filter((e) =>
+					matchesRoomEventFilter(e.clientEvent, filter.timelineFilter),
+					)
+				: candidates;
+
+			// Truncate to the timeline limit, keeping the most-recent events.
+			const limited =
+				storageGap || filteredCandidates.length > filter.timelineLimit;
+			const kept =
+				filteredCandidates.length > filter.timelineLimit
+					? filteredCandidates.slice(
+						filteredCandidates.length - filter.timelineLimit,
+					)
+					: filteredCandidates;
+			const newEvents = kept;
+			let timelineClientEvents = kept.map((e) => e.clientEvent);
 
 			await bundleAggregations(storage, timelineClientEvents, userId);
 
@@ -1032,7 +1125,10 @@ const buildIncrementalSync = async (
 			);
 
 			let stateClientEvents: ClientEvent[] = [];
-			if (fullState) {
+			if (fullState || selfNewlyJoinedRoom) {
+				// A full-state request, or a room the user newly joined this window,
+				// gets the complete current room state (minus events already in the
+				// timeline) as its `state` block — the same shape as an initial sync.
 				const allState = await storage.getAllState(roomId);
 				let stateEntries = allState
 					.filter((e) => !filteredTimelineIds.has(e.eventId));
@@ -1075,17 +1171,39 @@ const buildIncrementalSync = async (
 				);
 			}
 
+			// For a limited timeline, prev_batch points just before the first kept
+			// event so /messages?dir=b backfills the gap. When not limited we point at
+			// `since` (the start of this delta), which is also a valid pagination
+			// token; this keeps prev_batch always present like Synapse.
 			const prevBatch =
 				limited && newEvents.length > 0
-					? String((newEvents[0] as (typeof newEvents)[number]).streamPos - 1)
-					: undefined;
+					? String(newEvents[0]!.streamPos - 1)
+					: String(since);
 
 			const ephemeralEvents = await buildEphemeralEvents(storage, roomId, userId);
+
+			// `buildEphemeralEvents` always emits an `m.typing` event (possibly with
+			// an empty `user_ids`), so its mere presence must NOT cause an otherwise
+			// unchanged room to be re-reported on every incremental sync. Only treat
+			// ephemeral data as a reason to include the room when it actually carries
+			// content: a non-empty typing list, or any receipt event. (Timeline/state
+			// changes are handled by the other clauses.)
+			// Include the room when typing CHANGED since `since` (covers an
+			// explicit stop → empty typing list), or when there's a receipt event.
+			// Don't include it merely because the always-emitted m.typing event is
+			// present, or unchanged rooms would re-appear on every incremental sync.
+			const typingChangedAt = await storage.getTypingChangedAt(roomId);
+			const typingChanged = since === undefined || typingChangedAt > since;
+			const hasEphemeralContent = ephemeralEvents.some((e) => {
+				if (e.type === "m.receipt") return true;
+				if (e.type === "m.typing") return typingChanged;
+				return false;
+			});
 
 			if (
 				timelineClientEvents.length > 0 ||
 				stateClientEvents.length > 0 ||
-				ephemeralEvents.length > 0
+				hasEphemeralContent
 			) {
 				const summary = await buildRoomSummary(storage, roomId, userId);
 
@@ -1097,7 +1215,7 @@ const buildIncrementalSync = async (
 							: undefined,
 					timeline: {
 						events: timelineClientEvents,
-						limited: limited || undefined,
+						limited,
 						prev_batch: prevBatch,
 					},
 					ephemeral: { events: ephemeralEvents },
@@ -1158,14 +1276,30 @@ const buildIncrementalSync = async (
 				100000,
 			);
 			let selfNewlyJoined = false;
+			// Track each user's FINAL membership transition within the window so a
+			// leave-then-rejoin nets to "joined" (Synapse discards a room from
+			// newly_left when a later join arrives — handlers/device.py:610-614,
+			// 673-677). We walk events in chronological (stream) order.
+			const finalMembershipInWindow = new Map<UserId, string>();
 			for (const { event } of memberWindow.events) {
 				if (event.type !== "m.room.member" || !event.state_key) continue;
 				const m = (event.content as Record<string, unknown>).membership;
+				finalMembershipInWindow.set(event.state_key as UserId, m as string);
 				if (m === "join" || m === "invite" || m === "knock") {
 					newlyJoinedOrInvitedUsers.add(event.state_key as UserId);
 					if (event.state_key === userId && m === "join") {
 						selfNewlyJoined = true;
 					}
+				}
+			}
+			// Other users whose final transition in this still-shared room is
+			// leave/ban are candidates for `device_lists.left`. Self is excluded
+			// here; if self left, the room would be in our leave/ban branch and
+			// handled as a `newly_left_room` below.
+			for (const [u, m] of finalMembershipInWindow) {
+				if (u === userId) continue;
+				if (m === "leave" || m === "ban") {
+					newlyLeftUsers.add(u);
 				}
 			}
 			// If WE newly joined this room in this window, every user currently in
@@ -1222,7 +1356,19 @@ const buildIncrementalSync = async (
 				filter,
 				since,
 			);
-			if (leftRoom) leave[roomId] = leftRoom;
+			if (leftRoom) {
+				leave[roomId] = leftRoom;
+				// `newly_left_rooms`: we left this room within the window. Every user
+				// still joined to it becomes a `device_lists.left` candidate — we can
+				// no longer observe their devices through this room. Synapse
+				// handlers/device.py:770-772 does the same via get_users_in_room.
+				// Survivors who share another joined room with us are filtered out
+				// after the loop.
+				const leftRoomUsers = await collectJoinedUsers(storage, roomId as RoomId);
+				for (const u of leftRoomUsers) {
+					if (u !== userId) newlyLeftUsers.add(u);
+				}
+			}
 		}
 	}
 
@@ -1302,9 +1448,24 @@ const buildIncrementalSync = async (
 		changed.add(u);
 	}
 	const changedDeviceLists = [...changed];
+
+	// Device-list removals (`device_lists.left`). Per Synapse
+	// `get_user_ids_changed` (handlers/device.py:774-780): a candidate that
+	// transitioned to leave/ban in a still-shared room, or was in a room we
+	// ourselves left this window, is reported in `left` only if it no longer
+	// shares ANY currently-joined room with us. `seenUsers` is exactly the set of
+	// users in our currently-joined rooms, so a candidate present there still
+	// shares a room and must be filtered out. Self is never reported.
+	const left: UserId[] = [];
+	for (const u of newlyLeftUsers) {
+		if (u === userId) continue;
+		if (seenUsers.has(u)) continue;
+		left.push(u);
+	}
+
 	const deviceLists: DeviceLists | undefined =
-		changedDeviceLists.length > 0
-			? { changed: changedDeviceLists, left: [] }
+		changedDeviceLists.length > 0 || left.length > 0
+			? { changed: changedDeviceLists, left }
 			: undefined;
 
 	return {

@@ -242,6 +242,8 @@ export interface Storage {
 		timeout?: number,
 	): Promise<void>;
 	getTypingUsers(roomId: RoomId): Promise<UserId[]>;
+	/** Stream position at which the room's typing set last changed (0 if never). */
+	getTypingChangedAt(roomId: RoomId): Promise<number>;
 
 	// Receipts
 	setReceipt(
@@ -623,7 +625,7 @@ export function collapseReceiptsMsc4102(
 ): ReceiptRecord[] {
 	const byKey = new Map<string, ReceiptRecord>();
 	for (const row of rows) {
-		const key = `${row.userId}\0${row.receiptType}\0${row.eventId}`;
+		const key = `${row.userId}\x1f${row.receiptType}\x1f${row.eventId}`;
 		const existing = byKey.get(key);
 		// Prefer the unthreaded record; otherwise keep the first seen.
 		if (

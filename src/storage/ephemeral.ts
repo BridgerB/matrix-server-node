@@ -18,12 +18,24 @@ export const eventToStrippedState = (event: {
 	sender: string;
 	state_key?: string;
 	type: string;
-}): StrippedStateEvent => ({
-	content: event.content,
-	sender: event.sender,
-	state_key: event.state_key ?? "",
-	type: event.type,
-});
+}): StrippedStateEvent => {
+	// MSC4311: the m.room.create event is special-cased into stripped state in
+	// full (not reduced to the minimal 4 fields), so invitees can read the room
+	// version / creators (incl. origin_server_ts) from the invite. Mirrors
+	// synapse strip_event for msc4291 rooms.
+	if (event.type === "m.room.create" && (event.state_key ?? "") === "") {
+		return {
+			...(event as Record<string, unknown>),
+			state_key: event.state_key ?? "",
+		} as StrippedStateEvent;
+	}
+	return {
+		content: event.content,
+		sender: event.sender,
+		state_key: event.state_key ?? "",
+		type: event.type,
+	};
+};
 
 export abstract class EphemeralMixin {
 	protected streamCounter = 0;
@@ -34,6 +46,10 @@ export abstract class EphemeralMixin {
 		RoomId,
 		Map<UserId, ReturnType<typeof setTimeout>>
 	>();
+	/** Stream position at which each room's typing set last changed. Lets
+	 * incremental /sync surface a room when typing changed (incl. to empty)
+	 * since the `since` token, without re-reporting unchanged rooms. */
+	protected typingChangedAt = new Map<RoomId, number>();
 	protected presenceMap = new Map<
 		UserId,
 		{ presence: PresenceState; status_msg?: string; last_active_ts?: Timestamp }
@@ -75,6 +91,7 @@ export abstract class EphemeralMixin {
 			this.typingTimers.set(roomId, roomTyping);
 		}
 
+		const wasTyping = roomTyping.has(userId);
 		const existing = roomTyping.get(userId);
 		if (existing) {
 			clearTimeout(existing);
@@ -85,11 +102,16 @@ export abstract class EphemeralMixin {
 			const ms = Math.min(timeout ?? 30000, 120000);
 			const timer = setTimeout(() => {
 				roomTyping?.delete(userId);
+				this.typingChangedAt.set(roomId, ++this.streamCounter);
 				this.wakeWaiters();
 			}, ms);
 			roomTyping.set(userId, timer);
 		}
 
+		// The typing set changed iff the user's typing membership flipped.
+		if (wasTyping !== typing) {
+			this.typingChangedAt.set(roomId, ++this.streamCounter);
+		}
 		this.wakeWaiters();
 	}
 
@@ -97,6 +119,11 @@ export abstract class EphemeralMixin {
 		const roomTyping = this.typingTimers.get(roomId);
 		if (!roomTyping) return [];
 		return [...roomTyping.keys()];
+	}
+
+	/** Stream position at which `roomId`'s typing set last changed (0 if never). */
+	async getTypingChangedAt(roomId: RoomId): Promise<number> {
+		return this.typingChangedAt.get(roomId) ?? 0;
 	}
 
 	async setPresence(

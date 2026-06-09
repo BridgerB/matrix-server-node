@@ -25,7 +25,7 @@ const extractChildren = (
 	const childrenState: StrippedStateEvent[] = [];
 	const childRoomIds: RoomId[] = [];
 	for (const [key, event] of stateEvents) {
-		if (!key.startsWith("m.space.child\0")) continue;
+		if (!key.startsWith("m.space.child\x1f")) continue;
 		const content = event.content as Record<string, unknown>;
 		if (!content.via || !Array.isArray(content.via)) continue;
 		childrenState.push({
@@ -45,39 +45,39 @@ const buildHierarchyRoom = (
 	childrenState: StrippedStateEvent[],
 ): HierarchyRoom => {
 	const histVis = contentField(
-		room.state_events.get("m.room.history_visibility\0"),
+		room.state_events.get("m.room.history_visibility\x1f"),
 		"history_visibility",
 	);
 	const guestAccess = contentField(
-		room.state_events.get("m.room.guest_access\0"),
+		room.state_events.get("m.room.guest_access\x1f"),
 		"guest_access",
 	);
 
 	return {
 		room_id: roomId,
-		name: contentField(room.state_events.get("m.room.name\0"), "name") as
+		name: contentField(room.state_events.get("m.room.name\x1f"), "name") as
 			| string
 			| undefined,
-		topic: contentField(room.state_events.get("m.room.topic\0"), "topic") as
+		topic: contentField(room.state_events.get("m.room.topic\x1f"), "topic") as
 			| string
 			| undefined,
 		avatar_url: contentField(
-			room.state_events.get("m.room.avatar\0"),
+			room.state_events.get("m.room.avatar\x1f"),
 			"url",
 		) as string | undefined,
 		canonical_alias: contentField(
-			room.state_events.get("m.room.canonical_alias\0"),
+			room.state_events.get("m.room.canonical_alias\x1f"),
 			"alias",
 		) as string | undefined,
 		num_joined_members: countJoinedMembers(room.state_events),
 		world_readable: histVis === "world_readable",
 		guest_can_join: guestAccess === "can_join",
 		join_rule: contentField(
-			room.state_events.get("m.room.join_rules\0"),
+			room.state_events.get("m.room.join_rules\x1f"),
 			"join_rule",
 		) as string | undefined,
 		room_type: contentField(
-			room.state_events.get("m.room.create\0"),
+			room.state_events.get("m.room.create\x1f"),
 			"type",
 		) as string | undefined,
 		children_state: childrenState,
@@ -94,7 +94,7 @@ const isLocalRoomAccessible = async (
 	userId: UserId,
 ): Promise<boolean> => {
 	const joinRule = contentField(
-		room.state_events.get("m.room.join_rules\0"),
+		room.state_events.get("m.room.join_rules\x1f"),
 		"join_rule",
 	);
 	if (
@@ -106,7 +106,7 @@ const isLocalRoomAccessible = async (
 	}
 
 	const histVis = contentField(
-		room.state_events.get("m.room.history_visibility\0"),
+		room.state_events.get("m.room.history_visibility\x1f"),
 		"history_visibility",
 	);
 	if (histVis === "world_readable") return true;
@@ -360,7 +360,7 @@ const extractViaForChild = (
 	stateEvents: Map<string, PDU>,
 	childRoomId: RoomId,
 ): ServerName[] => {
-	const event = stateEvents.get(`m.space.child\0${childRoomId}`);
+	const event = stateEvents.get(`m.space.child\x1f${childRoomId}`);
 	if (!event) return [];
 	const via = (event.content as Record<string, unknown>).via;
 	return Array.isArray(via) ? (via as ServerName[]) : [];

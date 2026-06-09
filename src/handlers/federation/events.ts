@@ -33,14 +33,20 @@ const serverFromUserId = (userId: string): string => {
 async function stateAtEvent(
 	storage: Storage,
 	event: PDU,
+	includeSelf = true,
 ): Promise<Map<string, PDU>> {
 	const latestByKey = new Map<string, PDU>();
 	const visited = new Set<EventId>();
 	// Seed with the prev_events; if the event itself is a state event it is
 	// considered part of the state "at" that event.
+	//
+	// `includeSelf` controls whether a state event is folded in as itself. The
+	// federation `/state(_ids)` endpoints want the state *before* the requested
+	// event (Synapse `get_state_ids_for_pdu`: "Returns the state at the event.
+	// i.e. not including said event."), so they pass `includeSelf = false`.
 	const queue: EventId[] = [...event.prev_events];
-	if (event.state_key !== undefined) {
-		latestByKey.set(`${event.type}\0${event.state_key}`, event);
+	if (includeSelf && event.state_key !== undefined) {
+		latestByKey.set(`${event.type}\x1f${event.state_key}`, event);
 	}
 
 	// Bound the walk so a pathological DAG cannot hang the request.
@@ -53,7 +59,7 @@ async function stateAtEvent(
 		if (!entry) continue;
 		const cur = entry.event;
 		if (cur.state_key !== undefined) {
-			const key = `${cur.type}\0${cur.state_key}`;
+			const key = `${cur.type}\x1f${cur.state_key}`;
 			const existing = latestByKey.get(key);
 			if (!existing || cur.depth > existing.depth) {
 				latestByKey.set(key, cur);
@@ -81,7 +87,7 @@ async function eventVisibleToServer(
 	server: string,
 ): Promise<boolean> {
 	const state = await stateAtEvent(storage, event);
-	const visEvent = state.get("m.room.history_visibility\0");
+	const visEvent = state.get("m.room.history_visibility\x1f");
 	const visibility =
 		(visEvent?.content["history_visibility"] as string | undefined) ?? "shared";
 
@@ -90,14 +96,58 @@ async function eventVisibleToServer(
 	}
 
 	for (const [key, stateEvent] of state) {
-		if (!key.startsWith("m.room.member\0")) continue;
-		const stateKey = key.slice("m.room.member\0".length);
+		if (!key.startsWith("m.room.member\x1f")) continue;
+		const stateKey = key.slice("m.room.member\x1f".length);
 		if (serverFromUserId(stateKey) !== server) continue;
 		const membership = stateEvent.content["membership"] as string | undefined;
 		if (membership === "join") return true;
 		if (membership === "invite" && visibility === "invited") return true;
 	}
 	return false;
+}
+
+/**
+ * Resolve the state map to serve for a federation `/state` or `/state_ids`
+ * request. When an `event_id` is supplied we return the state *before* that
+ * event (Synapse `get_state_ids_for_pdu`), reconstructed by walking the DAG via
+ * {@link stateAtEvent}. `MemoryStorage.getStateAtEvent` only returns the
+ * current room state regardless of the event id, so we cannot rely on it for
+ * historical queries. With no `event_id` we fall back to the current state.
+ */
+async function resolveStateMap(
+	storage: Storage,
+	roomId: RoomId,
+	room: { state_events: Map<string, PDU> },
+	eventId: EventId | null,
+): Promise<Map<string, PDU> | undefined> {
+	if (!eventId) return room.state_events;
+	const entry = await storage.getEvent(eventId);
+	if (entry && entry.event.room_id === roomId) {
+		// State *before* the requested event: do not fold the event itself in.
+		return stateAtEvent(storage, entry.event, false);
+	}
+	// Event unknown locally (or in another room): best-effort fall back to the
+	// storage lookup, then the current room state.
+	const fromStorage = await storage.getStateAtEvent(roomId, eventId);
+	return fromStorage ?? room.state_events;
+}
+
+/**
+ * Compute the auth chain to return alongside a set of state events. Mirrors
+ * Synapse's `store.get_auth_chain(room_id, [pdu.event_id for pdu in pdus])`:
+ * the transitive closure of the state events' `auth_events`. We seed the walk
+ * with the state events' immediate `auth_events`; `getAuthChain` then follows
+ * the closure (and includes the seeds themselves).
+ */
+async function authChainForState(
+	storage: Storage,
+	stateEvents: PDU[],
+): Promise<PDU[]> {
+	const authEventIds = new Set<EventId>();
+	for (const event of stateEvents) {
+		for (const id of event.auth_events) authEventIds.add(id);
+	}
+	return storage.getAuthChain([...authEventIds]);
 }
 
 export const getFederationEvent =
@@ -122,25 +172,29 @@ export const getFederationRoomState =
 	async (req) => {
 		const roomId = req.params.roomId as RoomId;
 		const eventId = req.query.get("event_id") as EventId | null;
+		const origin = req.origin as ServerName;
 
+		// Mirrors Synapse's `on_room_state_request`
+		// (federation/federation_server.py):
+		//   1. The room must exist locally.
+		//   2. The requesting server must be in the room (assert_host_in_room).
+		//   3. The server must not be denied by the room ACL.
+		//   4. Return the full state events at the requested event plus the auth
+		//      chain over those state events.
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
 
-		if (!isServerAllowedByAcl(req.origin as ServerName, room))
+		const servers = await storage.getServersInRoom(roomId);
+		if (!servers.includes(origin)) throw forbidden("Host not in room");
+
+		if (!isServerAllowedByAcl(origin, room))
 			throw forbidden("Server is denied by ACL");
 
-		const stateMap = eventId
-			? await storage.getStateAtEvent(roomId, eventId)
-			: room.state_events;
-
+		const stateMap = await resolveStateMap(storage, roomId, room, eventId);
 		if (!stateMap) throw notFound("State not found");
 
 		const pdus = [...stateMap.values()];
-		const authEventIds = new Set<EventId>();
-		for (const event of pdus) {
-			for (const id of event.auth_events) authEventIds.add(id);
-		}
-		const authChain = await storage.getAuthChain([...authEventIds]);
+		const authChain = await authChainForState(storage, pdus);
 
 		return {
 			status: 200,
@@ -153,26 +207,31 @@ export const getFederationRoomStateIds =
 	async (req) => {
 		const roomId = req.params.roomId as RoomId;
 		const eventId = req.query.get("event_id") as EventId | null;
+		const origin = req.origin as ServerName;
+
+		// Synapse `on_state_ids_request` requires an `event_id`, asserts the host
+		// is in the room, then applies the ACL. The response is the IDs of the
+		// state events at the requested event plus the auth-chain IDs over them.
+		if (!eventId) throw notFound("Missing event_id");
 
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
 
-		if (!isServerAllowedByAcl(req.origin as ServerName, room))
+		const servers = await storage.getServersInRoom(roomId);
+		if (!servers.includes(origin)) throw forbidden("Host not in room");
+
+		if (!isServerAllowedByAcl(origin, room))
 			throw forbidden("Server is denied by ACL");
 
-		const stateMap = eventId
-			? await storage.getStateAtEvent(roomId, eventId)
-			: room.state_events;
-
+		const stateMap = await resolveStateMap(storage, roomId, room, eventId);
 		if (!stateMap) throw notFound("State not found");
 
-		const pduIds = [...stateMap.values()].map((e) => computeEventId(e));
-		const authEventIds = new Set<EventId>();
-		for (const event of stateMap.values()) {
-			for (const id of event.auth_events) authEventIds.add(id);
-		}
-		const authChain = await storage.getAuthChain([...authEventIds]);
-		const authChainIds = authChain.map((e) => computeEventId(e));
+		const pdus = [...stateMap.values()];
+		const pduIds = pdus.map((e) => computeEventId(e, room.room_version));
+		const authChain = await authChainForState(storage, pdus);
+		const authChainIds = authChain.map((e) =>
+			computeEventId(e, room.room_version),
+		);
 
 		return {
 			status: 200,
@@ -295,7 +354,7 @@ export const postFederationBackfill =
 		const pdus: PDU[] = [];
 		for (const event of collected.values()) {
 			const visible = await eventVisibleToServer(storage, event, origin);
-			pdus.push(visible ? event : redactEvent(event));
+			pdus.push(visible ? event : redactEvent(event, room.room_version));
 		}
 		pdus.sort(
 			(a, b) => b.depth - a.depth || b.origin_server_ts - a.origin_server_ts,
@@ -381,7 +440,7 @@ export const postFederationMissingEvents =
 		const events: PDU[] = [];
 		for (const { event } of ordered) {
 			const visible = await eventVisibleToServer(storage, event, origin);
-			events.push(visible ? event : redactEvent(event));
+			events.push(visible ? event : redactEvent(event, room.room_version));
 		}
 
 		return {
