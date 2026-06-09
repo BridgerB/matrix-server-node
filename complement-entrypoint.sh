@@ -65,8 +65,8 @@ export URL_PREVIEW_ALLOW_PRIVATE_IPS=1
 # for outbound federation, so they starve each other and federation /sync waits
 # time out. Give the pool many more threads and lower the scrypt cost for tests
 # (Complement uses a fresh DB per test, so hash-cost consistency is preserved).
-export UV_THREADPOOL_SIZE=64
-export SCRYPT_COST=1024
+export UV_THREADPOOL_SIZE=128
+export SCRYPT_COST=2
 
 # Complement copies appservice registration YAML files to /complement/appservice/.
 # Convert them into the JSON array our server reads from APPSERVICE_REGISTRATIONS.
