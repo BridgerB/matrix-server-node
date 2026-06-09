@@ -1259,7 +1259,11 @@ export const registerRoutes = (
 			getFederationEventAuth(storage),
 			fedAuth,
 		);
-		router.post(
+		// Federation backfill is a GET per the spec (server-server-api); the handler
+		// reads `v`/`limit` from the query string. Registering it as POST made our
+		// own outbound backfill — and any spec-compliant peer — get 405, breaking
+		// jump-to-date's remote event fetch.
+		router.get(
 			"/_matrix/federation/v1/backfill/:roomId",
 			postFederationBackfill(storage, serverName),
 			fedAuth,

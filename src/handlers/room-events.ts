@@ -883,8 +883,11 @@ export const getMessages =
 			federationClient &&
 			// Departed (SPEC-216) readers are clamped to local history up to their
 			// leave; never backfill remote history on their behalf.
-			departedLeavePos === undefined &&
-			(isBackfillToken || from === undefined)
+			departedLeavePos === undefined
+			// Engage for any backward page (b-token continuation, no token, OR a
+			// numeric `from`) — a numeric token is what the client uses after
+			// jump-to-date returns a remote event, and we must still backfill its
+			// ancestors. The `hasGap` check below gates the actual remote fetch.
 		) {
 			const remoteServers = (
 				await storage.getServersInRoom(roomId as RoomId)
@@ -902,7 +905,20 @@ export const getMessages =
 				const hasGap = localAll.events.some((e) =>
 					e.event.prev_events.some((p) => !known.has(p)),
 				);
-				useBackfillPager = isBackfillToken || hasGap;
+				// History is out of stream order when a held event references a held
+				// prev_event stored *later* (a higher stream index) — i.e. ancestors
+				// were backfilled after their descendants (jump-to-date fetches a
+				// remote event + its chain). Stream-ordered pagination can't surface
+				// those, so we must use the depth-ordered pager even with no gap.
+				const streamIdx = new Map<EventId, number>();
+				localAll.events.forEach((e, i) => streamIdx.set(e.eventId, i));
+				const outOfOrder = localAll.events.some((e, i) =>
+					e.event.prev_events.some((p) => {
+						const pi = streamIdx.get(p as EventId);
+						return pi !== undefined && pi > i;
+					}),
+				);
+				useBackfillPager = isBackfillToken || hasGap || outOfOrder;
 			}
 		}
 
@@ -919,20 +935,31 @@ export const getMessages =
 				);
 			}
 
-			// Build the depth-ordered ascending timeline and page it backward.
-			const localAll = await storage.getEventsByRoom(
+			// Build the depth-ordered ascending timeline and page it backward. Fetch
+			// with stream positions too, so a numeric `from` token (a stream
+			// position, e.g. /context's "start") can be located within the depth
+			// order.
+			const localWithPos = await storage.getEventsByRoomSince(
 				roomId as RoomId,
+				0,
 				1_000_000,
-				undefined,
-				"f",
 			);
-			const ordered = buildDepthOrdered(localAll.events);
+			const ordered = buildDepthOrdered(
+				localWithPos.events.map((e) => ({ event: e.event, eventId: e.eventId })),
+			);
 
 			// `from` index: the position to read *before* (exclusive). Absent ->
-			// start from the newest event (end of the ascending array).
-			const fromIdx = isBackfillToken
-				? parseInt((fromStr as string).slice(1), 10)
-				: ordered.length;
+			// start from the newest event (end of the ascending array). A numeric
+			// `from` is a depth-ordered index (the same token format /context emits),
+			// so it indexes directly into `ordered`.
+			let fromIdx: number;
+			if (isBackfillToken) {
+				fromIdx = parseInt((fromStr as string).slice(1), 10);
+			} else if (from !== undefined) {
+				fromIdx = from;
+			} else {
+				fromIdx = ordered.length;
+			}
 			const startIdx = Math.max(0, Math.min(fromIdx, ordered.length));
 			const sliceStart = Math.max(0, startIdx - limit);
 			// Newest-first for dir=b.
@@ -1360,12 +1387,17 @@ export const getContext =
 		);
 		const halfLimit = Math.max(Math.floor(limit / 2), 1);
 
-		const timeline = await storage.getEventsByRoom(
+		// Order by the DAG (depth, then stream), not raw arrival order, so that
+		// `/context` of a backfilled event (whose ancestors were stored later, with
+		// higher stream positions) places those ancestors before it — and so the
+		// index-based start/end tokens align with /messages' depth-ordered pager.
+		const rawTimeline = await storage.getEventsByRoom(
 			roomId,
 			10000,
 			undefined,
 			"f",
 		);
+		const timeline = { events: buildDepthOrdered(rawTimeline.events) };
 		const targetIdx = timeline.events.findIndex((e) => e.eventId === eventId);
 
 		let eventsBefore: typeof timeline.events = [];
