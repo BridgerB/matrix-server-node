@@ -100,8 +100,14 @@ export const requireAuth =
 
 		req.userId = asUserId as UserId;
 		req.accessToken = token;
+		// Appservices have no real device. Use the ?device_id masquerade if given,
+		// otherwise a stable per-appservice placeholder — req.deviceId must be
+		// non-empty because it is a NOT NULL component of the txn-idempotency key
+		// (txn_map.device_id), so leaving it undefined makes any AS event send
+		// (e.g. jump-to-date historical imports with ?ts) 500.
 		const masqueradeDeviceId = req.query.get("device_id");
-		if (masqueradeDeviceId) req.deviceId = masqueradeDeviceId as DeviceId;
+		req.deviceId = (masqueradeDeviceId ??
+			`_as_${reg.sender_localpart}`) as DeviceId;
 
 		return next(req);
 	};
