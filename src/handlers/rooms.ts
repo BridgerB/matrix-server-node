@@ -1243,12 +1243,30 @@ const performFederationJoin = async (
 			e.room_id ? e : ({ ...e, room_id: roomId } as PDU),
 		);
 
+	// Was this a RE-join, i.e. did we already hold this room with our membership
+	// at leave/ban? Only then is the cache-staleness fix below needed — and only
+	// then is it safe. (An invite-accept join must NOT trigger it: re-applying
+	// state into a resident room's cache regressed restricted-join invite auth.)
+	const priorRoom = await storage.getRoom(roomId);
+	const wasDeparted =
+		!!priorRoom &&
+		(getMembership(priorRoom, userId) === "leave" ||
+			getMembership(priorRoom, userId) === "ban");
+
 	await storage.importRoomState(
 		roomId,
 		roomVersion,
 		ensureRoomId(allState),
 		ensureRoomId(authChain),
 	);
+
+	// importRoomState writes to the store but does not refresh the by-reference
+	// room cache that getRoom hands out, so on a re-join the cached membership
+	// stays stale at "leave" and we'd be treated as a departed reader. Re-apply
+	// just our join membership via setStateEvent (updates the cache in place).
+	if (wasDeparted) {
+		await storage.setStateEvent(roomId, signedEvent, eventId as EventId);
+	}
 
 	// Update the room's forward extremities and depth to include our join
 	const room = await storage.getRoom(roomId);
