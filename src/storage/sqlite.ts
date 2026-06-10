@@ -2423,6 +2423,13 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 	}
 
 	private partialStateWaiters = new Map<string, Set<() => void>>();
+	private unPartialStatedAt = new Map<string, number>();
+
+	async getRoomUnPartialStatedAt(
+		roomId: RoomId,
+	): Promise<number | undefined> {
+		return this.unPartialStatedAt.get(roomId);
+	}
 
 	async markRoomPartialState(
 		roomId: RoomId,
@@ -2440,6 +2447,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		this.db
 			.prepare("DELETE FROM partial_state_rooms WHERE room_id = ?")
 			.run(roomId);
+		this.unPartialStatedAt.set(roomId, this.streamCounter);
 		const waiters = this.partialStateWaiters.get(roomId);
 		if (waiters) {
 			this.partialStateWaiters.delete(roomId);

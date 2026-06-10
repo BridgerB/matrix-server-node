@@ -1154,6 +1154,17 @@ const buildIncrementalSync = async (
 				}
 			}
 
+			// MSC3706: a room whose partial-state resync completed within this window
+			// must surface its now-known member state in the `state` block (the peer
+			// asked an eager sync and we previously hid the room). The resynced member
+			// events were stored at recent stream positions; keep them OUT of the
+			// timeline delta so they land in `state` rather than appearing as live
+			// timeline activity.
+			const unPartialStatedAt =
+				await storage.getRoomUnPartialStatedAt(roomId);
+			const unPartialStatedThisWindow =
+				unPartialStatedAt !== undefined && unPartialStatedAt > since;
+
 			// Build the candidate timeline (ascending, carrying stream positions). For
 			// a newly-joined room we load the whole room history (like an initial
 			// sync); otherwise the delta since `since`. We then apply the sync
@@ -1206,6 +1217,14 @@ const buildIncrementalSync = async (
 				storageGap = gapInWindow;
 			}
 
+			// MSC3706: keep the resynced member events out of the timeline (they are
+			// state we just learned, not live activity) so they appear in `state`.
+			if (unPartialStatedThisWindow) {
+				candidates = candidates.filter(
+					(e) => e.clientEvent.type !== "m.room.member",
+				);
+			}
+
 			if (ignoredUsers.size > 0) {
 				candidates = candidates.filter(
 					(e) =>
@@ -1254,10 +1273,11 @@ const buildIncrementalSync = async (
 			);
 
 			let stateClientEvents: ClientEvent[] = [];
-			if (fullState || selfNewlyJoinedRoom) {
-				// A full-state request, or a room the user newly joined this window,
-				// gets the complete current room state (minus events already in the
-				// timeline) as its `state` block — the same shape as an initial sync.
+			if (fullState || selfNewlyJoinedRoom || unPartialStatedThisWindow) {
+				// A full-state request, a room the user newly joined this window, or a
+				// room whose partial-state resync just completed, gets the complete
+				// current room state (minus events already in the timeline) as its
+				// `state` block — the same shape as an initial sync.
 				const allState = await storage.getAllState(roomId);
 				let stateEntries = allState
 					.filter((e) => !filteredTimelineIds.has(e.eventId));

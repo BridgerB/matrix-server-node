@@ -575,6 +575,12 @@ export interface Storage {
 	): Promise<{ servers: ServerName[]; joinEventId: EventId } | undefined>;
 	/** Resolve when `roomId` is no longer partial-state, or after `timeoutMs`. */
 	waitForPartialStateClear(roomId: RoomId, timeoutMs: number): Promise<void>;
+	/**
+	 * The stream position at which `roomId`'s partial-state resync most recently
+	 * completed (cleared), or undefined if it never did. Used by incremental
+	 * /sync to surface the newly-known member state when a room un-partial-states.
+	 */
+	getRoomUnPartialStatedAt(roomId: RoomId): Promise<number | undefined>;
 
 	// Federation - Transaction dedup
 	getFederationTxn(origin: ServerName, txnId: string): Promise<boolean>;
