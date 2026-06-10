@@ -805,6 +805,11 @@ const notifyDeviceListUpdateOnJoin = async (
 ): Promise<void> => {
 	if (!signingKey || !federationClient) return;
 
+	// MSC3706: while the room is partial-state, device tracking is deferred until
+	// the resync completes; do not announce device lists yet (peers mid-resync
+	// would treat the m.device_list_update as unexpected).
+	if (await storage.getRoomPartialState(roomId)) return;
+
 	// Only the joining user's own server announces that user's devices.
 	const userServer = userId.split(":").slice(1).join(":");
 	if (userServer !== serverName) return;
@@ -1197,11 +1202,14 @@ const performFederationJoin = async (
 	);
 	const eventId = computeEventId(signedEvent, roomVersion);
 
-	// 3. send_join — send the signed event to the remote server
+	// 3. send_join — send the signed event to the remote server. We request a
+	// PARTIAL-STATE response (omit_members=true, MSC3706 faster joins): the
+	// resident may then elide the room's member events so our join returns
+	// immediately, and we backfill the omitted members via a background resync.
 	const sendJoinResp = await federationClient.request(
 		remoteServer,
 		"PUT",
-		`/_matrix/federation/v2/send_join/${encodeURIComponent(roomId)}/${encodeURIComponent(eventId)}`,
+		`/_matrix/federation/v2/send_join/${encodeURIComponent(roomId)}/${encodeURIComponent(eventId)}?omit_members=true`,
 		signedEvent,
 	);
 
@@ -1223,6 +1231,8 @@ const performFederationJoin = async (
 		state?: PDU[];
 		auth_chain?: PDU[];
 		event?: PDU;
+		members_omitted?: boolean;
+		servers_in_room?: string[];
 	};
 
 	const stateEvents = sendJoinBody.state ?? [];
@@ -1278,17 +1288,141 @@ const performFederationJoin = async (
 	// We have just joined a remote-owned room, so its remote servers (previously
 	// unknown to us, hence not receiving this user's device-list updates) must
 	// now be told about the local user's devices via an m.device_list_update EDU.
-	// See notifyDeviceListUpdateOnJoin / Synapse handlers/device.py.
-	void notifyDeviceListUpdateOnJoin(
-		storage,
-		serverName,
-		signingKey,
-		federationClient,
-		roomId,
-		userId as UserId,
-	).catch(() => {});
+	// See notifyDeviceListUpdateOnJoin / Synapse handlers/device.py. For a
+	// PARTIAL-STATE join we defer this: device tracking is reconciled when the
+	// resync completes, and emitting it mid-resync would deliver an unexpected
+	// m.device_list_update to peers.
+	if (!sendJoinBody.members_omitted) {
+		void notifyDeviceListUpdateOnJoin(
+			storage,
+			serverName,
+			signingKey,
+			federationClient,
+			roomId,
+			userId as UserId,
+		).catch(() => {});
+	}
+
+	// MSC3706 partial-state join: the resident omitted the room's member events,
+	// so we hold only critical state + our own membership. Mark the room
+	// partial-state and start a background resync to fetch the full member state.
+	// Until it completes, inbound make/send_join/knock are rejected (404), eager
+	// /sync hides the room, and /members blocks. Mirrors synapse do_invite_join ->
+	// _start_partial_state_room_sync.
+	if (sendJoinBody.members_omitted) {
+		const resyncServers = [
+			...new Set(
+				[...(sendJoinBody.servers_in_room ?? []), remoteServer].filter(
+					(s): s is string => !!s && s !== serverName,
+				),
+			),
+		] as ServerName[];
+		// The full state we need is the state the join was built on — i.e. the
+		// state AT the join's prev_event(s). synapse fetches /state_ids+/state for
+		// those, and the Complement harness registers its handlers keyed to that
+		// event id, not the join event's.
+		const resyncTarget = (signedEvent.prev_events?.[0] ?? eventId) as EventId;
+		await storage.markRoomPartialState(roomId, resyncServers, resyncTarget);
+		void resyncPartialStateRoom(
+			storage,
+			federationClient,
+			roomId,
+			resyncTarget,
+			resyncServers,
+			roomVersion,
+		).catch((e) =>
+			console.error(
+				`partial-state resync failed for ${roomId}:`,
+				(e as Error).message,
+			),
+		);
+	}
 
 	return { status: 200, body: { room_id: roomId } };
+};
+
+/**
+ * Background state resync for a partial-state (faster) join. Fetches the full
+ * state at the join event from one of the servers that was in the room, imports
+ * the previously-omitted member (and any other) state events, then clears the
+ * partial-state flag (which unblocks /members and lets eager /sync surface the
+ * room). Mirrors synapse's _sync_partial_state_room.
+ */
+const resyncPartialStateRoom = async (
+	storage: Storage,
+	federationClient: FederationClient,
+	roomId: RoomId,
+	stateAtEventId: EventId,
+	servers: ServerName[],
+	roomVersion: RoomVersion,
+): Promise<void> => {
+	for (const server of servers) {
+		try {
+			// 1. /state_ids at the join event. The Complement harness gates the
+			//    whole resync on this request, releasing it when the test is ready.
+			const idsResp = await federationClient.request(
+				server,
+				"GET",
+				`/_matrix/federation/v1/state_ids/${encodeURIComponent(roomId)}?event_id=${encodeURIComponent(stateAtEventId)}`,
+			);
+			if (idsResp.status !== 200) continue;
+
+			// 2. /state — the full state event PDUs at the join.
+			const stateResp = await federationClient.request(
+				server,
+				"GET",
+				`/_matrix/federation/v1/state/${encodeURIComponent(roomId)}?event_id=${encodeURIComponent(stateAtEventId)}`,
+			);
+			if (stateResp.status !== 200) continue;
+			const body = stateResp.body as {
+				auth_chain?: PDU[];
+				pdus?: PDU[];
+				state?: PDU[];
+			};
+			const stateEvents = body.state ?? body.pdus ?? [];
+			const authChain = body.auth_chain ?? [];
+			if (stateEvents.length === 0) continue;
+
+			// 3. Persist the auth chain, then store + set every returned state event
+			//    as current state — this fills in the omitted members.
+			for (const ev of authChain) {
+				try {
+					const id = computeEventId(ev, roomVersion);
+					if (!(await storage.getEvent(id))) await storage.storeEvent(ev, id);
+				} catch {
+					/* skip malformed auth event */
+				}
+			}
+			const current = await storage.getRoom(roomId);
+			for (const raw of stateEvents) {
+				const ev =
+					raw.room_id || roomVersion === "12"
+						? raw
+						: ({ ...raw, room_id: roomId } as PDU);
+				if (ev.room_id && ev.room_id !== roomId) continue;
+				let id: EventId;
+				try {
+					id = computeEventId(ev, roomVersion);
+				} catch {
+					continue;
+				}
+				// Only fill in state we don't already hold (the omitted members).
+				// Re-setting state we already have (create/power-levels/our own
+				// membership) would re-store those events at fresh stream positions
+				// and pollute the timeline, breaking other servers' joins/syncs.
+				const key = `${ev.type}\x1f${ev.state_key ?? ""}`;
+				if (current?.state_events.get(key)) continue;
+				if (!(await storage.getEvent(id))) await storage.storeEvent(ev, id);
+				await storage.setStateEvent(roomId, ev, id);
+			}
+
+			// 4. Resync complete — clear the flag (wakes /members and /sync waiters).
+			await storage.clearRoomPartialState(roomId);
+			return;
+		} catch (e) {
+			// Try the next server (PartialStateJoinSyncsUsingOtherHomeservers).
+		}
+	}
 };
 
 export const postLeave =
@@ -1313,11 +1447,26 @@ export const postLeave =
 		const roomServer = roomId.includes(":")
 			? roomId.split(":").slice(1).join(":")
 			: undefined;
+		// If we are resident (hold the room's state with a joined local user) we can
+		// build the leave event ourselves and fan it out as a normal PDU — including
+		// to the owning server — rather than round-tripping make_leave/send_leave.
+		// This is required for partial-state rooms (synapse leaves locally; the
+		// resident learns of it via /send, which is what TestPartialStateJoin's
+		// WithWaitForLeave expects) and is correct for any room we are joined to.
+		const leaveRoom = await storage.getRoom(roomId as RoomId);
+		const leaveMembership = leaveRoom
+			? getMembership(leaveRoom, userId as UserId)
+			: undefined;
+		const canLeaveLocally =
+			!!leaveRoom &&
+			isServerResidentInRoom(leaveRoom, serverName) &&
+			(leaveMembership === "join" || leaveMembership === "invite");
 		const needsFederation =
 			signingKey !== undefined &&
 			federationClient !== undefined &&
 			roomServer !== undefined &&
-			roomServer !== serverName;
+			roomServer !== serverName &&
+			!canLeaveLocally;
 
 		if (needsFederation) {
 			try {

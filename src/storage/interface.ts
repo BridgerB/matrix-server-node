@@ -552,6 +552,30 @@ export interface Storage {
 		eventId: EventId,
 	): Promise<Map<string, PDU> | undefined>;
 
+	// Federation - Partial-state (faster) joins (MSC3706/MSC3902)
+	//
+	// A room joined with `omit_members=true`: we hold the create/power-levels/
+	// join-rules and our own membership, but the other member events were elided
+	// and are being fetched by a background resync. While a room is partial-state
+	// we must (a) reject inbound make/send_join/knock, (b) hide it from eager
+	// /sync, (c) block /members & /joined_members. `getRoomPartialState` returns
+	// undefined once the resync has completed and the flag is cleared.
+
+	/** Mark a room as partial-state, recording the servers to resync from and the join event. */
+	markRoomPartialState(
+		roomId: RoomId,
+		servers: ServerName[],
+		joinEventId: EventId,
+	): Promise<void>;
+	/** Clear the partial-state flag (resync complete); wakes any /sync or /members waiters. */
+	clearRoomPartialState(roomId: RoomId): Promise<void>;
+	/** The partial-state record, or undefined if the room is fully stated. */
+	getRoomPartialState(
+		roomId: RoomId,
+	): Promise<{ servers: ServerName[]; joinEventId: EventId } | undefined>;
+	/** Resolve when `roomId` is no longer partial-state, or after `timeoutMs`. */
+	waitForPartialStateClear(roomId: RoomId, timeoutMs: number): Promise<void>;
+
 	// Federation - Transaction dedup
 	getFederationTxn(origin: ServerName, txnId: string): Promise<boolean>;
 	setFederationTxn(origin: ServerName, txnId: string): Promise<void>;

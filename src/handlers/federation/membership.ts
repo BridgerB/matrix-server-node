@@ -204,6 +204,14 @@ export const getMakeJoin =
 		const roomId = req.params.roomId as RoomId;
 		const userId = req.params.userId as UserId;
 
+		// MSC3706: while we are only partially joined we do not hold the full state
+		// and cannot authorise another server's membership change — reject with 404
+		// (synapse federation_server._on_send_membership_event).
+		if (await storage.getRoomPartialState(roomId))
+			throw notFound(
+				"Unable to handle this request right now; this server is not fully joined.",
+			);
+
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
 
@@ -392,6 +400,12 @@ export const putSendJoin =
 		const roomId = req.params.roomId as RoomId;
 		const event = req.body as PDU;
 		const origin = req.origin as string;
+
+		// MSC3706: reject another server's join while we are only partially joined.
+		if (await storage.getRoomPartialState(roomId))
+			throw notFound(
+				"Unable to handle this request right now; this server is not fully joined.",
+			);
 
 		// Strict structural validation before touching storage/auth: must be a
 		// join m.room.member state event whose room_id matches the path and whose
@@ -901,6 +915,12 @@ export const getMakeKnock =
 		const roomId = req.params.roomId as RoomId;
 		const userId = req.params.userId as UserId;
 
+		// MSC3706: reject knocks while we are only partially joined.
+		if (await storage.getRoomPartialState(roomId))
+			throw notFound(
+				"Unable to handle this request right now; this server is not fully joined.",
+			);
+
 		// The knocking user must belong to the requesting (verified) origin server
 		// (synapse on_make_knock_request).
 		const userServer = userId.split(":").slice(1).join(":");
@@ -978,6 +998,12 @@ export const putSendKnock =
 		const roomId = req.params.roomId as RoomId;
 		const event = req.body as PDU;
 		const origin = req.origin as string;
+
+		// MSC3706: reject another server's knock while we are only partially joined.
+		if (await storage.getRoomPartialState(roomId))
+			throw notFound(
+				"Unable to handle this request right now; this server is not fully joined.",
+			);
 
 		// Strict structural validation, mirroring synapse _on_send_membership_event:
 		// the body must be a knock m.room.member *state* event whose room_id

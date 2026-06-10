@@ -338,6 +338,11 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				key_json TEXT NOT NULL,
 				PRIMARY KEY (user_id, version, room_id, session_id)
 			);
+			CREATE TABLE IF NOT EXISTS partial_state_rooms (
+				room_id TEXT PRIMARY KEY,
+				servers TEXT NOT NULL,
+				join_event_id TEXT NOT NULL
+			);
 		`);
 
 		const maxPos = this.db
@@ -2407,7 +2412,78 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				.join(":") as ServerName;
 			servers.add(serverName);
 		}
+		// While partial-state, the omitted member events hide most of the room's
+		// servers; include the servers_in_room recorded at join so federation
+		// fanout still reaches them.
+		const ps = this.db
+			.prepare("SELECT servers FROM partial_state_rooms WHERE room_id = ?")
+			.get(roomId) as { servers: string } | undefined;
+		if (ps) for (const s of JSON.parse(ps.servers) as ServerName[]) servers.add(s);
 		return [...servers];
+	}
+
+	private partialStateWaiters = new Map<string, Set<() => void>>();
+
+	async markRoomPartialState(
+		roomId: RoomId,
+		servers: ServerName[],
+		joinEventId: EventId,
+	): Promise<void> {
+		this.db
+			.prepare(
+				"INSERT OR REPLACE INTO partial_state_rooms (room_id, servers, join_event_id) VALUES (?, ?, ?)",
+			)
+			.run(roomId, JSON.stringify(servers), joinEventId);
+	}
+
+	async clearRoomPartialState(roomId: RoomId): Promise<void> {
+		this.db
+			.prepare("DELETE FROM partial_state_rooms WHERE room_id = ?")
+			.run(roomId);
+		const waiters = this.partialStateWaiters.get(roomId);
+		if (waiters) {
+			this.partialStateWaiters.delete(roomId);
+			for (const w of waiters) w();
+		}
+		this.wakeWaiters(); // wake long-poll /sync so eager syncs pick the room up
+	}
+
+	async getRoomPartialState(
+		roomId: RoomId,
+	): Promise<{ servers: ServerName[]; joinEventId: EventId } | undefined> {
+		const row = this.db
+			.prepare(
+				"SELECT servers, join_event_id FROM partial_state_rooms WHERE room_id = ?",
+			)
+			.get(roomId) as
+			| { servers: string; join_event_id: string }
+			| undefined;
+		if (!row) return undefined;
+		return {
+			servers: JSON.parse(row.servers) as ServerName[],
+			joinEventId: row.join_event_id as EventId,
+		};
+	}
+
+	async waitForPartialStateClear(
+		roomId: RoomId,
+		timeoutMs: number,
+	): Promise<void> {
+		if (!(await this.getRoomPartialState(roomId))) return;
+		await new Promise<void>((resolve) => {
+			let set = this.partialStateWaiters.get(roomId);
+			if (!set) {
+				set = new Set();
+				this.partialStateWaiters.set(roomId, set);
+			}
+			const done = () => {
+				set?.delete(done);
+				clearTimeout(timer);
+				resolve();
+			};
+			const timer = setTimeout(done, timeoutMs);
+			set.add(done);
+		});
 	}
 
 	async getStateAtEvent(

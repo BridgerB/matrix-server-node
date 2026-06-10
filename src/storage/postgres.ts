@@ -2248,7 +2248,60 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				.join(":") as ServerName;
 			servers.add(serverName);
 		}
+		const ps = this.partialStateRooms.get(roomId);
+		if (ps) for (const s of ps.servers) servers.add(s);
 		return [...servers];
+	}
+
+	private partialStateRooms = new Map<
+		string,
+		{ servers: ServerName[]; joinEventId: EventId }
+	>();
+	private partialStateWaiters = new Map<string, Set<() => void>>();
+
+	async markRoomPartialState(
+		roomId: RoomId,
+		servers: ServerName[],
+		joinEventId: EventId,
+	): Promise<void> {
+		this.partialStateRooms.set(roomId, { servers, joinEventId });
+	}
+
+	async clearRoomPartialState(roomId: RoomId): Promise<void> {
+		this.partialStateRooms.delete(roomId);
+		const waiters = this.partialStateWaiters.get(roomId);
+		if (waiters) {
+			this.partialStateWaiters.delete(roomId);
+			for (const w of waiters) w();
+		}
+		this.wakeWaiters();
+	}
+
+	async getRoomPartialState(
+		roomId: RoomId,
+	): Promise<{ servers: ServerName[]; joinEventId: EventId } | undefined> {
+		return this.partialStateRooms.get(roomId);
+	}
+
+	async waitForPartialStateClear(
+		roomId: RoomId,
+		timeoutMs: number,
+	): Promise<void> {
+		if (!this.partialStateRooms.has(roomId)) return;
+		await new Promise<void>((resolve) => {
+			let set = this.partialStateWaiters.get(roomId);
+			if (!set) {
+				set = new Set();
+				this.partialStateWaiters.set(roomId, set);
+			}
+			const done = () => {
+				set?.delete(done);
+				clearTimeout(timer);
+				resolve();
+			};
+			const timer = setTimeout(done, timeoutMs);
+			set.add(done);
+		});
 	}
 
 	async getStateAtEvent(

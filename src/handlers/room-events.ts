@@ -1206,6 +1206,11 @@ export const getMembers =
 	async (req) => {
 		const roomId = req.params.roomId as string;
 
+		// MSC3706: while the room is partial-state we do not hold the full member
+		// list, so block until the background resync completes (synapse blocks
+		// /members during a partial join). Bounded so we never hang indefinitely.
+		await storage.waitForPartialStateClear(roomId as RoomId, 20000);
+
 		// SPEC-216: a departed (left/banned) user sees the member list as of their
 		// leave point — members who joined after they left (e.g. charlie) must not
 		// appear. We resolve this before the join check so the leave/ban case is
@@ -1239,14 +1244,31 @@ export const getMembers =
 				string,
 				{ event: PDU; eventId: EventId }
 			>();
+			let maxDepthAtToken = 0;
 			for (const e of all.events) {
 				if (e.streamPos > at) break;
+				if (e.event.depth > maxDepthAtToken) maxDepthAtToken = e.event.depth;
 				if (e.event.type !== "m.room.member") continue;
 				if (typeof e.event.state_key !== "string") continue;
 				latestByStateKey.set(e.event.state_key, {
 					event: e.event,
 					eventId: e.eventId,
 				});
+			}
+			// MSC3706: members filled in by a partial-state resync were stored with
+			// LATER stream positions than this `at` token (which predates the
+			// resync), so the stream-ordered replay above misses them. Add current
+			// member events whose DAG depth is at or below the latest depth seen at
+			// the token — they belong to the room's state at that point even though
+			// we only learned of them during the resync. (Not for departed/SPEC-216
+			// reads, which are intentionally clamped to the leave point.)
+			if (!departed.allowed) {
+				for (const m of await storage.getMemberEvents(roomId)) {
+					if (typeof m.event.state_key !== "string") continue;
+					if (latestByStateKey.has(m.event.state_key)) continue;
+					if (m.event.depth <= maxDepthAtToken)
+						latestByStateKey.set(m.event.state_key, m);
+				}
 			}
 			entries = [...latestByStateKey.values()];
 		} else {
@@ -1527,6 +1549,9 @@ export const getJoinedMembers =
 	(storage: Storage): Handler =>
 	async (req) => {
 		const roomId = req.params.roomId as string;
+		// MSC3706: block until any partial-state resync completes (synapse blocks
+		// /joined_members during a partial join).
+		await storage.waitForPartialStateClear(roomId as RoomId, 20000);
 		await requireJoinedRoom(storage, roomId, req.userId as string);
 
 		const entries = await storage.getMemberEvents(roomId);
