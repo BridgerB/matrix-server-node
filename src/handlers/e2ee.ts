@@ -60,6 +60,15 @@ export const sendDeviceListUpdate = async (
 				destinations.add(memberServer as ServerName);
 			}
 		}
+		// MSC3706: a partial-state room's member events are mostly omitted, so the
+		// loop above misses its servers; include the recorded servers_in_room so
+		// device-list updates still reach everyone in the room during the resync.
+		const ps = await storage.getRoomPartialState(roomId);
+		if (ps) {
+			for (const s of ps.servers) {
+				if (s !== serverName) destinations.add(s);
+			}
+		}
 	}
 
 	if (destinations.size === 0) return;
