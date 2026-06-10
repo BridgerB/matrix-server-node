@@ -1319,7 +1319,11 @@ const performFederationJoin = async (
 	// Until it completes, inbound make/send_join/knock are rejected (404), eager
 	// /sync hides the room, and /members blocks. Mirrors synapse do_invite_join ->
 	// _start_partial_state_room_sync.
-	if (sendJoinBody.members_omitted) {
+	// If the room is ALREADY partial-state (e.g. a rejoin while the first resync
+	// is still running, or another local user joining mid-resync), the in-flight
+	// resync already covers it — do not start a second one (which would issue a
+	// duplicate /state_ids the resident no longer expects).
+	if (sendJoinBody.members_omitted && !(await storage.getRoomPartialState(roomId))) {
 		const resyncServers = [
 			...new Set(
 				[...(sendJoinBody.servers_in_room ?? []), remoteServer].filter(
