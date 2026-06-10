@@ -2619,6 +2619,13 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				.run(roomId, roomVersion, maxDepth + 1, JSON.stringify(extremities));
 		})();
 
+		// importRoomState replaces the room's state wholesale in the DB but bypasses
+		// the in-memory roomCache that getRoom returns by reference. Invalidate it so
+		// the next getRoom rebuilds from the fresh rows — otherwise a re-join (which
+		// imports new state over an existing, cached room) leaves the cached
+		// membership stale at "leave" and the user is wrongly treated as departed.
+		this.roomCache.delete(roomId);
+
 		this.wakeWaiters();
 	}
 }

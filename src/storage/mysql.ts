@@ -2574,6 +2574,10 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 		} finally {
 			conn.release();
 		}
+		// Invalidate the by-reference room cache so the next getRoom rebuilds from
+		// the freshly-imported rows — otherwise a re-join over an existing cached
+		// room leaves the cached membership stale (see sqlite importRoomState).
+		this.roomCache.delete(roomId);
 		this.wakeWaiters();
 	}
 }
