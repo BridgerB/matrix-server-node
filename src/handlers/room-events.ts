@@ -945,9 +945,12 @@ export const getMessages =
 		}
 
 		if (useTopoPager) {
-			// Pull missing history into storage first — but only when we can ask a
-			// remote and aren't merely continuing an existing topological page.
-			if (serverName && federationClient && topoFrom === undefined) {
+			// Pull missing history into storage on EVERY backward page (not just the
+			// first) so a client paginating deep history keeps fetching older events
+			// instead of stopping at the first backfilled chunk. backfillMissingHistory
+			// is a no-op when there is no gap, so the cost on a fully-held room is just
+			// a local read.
+			if (serverName && federationClient) {
 				const remoteServers = (
 					await storage.getServersInRoom(roomId as RoomId)
 				).filter((s) => s !== serverName);
@@ -1096,7 +1099,11 @@ export const getMessages =
 				const upper = from ?? Number.POSITIVE_INFINITY;
 				const eligible = ordered.filter((e) => e.streamPos <= upper);
 				page = eligible.slice(Math.max(0, eligible.length - limit)).reverse();
-				if (page.length > 0 && eligible.length > page.length) {
+				// Always emit `end` when we returned events — Synapse returns the next
+				// token even at the start of the room (paginating from it just yields an
+				// empty page). Clients/tests rely on `end` being present
+				// (TestRoomImageRoundtrip asserts it is a string).
+				if (page.length > 0) {
 					const oldest = page[page.length - 1] as { streamPos: number };
 					end = oldest.streamPos - 1;
 				}
@@ -1112,7 +1119,7 @@ export const getMessages =
 				const lower = from ?? Number.NEGATIVE_INFINITY;
 				const eligible = ordered.filter((e) => e.streamPos > lower);
 				page = eligible.slice(0, limit);
-				if (page.length > 0 && eligible.length > page.length) {
+				if (page.length > 0) {
 					// Next forward page continues strictly after the newest returned.
 					const newest = page[page.length - 1] as { streamPos: number };
 					end = newest.streamPos;
