@@ -1013,9 +1013,22 @@ const processPdu = async (
 	try {
 		checkEventAuth(pdu, eventId, resolvedStateBefore ?? room);
 	} catch (err) {
-		throw new RejectedEventError(
-			err instanceof Error ? err.message : "Auth check failed",
+		// MSC3706: while the room is partial-state we do not yet hold every
+		// member event (they were omitted from send_join and arrive at resync), so
+		// an auth check against our incomplete state can wrongly reject a perfectly
+		// valid event from a member we just don't know about. Accept such events
+		// optimistically — synapse persists them with partial state and reconciles
+		// at resync. We only do so when our state genuinely lacks the sender's
+		// membership, so structurally-bad events are still rejected.
+		const haveSender = room.state_events.has(
+			`m.room.member\x1f${pdu.sender}`,
 		);
+		const partial = !!(await storage.getRoomPartialState(pdu.room_id));
+		if (!(partial && !haveSender)) {
+			throw new RejectedEventError(
+				err instanceof Error ? err.message : "Auth check failed",
+			);
+		}
 	}
 
 	if (pdu.state_key !== undefined) {

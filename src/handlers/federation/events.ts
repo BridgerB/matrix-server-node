@@ -184,6 +184,12 @@ export const getFederationRoomState =
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
 
+		// MSC3706: while partial-state we do not hold the full state at any event,
+		// so we cannot answer a /state(_ids) request — reject with 403 (synapse
+		// returns an error / the request blocks until resync completes).
+		if (await storage.getRoomPartialState(roomId))
+			throw forbidden("Cannot serve state for a partial-state room");
+
 		const servers = await storage.getServersInRoom(roomId);
 		if (!servers.includes(origin)) throw forbidden("Host not in room");
 
@@ -216,6 +222,12 @@ export const getFederationRoomStateIds =
 
 		const room = await storage.getRoom(roomId);
 		if (!room) throw notFound("Room not found");
+
+		// MSC3706: while partial-state we do not hold the full state at any event,
+		// so we cannot answer a /state(_ids) request — reject with 403 (synapse
+		// returns an error / the request blocks until resync completes).
+		if (await storage.getRoomPartialState(roomId))
+			throw forbidden("Cannot serve state for a partial-state room");
 
 		const servers = await storage.getServersInRoom(roomId);
 		if (!servers.includes(origin)) throw forbidden("Host not in room");

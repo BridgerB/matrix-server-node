@@ -818,6 +818,17 @@ const buildInitialSync = async (
 		if ((forgottenMarker as { forgotten?: boolean } | undefined)?.forgotten) {
 			continue;
 		}
+		// MSC3706: an EAGER (non-lazy-loading) sync omits a partial-state room until
+		// its resync completes — we cannot present the full member list yet. A
+		// lazy-loading sync surfaces it immediately. (synapse hides the room from
+		// eager syncs while partial-state.)
+		if (
+			membership === "join" &&
+			!filter.lazyLoadMembers &&
+			(await storage.getRoomPartialState(roomId))
+		) {
+			continue;
+		}
 		if (membership === "join") {
 			// Load the FULL room timeline (ascending, by stream/recency order), TRUNCATE
 			// to the most-recent `timelineLimit` events FIRST, then apply the sync
@@ -1108,6 +1119,15 @@ const buildIncrementalSync = async (
 	const ignoredInviteSenders = await getIgnoredInviteSenders(storage, userId);
 
 	for (const { roomId, membership } of userRooms) {
+		// MSC3706: omit a partial-state room from an eager (non-lazy) sync until
+		// its resync completes (see initial-sync rationale above).
+		if (
+			membership === "join" &&
+			!filter.lazyLoadMembers &&
+			(await storage.getRoomPartialState(roomId))
+		) {
+			continue;
+		}
 		if (membership === "join") {
 			// Determine whether the syncing user *newly joined* this room within the
 			// current window (their own join member event has stream_pos > since).
