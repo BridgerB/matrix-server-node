@@ -178,21 +178,27 @@ interface WalkItem {
 }
 
 /**
- * Returns the next layer for the walk: for direction "down" the children of
- * the event, for direction "up" the (single) parent.
+ * Returns the next layer for the walk (as event ids): for direction "down" the
+ * children of the event, for direction "up" the (single) parent.
+ *
+ * For "up" we return the parent id from the child's m.relationship even when we
+ * do NOT hold the parent locally — the walk resolves each id via lookForEvent,
+ * which spiders the missing parent in over federation. Returning only locally
+ * held parents (the previous behaviour) silently stopped the chain at the first
+ * remote ancestor and never issued the federated /event_relationships request
+ * (TestFederatedEventRelationships).
  */
 const walkLayer = (
 	graph: RelationGraph,
 	eventId: EventId,
 	req: WalkRequest,
-): { event: PDU; eventId: EventId }[] => {
+): { eventId: EventId }[] => {
 	if (req.direction === "down") {
 		return childrenForParent(graph, eventId, req.recentFirst);
 	}
 	const rel = graph.parent.get(eventId);
 	if (!rel || rel.relType !== REL_TYPE) return [];
-	const parent = graph.byId.get(rel.parentId);
-	return parent ? [parent] : [];
+	return [{ eventId: rel.parentId }];
 };
 
 // The DAG walk itself lives inline in processRelationships below, because it
@@ -526,7 +532,7 @@ export const postEventRelationships =
 		const req = parseRequest(httpReq.body);
 		if (!req.eventId) throw notFound("Missing event_id");
 
-		const graph = await buildGraphForRoom(storage, req.roomId);
+		let graph = await buildGraphForRoom(storage, req.roomId);
 
 		// Resolve the root event: local first, then remote spider (dendrite
 		// getLocalEvent -> fetchUnknownEvent).
@@ -552,6 +558,16 @@ export const postEventRelationships =
 			);
 		}
 		req.roomId = roomId;
+
+		// The request may have omitted room_id, in which case the graph above was
+		// built empty (buildGraphForRoom needs a room) and the root event's own
+		// relationship was never indexed — so an "up" walk would find no parent to
+		// spider. Now that we know the room, (re)build the graph over its timeline
+		// and re-resolve the root within it.
+		if (!graph.byId.has(rootEntry.eventId)) {
+			graph = await buildGraphForRoom(storage, roomId);
+			rootEntry = graph.byId.get(req.eventId) ?? rootEntry;
+		}
 
 		// Authorisation: the user must be joined to the room.
 		const room = await storage.getRoom(roomId);
