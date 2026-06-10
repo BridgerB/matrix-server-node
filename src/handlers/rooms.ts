@@ -753,19 +753,29 @@ const sendMembershipEvent = async (
 		federationClient,
 	);
 
-	// Explicitly deliver to the pre-change destination set (covers the target's
-	// own server for removals). Dedup with the normal fanout is handled by the
-	// receiver (events already known are ignored).
+	// Explicitly deliver to pre-change destinations the post-change room no longer
+	// includes — e.g. the target's own server after a leave/kick/ban. Servers
+	// still in the room were already reached by sendStateEvent's fanout above, so
+	// we exclude them here to avoid sending a DUPLICATE membership PDU (a strict
+	// receiver like Complement's test server flags the second copy as unexpected).
 	if (destinations.length > 0 && signingKey && federationClient) {
-		const stored = await storage.getEvent(eventId as EventId);
-		if (stored) {
-			await deliverEventToServers(
-				serverName,
-				federationClient,
-				stored.event,
-				eventId as EventId,
-				destinations,
-			);
+		const postServers = new Set(
+			await storage.getServersInRoom(roomId as RoomId),
+		);
+		const extra = destinations.filter(
+			(d) => !postServers.has(d as ServerName),
+		);
+		if (extra.length > 0) {
+			const stored = await storage.getEvent(eventId as EventId);
+			if (stored) {
+				await deliverEventToServers(
+					serverName,
+					federationClient,
+					stored.event,
+					eventId as EventId,
+					extra,
+				);
+			}
 		}
 	}
 
@@ -1460,6 +1470,14 @@ export const postLeave =
 		const leaveMembership = leaveRoom
 			? getMembership(leaveRoom, userId as UserId)
 			: undefined;
+		// Leaving a room we have already left (or been banned from) is a no-op —
+		// return 200 without re-federating a make_leave/send_leave (synapse). This
+		// matters for partial-state cleanup, where the user already left during the
+		// resync and a second /leave would otherwise round-trip make_leave to a
+		// resident that no longer expects it.
+		if (leaveMembership === "leave" || leaveMembership === "ban") {
+			return { status: 200, body: {} };
+		}
 		const canLeaveLocally =
 			!!leaveRoom &&
 			isServerResidentInRoom(leaveRoom, serverName) &&
