@@ -1035,6 +1035,33 @@ const processPdu = async (
 		await storage.setStateEvent(pdu.room_id, pdu, eventId);
 	} else {
 		await storage.storeEvent(pdu, eventId);
+
+		// MSC3706: while partial-state we omit most member events, but a received
+		// event references its sender's membership in auth_events. Learn it (as
+		// historical state) so lazy-loading /sync surfaces the sender's membership
+		// and device-list tracking knows about them — mirroring synapse's
+		// partial-join behaviour. The resync later supersedes it.
+		if (
+			pdu.sender &&
+			!room.state_events.has(`m.room.member\x1f${pdu.sender}`) &&
+			(await storage.getRoomPartialState(pdu.room_id))
+		) {
+			for (const aid of pdu.auth_events) {
+				const ae = await storage.getEvent(aid as EventId);
+				if (
+					ae &&
+					ae.event.type === "m.room.member" &&
+					ae.event.state_key === pdu.sender
+				) {
+					await storage.setStateEventHistorical(
+						pdu.room_id,
+						ae.event,
+						aid as EventId,
+					);
+					break;
+				}
+			}
+		}
 	}
 
 	room.depth = Math.max(room.depth, pdu.depth + 1);
