@@ -2424,11 +2424,40 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 
 	private partialStateWaiters = new Map<string, Set<() => void>>();
 	private unPartialStatedAt = new Map<string, number>();
+	private historicalPos = -1;
 
 	async getRoomUnPartialStatedAt(
 		roomId: RoomId,
 	): Promise<number | undefined> {
 		return this.unPartialStatedAt.get(roomId);
+	}
+
+	async setStateEventHistorical(
+		roomId: RoomId,
+		event: PDU,
+		eventId: EventId,
+	): Promise<void> {
+		const pos = this.historicalPos--;
+		this.stmts.insertEvent.run(
+			eventId,
+			event.room_id ?? roomId,
+			pos,
+			JSON.stringify(event),
+		);
+		this.stmts.insertStateEvent.run(
+			roomId,
+			event.type,
+			event.state_key ?? "",
+			eventId,
+			JSON.stringify(event),
+		);
+		const cached = this.roomCache.get(roomId);
+		if (cached) {
+			cached.state_events.set(
+				`${event.type}\x1f${event.state_key ?? ""}`,
+				event,
+			);
+		}
 	}
 
 	async markRoomPartialState(
@@ -2447,6 +2476,10 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		this.db
 			.prepare("DELETE FROM partial_state_rooms WHERE room_id = ?")
 			.run(roomId);
+		// Un-partial-stating is a sync-relevant change: advance the stream so an
+		// incremental /sync taken before the resync sees the room now (with its
+		// newly-known state) and long-polls wake.
+		this.streamCounter++;
 		this.unPartialStatedAt.set(roomId, this.streamCounter);
 		const waiters = this.partialStateWaiters.get(roomId);
 		if (waiters) {

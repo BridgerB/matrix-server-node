@@ -2266,6 +2266,14 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		return this.unPartialStatedAt.get(roomId);
 	}
 
+	async setStateEventHistorical(
+		roomId: RoomId,
+		event: PDU,
+		eventId: EventId,
+	): Promise<void> {
+		await this.setStateEvent(roomId, event, eventId);
+	}
+
 	async markRoomPartialState(
 		roomId: RoomId,
 		servers: ServerName[],
@@ -2276,6 +2284,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 
 	async clearRoomPartialState(roomId: RoomId): Promise<void> {
 		this.partialStateRooms.delete(roomId);
+		this.streamCounter++;
 		this.unPartialStatedAt.set(roomId, this.streamCounter);
 		const waiters = this.partialStateWaiters.get(roomId);
 		if (waiters) {

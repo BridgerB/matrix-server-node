@@ -581,6 +581,17 @@ export interface Storage {
 	 * /sync to surface the newly-known member state when a room un-partial-states.
 	 */
 	getRoomUnPartialStatedAt(roomId: RoomId): Promise<number | undefined>;
+	/**
+	 * Persist a state event learned during a partial-state resync as HISTORICAL
+	 * state: it becomes part of current state (getAllState / getMemberEvents) but
+	 * is given a negative stream position so it never appears in a forward sync
+	 * timeline (it is pre-existing state we only just learned, not live activity).
+	 */
+	setStateEventHistorical(
+		roomId: RoomId,
+		event: PDU,
+		eventId: EventId,
+	): Promise<void>;
 
 	// Federation - Transaction dedup
 	getFederationTxn(origin: ServerName, txnId: string): Promise<boolean>;

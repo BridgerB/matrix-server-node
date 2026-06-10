@@ -1887,6 +1887,23 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		return this.unPartialStatedAt.get(roomId);
 	}
 
+	async setStateEventHistorical(
+		roomId: RoomId,
+		event: PDU,
+		eventId: EventId,
+	): Promise<void> {
+		// Add to current state + the event store, but NOT the room timeline, so it
+		// never appears in a forward sync/messages window.
+		this.events.set(eventId, event);
+		const room = this.rooms.get(roomId);
+		if (room) {
+			room.state_events.set(
+				`${event.type}\x1f${event.state_key ?? ""}`,
+				event,
+			);
+		}
+	}
+
 	async markRoomPartialState(
 		roomId: RoomId,
 		servers: ServerName[],
@@ -1897,6 +1914,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 
 	async clearRoomPartialState(roomId: RoomId): Promise<void> {
 		this.partialStateRooms.delete(roomId);
+		this.streamCounter++;
 		this.unPartialStatedAt.set(roomId, this.streamCounter);
 		const waiters = this.partialStateWaiters.get(roomId);
 		if (waiters) {

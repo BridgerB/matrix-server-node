@@ -161,9 +161,18 @@ export const getDirectoryRoom =
 
 		const result = await storage.getRoomByAlias(roomAlias);
 		if (!result) throw notFound("Room alias not found");
+		// Advertise the room's current resident servers (members + a partial-state
+		// room's recorded servers_in_room), not just whoever holds the alias, so a
+		// client can actually join via them. (TestPartialStateJoin room-aliases.)
+		const roomServers = await storage.getServersInRoom(
+			result.room_id as RoomId,
+		);
+		const servers = [
+			...new Set([...(result.servers ?? []), ...roomServers]),
+		];
 		return {
 			status: 200,
-			body: { room_id: result.room_id, servers: result.servers },
+			body: { room_id: result.room_id, servers },
 		};
 	};
 

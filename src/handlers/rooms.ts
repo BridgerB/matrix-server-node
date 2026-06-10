@@ -1412,8 +1412,11 @@ const resyncPartialStateRoom = async (
 				// and pollute the timeline, breaking other servers' joins/syncs.
 				const key = `${ev.type}\x1f${ev.state_key ?? ""}`;
 				if (current?.state_events.get(key)) continue;
-				if (!(await storage.getEvent(id))) await storage.storeEvent(ev, id);
-				await storage.setStateEvent(roomId, ev, id);
+				// Store as HISTORICAL state: it joins current state but is kept out of
+				// the forward timeline (pre-existing state we just learned, not new
+				// activity), so it surfaces in /sync's `state` block and /members
+				// rather than as a live timeline event.
+				await storage.setStateEventHistorical(roomId, ev, id);
 			}
 
 			// 4. Resync complete — clear the flag (wakes /members and /sync waiters).
