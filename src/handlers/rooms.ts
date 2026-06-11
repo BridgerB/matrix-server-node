@@ -928,6 +928,15 @@ export const postJoin =
 			...extraJoinContent
 		} = joinBody;
 
+		// A banned user cannot join (or rejoin) — reject locally before federating.
+		// A remote resident that hasn't seen our ban (or the Complement test
+		// server, which doesn't enforce it) would otherwise let them back in.
+		// (TestPartialStateJoin Leave_during_resync/can_be_triggered_by_remote_ban.)
+		const knownRoom = await storage.getRoom(roomId as RoomId);
+		if (knownRoom && getMembership(knownRoom, userId as UserId) === "ban") {
+			throw forbidden("You are banned from this room");
+		}
+
 		// Attempt a federation join through any of the candidate servers. Used
 		// both when the room is unknown locally and when the room is known but we
 		// are not resident (e.g. we only hold a stripped invite). `priorityServers`
@@ -1263,15 +1272,23 @@ const performFederationJoin = async (
 			e.room_id ? e : ({ ...e, room_id: roomId } as PDU),
 		);
 
-	// Was this a RE-join, i.e. did we already hold this room with our membership
-	// at leave/ban? Only then is the cache-staleness fix below needed — and only
-	// then is it safe. (An invite-accept join must NOT trigger it: re-applying
-	// state into a resident room's cache regressed restricted-join invite auth.)
+	// Are we joining a room we ALREADY hold? The cached room handed out by getRoom
+	// is by-reference and importRoomState does not refresh it, so without help the
+	// cache would not show our new join and /members etc. would treat us as not
+	// joined. This happens on a rejoin after leave/ban AND on a fresh join into a
+	// room another local user partial-joined (e.g. Alice partial-joins and leaves,
+	// then Bob joins the same still-partial room). Re-apply our own membership via
+	// setStateEvent in those cases. Excludes an invite-accept (membership
+	// "invite"): re-applying state into a resident room's cache there regressed
+	// restricted-join invite auth.
 	const priorRoom = await storage.getRoom(roomId);
+	const priorMembership = priorRoom
+		? getMembership(priorRoom, userId)
+		: undefined;
 	const wasDeparted =
 		!!priorRoom &&
-		(getMembership(priorRoom, userId) === "leave" ||
-			getMembership(priorRoom, userId) === "ban");
+		priorMembership !== "join" &&
+		priorMembership !== "invite";
 
 	await storage.importRoomState(
 		roomId,
