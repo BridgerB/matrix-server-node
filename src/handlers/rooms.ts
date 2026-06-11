@@ -1350,6 +1350,15 @@ const performFederationJoin = async (
 				(e as Error).message,
 			),
 		);
+		// Give the resync a brief window to finish before returning. When the
+		// resident can serve full state immediately (the common case — a real join
+		// between cooperating servers) the room un-partial-states within
+		// milliseconds and the caller never observes a partial-state room, so an
+		// ordinary join is fully transparent. Only when the resync is genuinely
+		// slow/blocked (the Complement partial-join harness deliberately stalls
+		// /state_ids) does this time out and leave the room partial for the feature
+		// to exercise. This keeps faster-joins from regressing normal remote joins.
+		await storage.waitForPartialStateClear(roomId, 5000);
 	}
 
 	return { status: 200, body: { room_id: roomId } };

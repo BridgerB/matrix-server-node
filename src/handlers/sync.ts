@@ -1175,9 +1175,13 @@ const buildIncrementalSync = async (
 			// raw window) forces `limited` even if the filter shrinks the set, so the
 			// client paginates the dropped history.
 			let storageGap: boolean;
-			if (selfNewlyJoinedRoom) {
+			if (selfNewlyJoinedRoom || unPartialStatedThisWindow) {
 				// Whole room history; truncation/limited handled below. A newly-joined
 				// room is always limited so the client paginates the pre-join gap.
+				// MSC3706: an un-partial-stated room is treated the same — while it was
+				// partial it was hidden from this (eager) sync and the token advanced
+				// past its events, so we must re-deliver its recent timeline now,
+				// otherwise events sent during the resync are lost to the client.
 				const fullWindow = await storage.getEventsByRoomSince(
 					roomId,
 					0,
