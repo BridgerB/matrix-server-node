@@ -222,10 +222,28 @@ const isRemoteUserTracked = async (
 ): Promise<boolean> => {
 	const rooms = await storage.getRoomsForUser(userId);
 	for (const roomId of rooms) {
+		// A fully-resolved room → we are certain of its membership.
 		if (!(await storage.getRoomPartialState(roomId))) return true;
+		// A partial-state room where we nonetheless WITNESSED this user join live
+		// (their join is in the forward timeline, not a resync-filled historical
+		// entry) → we are certain they are here. This is how a member who joins
+		// during the resync is tracked while the omitted pre-existing members are
+		// not yet.
+		const tl = await storage.getEventsByRoomSince(roomId, 0, 100000);
+		for (const { event } of tl.events) {
+			if (
+				event.type === "m.room.member" &&
+				event.state_key === userId &&
+				(event.content as { membership?: string }).membership === "join"
+			) {
+				return true;
+			}
+		}
 	}
 	return false;
 };
+
+export { isRemoteUserTracked };
 
 export const postKeysQuery =
 	(
@@ -660,10 +678,37 @@ export const getKeysChanges =
 		// requester is never reported in `left`.)
 		const changed: UserId[] = [];
 		const left: UserId[] = [];
+		const changedSet = new Set<UserId>();
 		for (const u of changedInWindow) {
-			if (sharedUsers.has(u)) changed.push(u);
+			if (sharedUsers.has(u)) changedSet.add(u);
 			else if (u !== userId) left.push(u);
 		}
+
+		// Also report users who newly JOINED a shared room within (from, to] even
+		// without a device-key change: we now share a room with them and the
+		// client must fetch their device list. Mirrors sync's device_lists.changed
+		// step 1b, and is how a member revealed during a partial-state join (or one
+		// who simply joins while we are syncing) surfaces here.
+		for (const roomId of joinedRoomIds) {
+			const windowEvents = await storage.getEventsByRoomSince(
+				roomId,
+				from,
+				100000,
+			);
+			for (const { event, streamPos } of windowEvents.events) {
+				if (streamPos > to) continue;
+				const sk = event.state_key as UserId | undefined;
+				if (
+					event.type === "m.room.member" &&
+					(event.content as { membership?: string }).membership === "join" &&
+					sk &&
+					sk !== userId
+				) {
+					changedSet.add(sk);
+				}
+			}
+		}
+		for (const u of changedSet) changed.push(u);
 
 		return {
 			status: 200,
