@@ -16,3 +16,6 @@
 [submodule "upstream/synapse"]
 	path = upstream/synapse
 	url = https://github.com/element-hq/synapse.git
+[submodule "upstream/complement"]
+	path = upstream/complement
+	url = git@github.com:matrix-org/complement.git

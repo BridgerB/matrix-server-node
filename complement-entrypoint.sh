@@ -71,7 +71,7 @@ export SCRYPT_COST=2
 # Complement copies appservice registration YAML files to /complement/appservice/.
 # Convert them into the JSON array our server reads from APPSERVICE_REGISTRATIONS.
 if [ -d /complement/appservice ]; then
-    APPSERVICE_REGISTRATIONS="$(node scripts/complement-as-registrations.mjs /complement/appservice)"
+    APPSERVICE_REGISTRATIONS="$(node scripts/complement-as-registrations.ts /complement/appservice)"
     export APPSERVICE_REGISTRATIONS
     echo "Loaded appservice registrations: $APPSERVICE_REGISTRATIONS"
 fi
