@@ -1695,6 +1695,20 @@ const buildIncrementalSync = async (
 		device_unused_fallback_key_types: fallbackKeyTypes,
 	};
 };
+// Whether an incremental sync response carries nothing for the client — used by
+// the long-poll loop to decide whether to keep waiting. Mirrors the streams a
+// client actually observes; an empty response is just `next_batch`.
+const isEmptySyncResponse = (r: SyncResponse): boolean =>
+	!r.rooms?.join &&
+	!r.rooms?.invite &&
+	!r.rooms?.knock &&
+	!r.rooms?.leave &&
+	!r.to_device?.events?.length &&
+	!r.device_lists?.changed?.length &&
+	!r.device_lists?.left?.length &&
+	!r.account_data?.events?.length &&
+	!r.presence?.events?.length;
+
 export const getSync =
 	(storage: Storage, _serverName: string): Handler =>
 	async (req) => {
@@ -1737,32 +1751,54 @@ export const getSync =
 		// Resolve filter (inline JSON or filter ID)
 		const filter = await resolveFilter(storage, userId, filterParam);
 
-		if (since !== undefined && timeout > 0) {
-			await storage.waitForEvents(since, timeout);
+		// Long-poll loop. A bare waitForEvents wakes on ANY stream advance, but a
+		// sync must only return once it has something to deliver — otherwise an
+		// internal, client-invisible bump (e.g. a partial-state room's hidden
+		// activity) returns an empty response immediately, defeating the long poll.
+		// So keep re-waiting until the computed response is non-empty or the
+		// timeout elapses. Initial syncs and timeout=0 syncs return at once.
+		const deadline = Date.now() + timeout;
+		let waitFrom = since;
+		let response: SyncResponse;
+		while (true) {
+			if (waitFrom !== undefined && timeout > 0) {
+				const remaining = deadline - Date.now();
+				if (remaining > 0) await storage.waitForEvents(waitFrom, remaining);
+			}
+
+			const nextBatch = await storage.getStreamPosition();
+			response =
+				since === undefined
+					? await buildInitialSync(
+							storage,
+							userId,
+							deviceId,
+							nextBatch,
+							filter,
+							useStateAfter,
+						)
+					: await buildIncrementalSync(
+							storage,
+							userId,
+							deviceId,
+							since,
+							nextBatch,
+							fullState,
+							filter,
+							useStateAfter,
+						);
+
+			if (
+				since === undefined ||
+				timeout === 0 ||
+				Date.now() >= deadline ||
+				!isEmptySyncResponse(response)
+			) {
+				break;
+			}
+			// Nothing to deliver yet — wait for the next change past where we are now.
+			waitFrom = nextBatch;
 		}
-
-		const nextBatch = await storage.getStreamPosition();
-
-		const response: SyncResponse =
-			since === undefined
-				? await buildInitialSync(
-						storage,
-						userId,
-						deviceId,
-						nextBatch,
-						filter,
-						useStateAfter,
-					)
-				: await buildIncrementalSync(
-						storage,
-						userId,
-						deviceId,
-						since,
-						nextBatch,
-						fullState,
-						filter,
-						useStateAfter,
-					);
 
 		return { status: 200, body: response };
 	};
