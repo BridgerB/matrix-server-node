@@ -1434,6 +1434,7 @@ const resyncPartialStateRoom = async (
 				}
 			}
 			const current = await storage.getRoom(roomId);
+			const revealedMembers: UserId[] = [];
 			for (const raw of stateEvents) {
 				const ev =
 					raw.room_id || roomVersion === "12"
@@ -1457,6 +1458,34 @@ const resyncPartialStateRoom = async (
 				// activity), so it surfaces in /sync's `state` block and /members
 				// rather than as a live timeline event.
 				await storage.setStateEventHistorical(roomId, ev, id);
+				if (
+					ev.type === "m.room.member" &&
+					(ev.content as { membership?: string }).membership === "join" &&
+					ev.state_key
+				) {
+					revealedMembers.push(ev.state_key as UserId);
+				}
+			}
+
+			// Device-list reconciliation (synapse handle_room_un_partial_stated):
+			// while partial-state we could not surface device-list changes for the
+			// omitted members. A device-list update that arrived for such a member
+			// during the resync was recorded on the change stream, but at a point
+			// before we knew they shared a room with our users, so it was dropped
+			// from device_lists.changed. Now that they are revealed, re-record a
+			// change for each newly-revealed member that ALREADY has a pending
+			// change, so local syncers are told to refetch their keys. Members with
+			// no pending change are not re-recorded, or they would appear
+			// spuriously in device_lists.changed.
+			if (revealedMembers.length > 0) {
+				const everChanged = new Set(
+					await storage.getChangedDeviceUsers(0, Number.MAX_SAFE_INTEGER),
+				);
+				for (const member of revealedMembers) {
+					if (everChanged.has(member)) {
+						await storage.recordDeviceKeyChange(member);
+					}
+				}
 			}
 
 			// 4. Resync complete — clear the flag (wakes /members and /sync waiters).

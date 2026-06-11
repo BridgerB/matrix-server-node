@@ -1167,21 +1167,28 @@ const processEdu = async (
 			break;
 		}
 		case "m.receipt": {
-			const { room_id, receipts } = content as {
-				room_id: RoomId;
-				receipts?: Record<string, Record<string, Record<string, unknown>>>;
-			};
-			if (room_id && receipts) {
-				if (await aclDeniesRoom(room_id)) break;
-				for (const [eventId, receiptTypes] of Object.entries(receipts)) {
-					for (const [receiptType, users] of Object.entries(receiptTypes)) {
-						for (const userId of Object.keys(users)) {
+			// The federation m.receipt EDU content is keyed room_id ->
+			// receipt_type -> user_id -> { data: { ts }, event_ids: [...] }
+			// (server-server-api m.receipt), NOT a flat { room_id, receipts }.
+			const byRoom = content as Record<
+				string,
+				Record<
+					string,
+					Record<string, { data?: { ts?: number }; event_ids?: string[] }>
+				>
+			>;
+			for (const [roomId, receiptTypes] of Object.entries(byRoom)) {
+				if (await aclDeniesRoom(roomId as RoomId)) continue;
+				for (const [receiptType, users] of Object.entries(receiptTypes)) {
+					for (const [userId, receipt] of Object.entries(users)) {
+						const ts = receipt.data?.ts ?? Date.now();
+						for (const eventId of receipt.event_ids ?? []) {
 							await storage.setReceipt(
-								room_id,
+								roomId as RoomId,
 								userId as UserId,
 								eventId as EventId,
 								receiptType,
-								Date.now(),
+								ts,
 							);
 						}
 					}
