@@ -123,8 +123,14 @@ async function resolveStateMap(
 	if (!eventId) return room.state_events;
 	const entry = await storage.getEvent(eventId);
 	if (entry && entry.event.room_id === roomId) {
-		// State *before* the requested event: do not fold the event itself in.
-		return stateAtEvent(storage, entry.event, false);
+		// The state snapshot *at* the requested event, folding the event itself
+		// in when it is a state event (spec: "a snapshot of a room's state at a
+		// given event"). This matters for partial-state resync: a faster-join
+		// peer fetches /state at our join's prev-event, which is frequently the
+		// previous member's own join — excluding it would hide that member from
+		// the resyncing server, so it would never learn that server is in the
+		// room (breaking later fan-out, e.g. leaves).
+		return stateAtEvent(storage, entry.event, true);
 	}
 	// Event unknown locally (or in another room): best-effort fall back to the
 	// storage lookup, then the current room state.
