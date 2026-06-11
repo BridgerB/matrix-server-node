@@ -1222,13 +1222,28 @@ const processEdu = async (
 			if (userServer !== origin) break;
 
 			if (!deleted && keys) {
-				// Cache the advertised device keys. Normalise the embedded
-				// user_id/device_id to the EDU's authoritative values.
-				await storage.setDeviceKeys(user_id, device_id, {
-					...keys,
-					user_id,
-					device_id,
-				});
+				// Cache the advertised device keys ONLY if we are already tracking
+				// this user — i.e. they share a fully-resolved (non-partial-state)
+				// room with us. During a partial-state join we are not yet sure they
+				// share a room, so caching now would let a later /keys/query be
+				// served from cache when it must instead federate (TestPartialStateJoin
+				// Device_list_tracking). The change is still recorded below.
+				let tracked = false;
+				for (const roomId of await storage.getRoomsForUser(user_id)) {
+					if (!(await storage.getRoomPartialState(roomId))) {
+						tracked = true;
+						break;
+					}
+				}
+				if (tracked) {
+					// Normalise the embedded user_id/device_id to the EDU's
+					// authoritative values.
+					await storage.setDeviceKeys(user_id, device_id, {
+						...keys,
+						user_id,
+						device_id,
+					});
+				}
 			}
 
 			// Record the change on the device-key-change stream regardless of

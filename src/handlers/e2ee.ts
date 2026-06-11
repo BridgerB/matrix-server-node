@@ -211,6 +211,22 @@ export const queryDeviceKeys = async (
 const serverOf = (userId: string): string =>
 	userId.slice(userId.indexOf(":") + 1);
 
+// A remote user's device list is "tracked" — and therefore safe to cache and
+// serve without a fresh federation round-trip — once they share a fully-resolved
+// (non-partial-state) room with us. While the only shared room is still
+// partial-state we are not yet certain of the membership, so every /keys/query
+// must federate (TestPartialStateJoin Device_list_tracking).
+const isRemoteUserTracked = async (
+	storage: Storage,
+	userId: UserId,
+): Promise<boolean> => {
+	const rooms = await storage.getRoomsForUser(userId);
+	for (const roomId of rooms) {
+		if (!(await storage.getRoomPartialState(roomId))) return true;
+	}
+	return false;
+};
+
 export const postKeysQuery =
 	(
 		storage: Storage,
@@ -234,6 +250,15 @@ export const postKeysQuery =
 		)) {
 			const dest = serverOf(targetUserId) as ServerName;
 			if (!serverName || !federationClient || dest === serverName) {
+				localRequest[targetUserId] = deviceIds;
+			} else if (
+				(await isRemoteUserTracked(storage, targetUserId as UserId)) &&
+				Object.keys(await storage.getAllDeviceKeys(targetUserId as UserId))
+					.length > 0
+			) {
+				// Tracked and already cached → serve from our cache, no federation
+				// round-trip. The cache is kept fresh by inbound m.device_list_update
+				// EDUs, which re-fetch and update it on change.
 				localRequest[targetUserId] = deviceIds;
 			} else {
 				const group = remoteByDest.get(dest) ?? {};
@@ -290,6 +315,18 @@ export const postKeysQuery =
 							resp.device_keys,
 						)) {
 							deviceKeys[u as UserId] = keys;
+							// Cache for subsequent queries once we are tracking the
+							// user (they share a non-partial room with us), so the next
+							// /keys/query is served locally without federating.
+							if (await isRemoteUserTracked(storage, u as UserId)) {
+								for (const [did, k] of Object.entries(keys)) {
+									await storage.setDeviceKeys(
+										u as UserId,
+										did as DeviceId,
+										k,
+									);
+								}
+							}
 						}
 					}
 					if (resp.master_keys) {
