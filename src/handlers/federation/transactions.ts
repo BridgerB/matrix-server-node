@@ -1046,6 +1046,7 @@ const processPdu = async (
 			!room.state_events.has(`m.room.member\x1f${pdu.sender}`) &&
 			(await storage.getRoomPartialState(pdu.room_id))
 		) {
+			let learned = false;
 			for (const aid of pdu.auth_events) {
 				const ae = await storage.getEvent(aid as EventId);
 				if (
@@ -1058,7 +1059,45 @@ const processPdu = async (
 						ae.event,
 						aid as EventId,
 					);
+					learned = true;
 					break;
+				}
+			}
+			// The sender's membership was omitted by the partial join and isn't
+			// among the auth_events we hold. Fetch the event's auth chain from the
+			// origin via /event_auth and learn the membership from there, so
+			// lazy-loading /sync and device-list tracking can surface a member we
+			// have only ever seen send events. Mirrors synapse, which resolves an
+			// unknown sender's membership before the resync completes. Best-effort:
+			// the resync later supersedes whatever we learn here.
+			if (!learned) {
+				try {
+					const res = await federationClient.request(
+						origin,
+						"GET",
+						`/_matrix/federation/v1/event_auth/${encodeURIComponent(
+							pdu.room_id,
+						)}/${encodeURIComponent(eventId)}`,
+					);
+					const chain =
+						(res.body as { auth_chain?: PDU[] } | undefined)?.auth_chain ??
+						[];
+					for (const ev of chain) {
+						if (
+							ev.type === "m.room.member" &&
+							ev.state_key === pdu.sender &&
+							ev.room_id === pdu.room_id
+						) {
+							await storage.setStateEventHistorical(
+								pdu.room_id,
+								ev,
+								computeEventId(ev, room.room_version),
+							);
+							break;
+						}
+					}
+				} catch {
+					// Origin unreachable / no auth chain — the resync will fill it in.
 				}
 			}
 		}

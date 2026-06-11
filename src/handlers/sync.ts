@@ -1322,6 +1322,42 @@ const buildIncrementalSync = async (
 				stateClientEvents = stateDelta.map((e) =>
 					pduToClientEvent(e.event, e.eventId),
 				);
+
+				// Lazy-loading during a partial-state join: also surface the
+				// m.room.member event for each sender in this window's timeline whose
+				// membership sits below `since` — in particular a remote member we
+				// learned (as historical state) only from receiving their events, who
+				// would otherwise be invisible to a gappy/incremental lazy-load until
+				// the resync completes. Gated to partial-state rooms so ordinary
+				// lazy-loading (which relies on the client's own membership cache) is
+				// unaffected.
+				if (
+					filter.lazyLoadMembers &&
+					(await storage.getRoomPartialState(roomId))
+				) {
+					const seenMembers = new Set(
+						stateClientEvents
+							.filter((e) => e.type === "m.room.member")
+							.map((e) => e.state_key ?? ""),
+					);
+					const timelineSenders = new Set(
+						timelineClientEvents.map((e) => e.sender),
+					);
+					const allState = await storage.getAllState(roomId);
+					for (const e of allState) {
+						if (
+							e.event.type === "m.room.member" &&
+							timelineSenders.has(e.event.state_key ?? "") &&
+							!seenMembers.has(e.event.state_key ?? "") &&
+							!filteredTimelineIds.has(e.eventId)
+						) {
+							stateClientEvents.push(
+								pduToClientEvent(e.event, e.eventId),
+							);
+							seenMembers.add(e.event.state_key ?? "");
+						}
+					}
+				}
 			}
 
 			// For a limited timeline, prev_batch points just before the first kept
