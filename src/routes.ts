@@ -428,12 +428,12 @@ export const registerRoutes = (
 	);
 	router.put(
 		"/_matrix/client/v3/profile/:userId/displayname",
-		putDisplayName(storage, serverName),
+		putDisplayName(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.put(
 		"/_matrix/client/v3/profile/:userId/avatar_url",
-		putAvatarUrl(storage, serverName),
+		putAvatarUrl(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.get(

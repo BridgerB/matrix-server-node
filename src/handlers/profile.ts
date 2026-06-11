@@ -1,7 +1,9 @@
 import { badJson, forbidden, notFound } from "../errors.ts";
 import { buildEvent, checkEventAuth, selectAuthEvents } from "../events.ts";
 import type { FederationClient } from "../federation/client.ts";
+import { fanoutEvent } from "../federation/outbound.ts";
 import type { Handler } from "../router.ts";
+import type { SigningKey } from "../signing.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { ServerName, UserId } from "../types/index.ts";
 import type { JsonObject } from "../types/json.ts";
@@ -19,6 +21,8 @@ const propagateProfileToRooms = async (
 	storage: Storage,
 	serverName: string,
 	userId: UserId,
+	signingKey?: SigningKey,
+	federationClient?: FederationClient,
 ): Promise<void> => {
 	const profile = await storage.getProfile(userId);
 	const rooms = await storage.getRoomsForUser(userId);
@@ -50,12 +54,28 @@ const propagateProfileToRooms = async (
 			authEvents,
 			serverName,
 			roomVersion: room.room_version,
+			signingKey,
 		});
 
 		checkEventAuth(event, eventId, room);
 		await storage.setStateEvent(roomId, event, eventId);
 		room.depth += 1;
 		room.forward_extremities = [eventId];
+
+		// Federate the membership update to the room's servers (including those
+		// recorded for a partial-state room), so remote members see the new
+		// display name / avatar. Requires our signing key + a federation client.
+		if (signingKey && federationClient) {
+			await fanoutEvent(
+				storage,
+				serverName,
+				signingKey,
+				federationClient,
+				roomId as Parameters<typeof fanoutEvent>[4],
+				event,
+				eventId,
+			);
+		}
 	}
 };
 
@@ -164,7 +184,12 @@ export const getAvatarUrl =
 	};
 
 export const putDisplayName =
-	(storage: Storage, serverName: string): Handler =>
+	(
+		storage: Storage,
+		serverName: string,
+		signingKey?: SigningKey,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const targetUserId = req.params.userId as UserId;
 		if (req.userId !== targetUserId)
@@ -179,12 +204,23 @@ export const putDisplayName =
 		}
 
 		await storage.setDisplayName(targetUserId, displayname ?? null);
-		await propagateProfileToRooms(storage, serverName, targetUserId);
+		await propagateProfileToRooms(
+			storage,
+			serverName,
+			targetUserId,
+			signingKey,
+			federationClient,
+		);
 		return { status: 200, body: {} };
 	};
 
 export const putAvatarUrl =
-	(storage: Storage, serverName: string): Handler =>
+	(
+		storage: Storage,
+		serverName: string,
+		signingKey?: SigningKey,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const targetUserId = req.params.userId as UserId;
 		if (req.userId !== targetUserId)
@@ -199,7 +235,13 @@ export const putAvatarUrl =
 		}
 
 		await storage.setAvatarUrl(targetUserId, avatarUrl ?? null);
-		await propagateProfileToRooms(storage, serverName, targetUserId);
+		await propagateProfileToRooms(
+			storage,
+			serverName,
+			targetUserId,
+			signingKey,
+			federationClient,
+		);
 		return { status: 200, body: {} };
 	};
 
