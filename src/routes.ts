@@ -210,6 +210,7 @@ import {
 	postKnock,
 	postLeave,
 	postUnban,
+	resumePartialStateResyncs,
 } from "./handlers/rooms.ts";
 import { postSearch } from "./handlers/search.ts";
 import { getSpaceHierarchy } from "./handlers/spaces.ts";
@@ -1607,4 +1608,11 @@ export const registerRoutes = (
 			error: "This server is not a policy server",
 		},
 	}));
+
+	// Resume background resyncs for any rooms left partial-state by a restart.
+	// The sqlite backend persists the flag; in-memory backends start empty.
+	// Fire-and-forget once all routes are wired up.
+	if (federationClient) {
+		void resumePartialStateResyncs(storage, federationClient);
+	}
 };

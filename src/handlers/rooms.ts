@@ -1497,6 +1497,38 @@ const resyncPartialStateRoom = async (
 	}
 };
 
+/**
+ * Resume background resyncs for rooms still in partial state — called once at
+ * startup. A resync runs in-process, so a restart mid-resync would otherwise
+ * leave the room partial forever. The sqlite backend persists the partial-state
+ * flag (room id, servers to retry, the event to fetch state at) across a
+ * restart, so we re-kick the resync for each. Mirrors synapse
+ * `_resume_partial_state_room_sync`. (TestPartialStateJoinContinuesAfterRestart.)
+ */
+export const resumePartialStateResyncs = async (
+	storage: Storage,
+	federationClient: FederationClient,
+): Promise<void> => {
+	const partials = await storage.getAllPartialStateRooms();
+	for (const { roomId, servers, joinEventId } of partials) {
+		const room = await storage.getRoom(roomId);
+		if (!room) continue;
+		void resyncPartialStateRoom(
+			storage,
+			federationClient,
+			roomId,
+			joinEventId,
+			servers,
+			room.room_version,
+		).catch((e) =>
+			console.error(
+				`partial-state resync resume failed for ${roomId}:`,
+				(e as Error).message,
+			),
+		);
+	}
+};
+
 export const postLeave =
 	(
 		storage: Storage,

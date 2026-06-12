@@ -573,6 +573,14 @@ export interface Storage {
 	getRoomPartialState(
 		roomId: RoomId,
 	): Promise<{ servers: ServerName[]; joinEventId: EventId } | undefined>;
+	/**
+	 * Every room still in partial state. Used at startup to resume background
+	 * resyncs that were interrupted by a restart (only the sqlite backend persists
+	 * these across a restart; the in-memory backends return their live set).
+	 */
+	getAllPartialStateRooms(): Promise<
+		{ roomId: RoomId; servers: ServerName[]; joinEventId: EventId }[]
+	>;
 	/** Resolve when `roomId` is no longer partial-state, or after `timeoutMs`. */
 	waitForPartialStateClear(roomId: RoomId, timeoutMs: number): Promise<void>;
 	/**

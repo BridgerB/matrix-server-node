@@ -2506,6 +2506,23 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		};
 	}
 
+	async getAllPartialStateRooms(): Promise<
+		{ roomId: RoomId; servers: ServerName[]; joinEventId: EventId }[]
+	> {
+		const rows = this.db
+			.prepare("SELECT room_id, servers, join_event_id FROM partial_state_rooms")
+			.all() as {
+			room_id: string;
+			servers: string;
+			join_event_id: string;
+		}[];
+		return rows.map((r) => ({
+			roomId: r.room_id as RoomId,
+			servers: JSON.parse(r.servers) as ServerName[],
+			joinEventId: r.join_event_id as EventId,
+		}));
+	}
+
 	async waitForPartialStateClear(
 		roomId: RoomId,
 		timeoutMs: number,

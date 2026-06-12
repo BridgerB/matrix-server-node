@@ -2300,6 +2300,16 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		return this.partialStateRooms.get(roomId);
 	}
 
+	async getAllPartialStateRooms(): Promise<
+		{ roomId: RoomId; servers: ServerName[]; joinEventId: EventId }[]
+	> {
+		return [...this.partialStateRooms.entries()].map(([roomId, v]) => ({
+			roomId: roomId as RoomId,
+			servers: v.servers,
+			joinEventId: v.joinEventId,
+		}));
+	}
+
 	async waitForPartialStateClear(
 		roomId: RoomId,
 		timeoutMs: number,
