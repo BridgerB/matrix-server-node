@@ -13,7 +13,7 @@ import type {
 	KeysUploadRequest,
 } from "../types/e2ee.ts";
 import type { EDU } from "../types/events.ts";
-import type { DeviceId, ServerName, UserId } from "../types/index.ts";
+import type { DeviceId, RoomId, ServerName, UserId } from "../types/index.ts";
 import type { JsonObject } from "../types/json.ts";
 
 // Monotonic per-process counter for device-list update stream IDs. The spec
@@ -68,9 +68,34 @@ export const sendDeviceListUpdate = async (
 			for (const s of ps.servers) {
 				if (s !== serverName) destinations.add(s);
 			}
+			// We only know SOME of this room's servers right now. Record the change
+			// so that when the resync reveals the rest, we re-send it to them
+			// (synapse device_lists_outbound_pokes).
+			await storage.recordPartialStateDevicePoke(roomId, userId, deviceId);
 		}
 	}
 
+	await deliverDeviceListUpdateTo(
+		storage,
+		serverName,
+		federationClient,
+		userId,
+		deviceId,
+		destinations,
+	);
+};
+
+/** Build and deliver an m.device_list_update for `userId`/`deviceId` to a
+ * specific set of destination servers. Shared by the normal send path and the
+ * partial-state resync re-send. */
+const deliverDeviceListUpdateTo = async (
+	storage: Storage,
+	serverName: ServerName,
+	federationClient: FederationClient,
+	userId: UserId,
+	deviceId: DeviceId,
+	destinations: Set<ServerName>,
+): Promise<void> => {
 	if (destinations.size === 0) return;
 
 	const streamId = ++deviceListStreamCounter;
@@ -107,6 +132,38 @@ export const sendDeviceListUpdate = async (
 			federationClient,
 			dest,
 			edu,
+		);
+	}
+};
+
+/**
+ * Once a partial-state room's resync completes, re-send any local device-list
+ * changes made during the partial join to servers that were in the room at our
+ * join but were NOT named in the resident's servers_in_room — we never told
+ * them. Mirrors synapse's handle_room_un_partial_stated outbound-poke step.
+ */
+export const resyncOutgoingDeviceListPokes = async (
+	storage: Storage,
+	serverName: ServerName,
+	federationClient: FederationClient,
+	roomId: RoomId,
+	serversAtJoin: Set<ServerName>,
+	toldServers: Set<ServerName>,
+): Promise<void> => {
+	const newlyDiscovered = new Set<ServerName>();
+	for (const s of serversAtJoin) {
+		if (s && s !== serverName && !toldServers.has(s)) newlyDiscovered.add(s);
+	}
+	const pokes = await storage.takePartialStateDevicePokes(roomId);
+	if (newlyDiscovered.size === 0) return;
+	for (const { userId, deviceId } of pokes) {
+		await deliverDeviceListUpdateTo(
+			storage,
+			serverName,
+			federationClient,
+			userId,
+			deviceId,
+			newlyDiscovered,
 		);
 	}
 };

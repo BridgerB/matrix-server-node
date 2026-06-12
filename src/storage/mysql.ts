@@ -2443,6 +2443,36 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 		this.partialStateEvents.delete(roomId);
 		return set ? [...set] : [];
 	}
+	private partialStateDevicePokes = new Map<string, Set<string>>();
+
+	async recordPartialStateDevicePoke(
+		roomId: RoomId,
+		userId: UserId,
+		deviceId: DeviceId,
+	): Promise<void> {
+		let set = this.partialStateDevicePokes.get(roomId);
+		if (!set) {
+			set = new Set();
+			this.partialStateDevicePokes.set(roomId, set);
+		}
+		set.add(`${userId}\x1f${deviceId}`);
+	}
+
+	async takePartialStateDevicePokes(
+		roomId: RoomId,
+	): Promise<{ userId: UserId; deviceId: DeviceId }[]> {
+		const set = this.partialStateDevicePokes.get(roomId);
+		this.partialStateDevicePokes.delete(roomId);
+		return set
+			? [...set].map((s) => {
+					const sep = s.indexOf("\x1f");
+					return {
+						userId: s.slice(0, sep) as UserId,
+						deviceId: s.slice(sep + 1) as DeviceId,
+					};
+				})
+			: [];
+	}
 
 	async deleteEvent(eventId: EventId): Promise<void> {
 		await this.pool.query("DELETE FROM events WHERE event_id = ?", [eventId]);

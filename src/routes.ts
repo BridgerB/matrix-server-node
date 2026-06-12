@@ -1613,6 +1613,10 @@ export const registerRoutes = (
 	// The sqlite backend persists the flag; in-memory backends start empty.
 	// Fire-and-forget once all routes are wired up.
 	if (federationClient) {
-		void resumePartialStateResyncs(storage, federationClient);
+		void resumePartialStateResyncs(
+			storage,
+			serverName as ServerName,
+			federationClient,
+		);
 	}
 };

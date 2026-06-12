@@ -599,6 +599,20 @@ export interface Storage {
 	/** Return and clear the events recorded by {@link recordPartialStateEvent}. */
 	takePartialStateEvents(roomId: RoomId): Promise<EventId[]>;
 	/**
+	 * Record that a local user's device list changed while `roomId` was
+	 * partial-state. At resync the change is re-sent to servers we only then
+	 * learn are in the room (synapse device_lists_outbound_pokes).
+	 */
+	recordPartialStateDevicePoke(
+		roomId: RoomId,
+		userId: UserId,
+		deviceId: DeviceId,
+	): Promise<void>;
+	/** Return and clear the pokes recorded by {@link recordPartialStateDevicePoke}. */
+	takePartialStateDevicePokes(
+		roomId: RoomId,
+	): Promise<{ userId: UserId; deviceId: DeviceId }[]>;
+	/**
 	 * Permanently remove an event — used to reject an event that was accepted
 	 * under partial state but fails re-auth once full state is known.
 	 */

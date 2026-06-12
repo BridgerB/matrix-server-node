@@ -25,6 +25,7 @@ import {
 import type { FederationClient } from "../federation/client.ts";
 import { fanoutEdu, fanoutEvent } from "../federation/outbound.ts";
 import { getInviteRuleForTarget } from "../invite-filter.ts";
+import { resyncOutgoingDeviceListPokes } from "./e2ee.ts";
 
 import type { Handler } from "../router.ts";
 import type { SigningKey } from "../signing.ts";
@@ -1370,6 +1371,7 @@ const performFederationJoin = async (
 		await storage.markRoomPartialState(roomId, resyncServers, resyncTarget);
 		void resyncPartialStateRoom(
 			storage,
+			serverName as ServerName,
 			federationClient,
 			roomId,
 			resyncTarget,
@@ -1404,6 +1406,7 @@ const performFederationJoin = async (
  */
 const resyncPartialStateRoom = async (
 	storage: Storage,
+	serverName: ServerName,
 	federationClient: FederationClient,
 	roomId: RoomId,
 	stateAtEventId: EventId,
@@ -1458,6 +1461,9 @@ const resyncPartialStateRoom = async (
 			}
 			const current = await storage.getRoom(roomId);
 			const revealedMembers: UserId[] = [];
+			// The resident's authoritative state at the join, keyed by type+state_key
+			// — used below to revert a rejected state event to its proper value.
+			const residentState = new Map<string, { ev: PDU; id: EventId }>();
 			for (const raw of stateEvents) {
 				const ev =
 					raw.room_id || roomVersion === "12"
@@ -1470,15 +1476,16 @@ const resyncPartialStateRoom = async (
 				} catch {
 					continue;
 				}
-				// Fill in state we don't already hold (the omitted members). We skip
-				// re-setting state we already hold as the SAME event (create/power-
-				// levels/our own membership) — re-storing it at a fresh stream
-				// position would pollute the timeline. But if we hold a DIFFERENT
-				// event for this key — a value we guessed wrong under partial state
-				// (e.g. a membership learned from an event's auth chain that the
-				// resident has since superseded) — overwrite it with the resident's
-				// authoritative one.
 				const key = `${ev.type}\x1f${ev.state_key ?? ""}`;
+				residentState.set(key, { ev, id });
+				// Fill in state we don't already hold (the omitted members). Skip
+				// re-setting state we already hold as the SAME event (create/power-
+				// levels/our own membership). When we hold a DIFFERENT event for this
+				// key, overwrite ONLY a stale/learned guess the resident has
+				// superseded — i.e. the resident's value is newer (>= depth). A value
+				// we received LIVE during the partial join that is NEWER than the
+				// resident's target-time snapshot (e.g. a member who LEFT after our
+				// join) must be kept, or we would resurrect them.
 				const existing = current?.state_events.get(key);
 				if (existing) {
 					let existingId: EventId | undefined;
@@ -1488,6 +1495,7 @@ const resyncPartialStateRoom = async (
 						/* fall through to overwrite */
 					}
 					if (existingId === id) continue;
+					if (existing.depth > ev.depth) continue;
 				}
 				// Store as HISTORICAL state: it joins current state but is kept out of
 				// the forward timeline (pre-existing state we just learned, not new
@@ -1531,18 +1539,122 @@ const resyncPartialStateRoom = async (
 			// state and /sync. Genuinely-valid events still pass and are untouched.
 			// Mirrors synapse update_state_for_partial_state_event.
 			// (State_accepted/rejected_incorrectly, Rejected_events_remain_rejected.)
-			const reconciled = await storage.getRoom(roomId);
-			if (reconciled) {
-				for (const evId of await storage.takePartialStateEvents(roomId)) {
-					const entry = await storage.getEvent(evId);
-					if (!entry) continue;
-					try {
-						checkEventAuth(entry.event, evId, reconciled);
-					} catch {
-						await storage.deleteEvent(evId);
+			// Process newest-first (descending depth) and re-read the room before
+			// each check, so a rejection + revert (e.g. a bad kick that reverts the
+			// target's membership) is reflected when we then re-auth the EARLIER
+			// events that depended on the reverted state (e.g. a state event the
+			// target legitimately sent before being wrongly kicked).
+			const psEntries: { id: EventId; event: PDU }[] = [];
+			for (const evId of await storage.takePartialStateEvents(roomId)) {
+				const e = await storage.getEvent(evId);
+				if (e) psEntries.push({ id: evId, event: e.event });
+			}
+			// Index the partial-state events by state key so a rejected state event
+			// can fall back to the next-best value for its key.
+			const psByKey = new Map<string, { id: EventId; event: PDU }[]>();
+			for (const e of psEntries) {
+				if (e.event.state_key === undefined) continue;
+				const k = `${e.event.type}\x1f${e.event.state_key}`;
+				const arr = psByKey.get(k);
+				if (arr) arr.push(e);
+				else psByKey.set(k, [e]);
+			}
+			const rejectedIds = new Set<EventId>();
+			psEntries.sort((a, b) => b.event.depth - a.event.depth);
+			for (const { id: evId, event } of psEntries) {
+				// Skip a self-membership transition (sender == state_key). Re-authing
+				// it against the final state is circular — the event sets the sender's
+				// own membership, so e.g. a member's own leave would look invalid
+				// ("already left") — and such events are self-authorising. The events
+				// these checks target are always third-party (a kick, or a state event
+				// from a user who had actually departed).
+				if (
+					event.type === "m.room.member" &&
+					event.sender === event.state_key
+				) {
+					continue;
+				}
+				const reconciled = await storage.getRoom(roomId);
+				if (!reconciled) break;
+				try {
+					checkEventAuth(event, evId, reconciled);
+				} catch {
+					rejectedIds.add(evId);
+					await storage.deleteEvent(evId);
+					// A rejected STATE event's key must fall back to its prior valid
+					// value: the highest-depth OTHER partial-state event we still hold
+					// for that key (e.g. a bad kick rejected → the user reverts to the
+					// join they sent us moments earlier), else the resident's value.
+					if (event.state_key !== undefined) {
+						const key = `${event.type}\x1f${event.state_key}`;
+						const prior = (psByKey.get(key) ?? [])
+							.filter(
+								(c) =>
+									c.id !== evId &&
+									!rejectedIds.has(c.id) &&
+									c.event.depth < event.depth,
+							)
+							.sort((a, b) => b.event.depth - a.event.depth)[0];
+						if (prior) {
+							await storage.setStateEventHistorical(
+								roomId,
+								prior.event,
+								prior.id,
+							);
+						} else {
+							const resident = residentState.get(key);
+							if (resident) {
+								await storage.setStateEventHistorical(
+									roomId,
+									resident.ev,
+									resident.id,
+								);
+							}
+						}
 					}
 				}
 			}
+
+			// Outbound device-list reconciliation: re-send any local device-list
+			// changes we made while partial-state to servers that should have had
+			// them but didn't because we didn't know they were in the room. The
+			// candidate set is every server that was joined at our join OR is joined
+			// NOW (after reconciliation) — the latter covers a server whose user
+			// joined after our join and was then wrongly kicked during the partial
+			// join — minus the servers the resident actually named.
+			const serversAtJoin = new Set<ServerName>();
+			const addMemberServer = (sk: string | undefined): void => {
+				if (!sk) return;
+				const srv = sk.split(":").slice(1).join(":");
+				if (srv) serversAtJoin.add(srv as ServerName);
+			};
+			for (const ev of stateEvents) {
+				if (
+					ev.type === "m.room.member" &&
+					(ev.content as { membership?: string }).membership === "join"
+				) {
+					addMemberServer(ev.state_key);
+				}
+			}
+			const reconciledRoom = await storage.getRoom(roomId);
+			if (reconciledRoom) {
+				for (const [k, ev] of reconciledRoom.state_events) {
+					if (
+						k.startsWith("m.room.member\x1f") &&
+						(ev.content as { membership?: string }).membership === "join"
+					) {
+						addMemberServer(ev.state_key);
+					}
+				}
+			}
+			await resyncOutgoingDeviceListPokes(
+				storage,
+				serverName,
+				federationClient,
+				roomId,
+				serversAtJoin,
+				new Set(servers),
+			);
 
 			// 4. Resync complete — clear the flag (wakes /members and /sync waiters).
 			await storage.clearRoomPartialState(roomId);
@@ -1563,6 +1675,7 @@ const resyncPartialStateRoom = async (
  */
 export const resumePartialStateResyncs = async (
 	storage: Storage,
+	serverName: ServerName,
 	federationClient: FederationClient,
 ): Promise<void> => {
 	const partials = await storage.getAllPartialStateRooms();
@@ -1571,6 +1684,7 @@ export const resumePartialStateResyncs = async (
 		if (!room) continue;
 		void resyncPartialStateRoom(
 			storage,
+			serverName,
 			federationClient,
 			roomId,
 			joinEventId,
