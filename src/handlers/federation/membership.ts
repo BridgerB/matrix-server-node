@@ -567,8 +567,9 @@ export const putSendJoin =
 		// charlie (hs3) joins the restricted room via send_join to hs1, and bob
 		// (hs2) — already resident — must then see charlie's join over federation
 		// (`bob.MustSyncUntil(SyncJoinedTo(charlie))`). We fan out the fully
-		// co-signed join event; fanoutEvent excludes our own server, and the
-		// joining origin server (which already holds the event) simply dedups it.
+		// co-signed join event; fanoutEvent excludes our own server AND the joining
+		// origin server, which already holds the event (it just sent it to us) and
+		// would otherwise receive its own user's join back as an unexpected PDU.
 		await fanoutEvent(
 			storage,
 			serverName,
@@ -577,6 +578,7 @@ export const putSendJoin =
 			roomId,
 			coSigned,
 			eventId,
+			[origin as ServerName],
 		);
 
 		const responseBody = {

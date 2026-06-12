@@ -1341,11 +1341,25 @@ const performFederationJoin = async (
 	// resync already covers it — do not start a second one (which would issue a
 	// duplicate /state_ids the resident no longer expects).
 	if (sendJoinBody.members_omitted && !(await storage.getRoomPartialState(roomId))) {
+		// Servers to try for the resync, in order: the server we joined THROUGH
+		// (synapse's `joined_via` — it gave us the partial state and is the
+		// authoritative source for the state at our join), then the others it named
+		// in servers_in_room, then any we can derive from the critical state we DO
+		// hold (e.g. the create / power-levels senders). Trying the join-through
+		// server first also gives the other residents time to learn we joined — so
+		// they will not refuse our /state_ids — before we fall back to them, and is
+		// what lets us recover when the join-through server serves garbage state
+		// (PartialStateJoinSyncsUsingOtherHomeservers).
+		const stateSenderServers = (sendJoinBody.state ?? [])
+			.map((e) => (e.sender ? e.sender.split(":").slice(1).join(":") : ""))
+			.filter((s): s is string => !!s);
 		const resyncServers = [
 			...new Set(
-				[...(sendJoinBody.servers_in_room ?? []), remoteServer].filter(
-					(s): s is string => !!s && s !== serverName,
-				),
+				[
+					remoteServer,
+					...(sendJoinBody.servers_in_room ?? []),
+					...stateSenderServers,
+				].filter((s): s is string => !!s && s !== serverName),
 			),
 		] as ServerName[];
 		// The full state we need is the state the join was built on — i.e. the
@@ -1406,6 +1420,15 @@ const resyncPartialStateRoom = async (
 				`/_matrix/federation/v1/state_ids/${encodeURIComponent(roomId)}?event_id=${encodeURIComponent(stateAtEventId)}`,
 			);
 			if (idsResp.status !== 200) continue;
+			// A valid /state_ids response lists the state event IDs in `pdu_ids`.
+			// An empty/garbage response (e.g. `{}`) means this server cannot serve
+			// the state — fall back to the next server WITHOUT issuing /state to it
+			// (which it would not expect). PartialStateJoinSyncsUsingOtherHomeservers.
+			const idsBody = idsResp.body as {
+				pdu_ids?: string[];
+				auth_chain_ids?: string[];
+			};
+			if (!idsBody.pdu_ids || idsBody.pdu_ids.length === 0) continue;
 
 			// 2. /state — the full state event PDUs at the join.
 			const stateResp = await federationClient.request(

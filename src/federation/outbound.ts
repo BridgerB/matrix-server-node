@@ -361,6 +361,7 @@ export const fanoutEvent = async (
 	roomId: RoomId,
 	event: PDU,
 	eventId: string,
+	exclude?: ServerName[],
 ): Promise<void> => {
 	let servers: ServerName[];
 	try {
@@ -373,7 +374,8 @@ export const fanoutEvent = async (
 		return;
 	}
 
-	const destinations = servers.filter((s) => s && s !== serverName);
+	const excludeSet = new Set([serverName, ...(exclude ?? [])]);
+	const destinations = servers.filter((s) => s && !excludeSet.has(s));
 	if (destinations.length === 0) return;
 
 	for (const destination of destinations) {
