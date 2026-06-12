@@ -1940,6 +1940,49 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		}));
 	}
 
+	private partialStateEvents = new Map<string, Set<EventId>>();
+
+	async recordPartialStateEvent(
+		roomId: RoomId,
+		eventId: EventId,
+	): Promise<void> {
+		let set = this.partialStateEvents.get(roomId);
+		if (!set) {
+			set = new Set();
+			this.partialStateEvents.set(roomId, set);
+		}
+		set.add(eventId);
+	}
+
+	async takePartialStateEvents(roomId: RoomId): Promise<EventId[]> {
+		const set = this.partialStateEvents.get(roomId);
+		this.partialStateEvents.delete(roomId);
+		return set ? [...set] : [];
+	}
+
+	async deleteEvent(eventId: EventId): Promise<void> {
+		const ev = this.events.get(eventId);
+		this.events.delete(eventId);
+		if (!ev) return;
+		const tl = this.roomTimeline.get(ev.room_id as RoomId);
+		if (tl) {
+			this.roomTimeline.set(
+				ev.room_id as RoomId,
+				tl.filter((e) => e.eventId !== eventId),
+			);
+		}
+		if (ev.state_key !== undefined) {
+			const room = this.rooms.get(ev.room_id as RoomId);
+			if (room) {
+				const key = `${ev.type}\x1f${ev.state_key}`;
+				const cur = room.state_events.get(key);
+				if (cur && computeEventId(cur, room.room_version) === eventId) {
+					room.state_events.delete(key);
+				}
+			}
+		}
+	}
+
 	async waitForPartialStateClear(
 		roomId: RoomId,
 		timeoutMs: number,

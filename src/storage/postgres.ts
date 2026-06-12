@@ -2310,6 +2310,33 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		}));
 	}
 
+	private partialStateEvents = new Map<string, Set<EventId>>();
+
+	async recordPartialStateEvent(
+		roomId: RoomId,
+		eventId: EventId,
+	): Promise<void> {
+		let set = this.partialStateEvents.get(roomId);
+		if (!set) {
+			set = new Set();
+			this.partialStateEvents.set(roomId, set);
+		}
+		set.add(eventId);
+	}
+
+	async takePartialStateEvents(roomId: RoomId): Promise<EventId[]> {
+		const set = this.partialStateEvents.get(roomId);
+		this.partialStateEvents.delete(roomId);
+		return set ? [...set] : [];
+	}
+
+	async deleteEvent(eventId: EventId): Promise<void> {
+		await this.pool.query("DELETE FROM events WHERE event_id = $1", [eventId]);
+		await this.pool.query("DELETE FROM state_events WHERE event_id = $1", [
+			eventId,
+		]);
+	}
+
 	async waitForPartialStateClear(
 		roomId: RoomId,
 		timeoutMs: number,

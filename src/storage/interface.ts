@@ -88,9 +88,16 @@ export interface Storage {
 	 * its stream position. Used to persist redactions and other in-place edits.
 	 */
 	updateEvent(eventId: EventId, event: PDU): Promise<void>;
-	getEvent(
-		eventId: EventId,
-	): Promise<{ event: PDU; eventId: EventId } | undefined>;
+	getEvent(eventId: EventId): Promise<
+		| {
+				event: PDU;
+				eventId: EventId;
+				/** True if the event was rejected (kept for the DAG, hidden from
+				 * state/sync, served as 404 by /event). */
+				rejected?: boolean;
+		  }
+		| undefined
+	>;
 	getEventsByRoom(
 		roomId: RoomId,
 		limit: number,
@@ -583,6 +590,19 @@ export interface Storage {
 	>;
 	/** Resolve when `roomId` is no longer partial-state, or after `timeoutMs`. */
 	waitForPartialStateClear(roomId: RoomId, timeoutMs: number): Promise<void>;
+	/**
+	 * Record an event accepted while the room was partial-state. At resync these
+	 * are re-authed against the now-complete state; any that no longer pass are
+	 * rejected. Mirrors synapse's `partial_state_events`.
+	 */
+	recordPartialStateEvent(roomId: RoomId, eventId: EventId): Promise<void>;
+	/** Return and clear the events recorded by {@link recordPartialStateEvent}. */
+	takePartialStateEvents(roomId: RoomId): Promise<EventId[]>;
+	/**
+	 * Permanently remove an event — used to reject an event that was accepted
+	 * under partial state but fails re-auth once full state is known.
+	 */
+	deleteEvent(eventId: EventId): Promise<void>;
 	/**
 	 * The stream position at which `roomId`'s partial-state resync most recently
 	 * completed (cleared), or undefined if it never did. Used by incremental

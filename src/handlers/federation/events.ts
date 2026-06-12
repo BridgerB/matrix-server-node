@@ -58,7 +58,10 @@ async function stateAtEvent(
 		const entry = await storage.getEvent(id);
 		if (!entry) continue;
 		const cur = entry.event;
-		if (cur.state_key !== undefined) {
+		// A rejected event stays in the DAG (we still follow its prev_events) but
+		// its state must not be folded in — it was rejected precisely because it
+		// should not contribute to room state.
+		if (cur.state_key !== undefined && !entry.rejected) {
 			const key = `${cur.type}\x1f${cur.state_key}`;
 			const existing = latestByKey.get(key);
 			if (!existing || cur.depth > existing.depth) {
@@ -130,7 +133,16 @@ async function resolveStateMap(
 		// previous member's own join — excluding it would hide that member from
 		// the resyncing server, so it would never learn that server is in the
 		// room (breaking later fan-out, e.g. leaves).
-		return stateAtEvent(storage, entry.event, true);
+		const walked = await stateAtEvent(storage, entry.event, true);
+		// A partial-state resync imports the omitted members as historical state
+		// that lives OUTSIDE the timeline DAG, so a pure prev_events walk misses
+		// them. Supplement the walk with current room state for any state key it
+		// did not reach. This only adds keys absent from the walk — for a normal
+		// (non-resynced) room the walk is already complete, so this is a no-op.
+		for (const [key, ev] of room.state_events) {
+			if (!walked.has(key)) walked.set(key, ev);
+		}
+		return walked;
 	}
 	// Event unknown locally (or in another room): best-effort fall back to the
 	// storage lookup, then the current room state.

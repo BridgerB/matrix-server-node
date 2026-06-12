@@ -1031,6 +1031,13 @@ const processPdu = async (
 		}
 	}
 
+	// Track events accepted while the room is partial-state so we can re-auth them
+	// against the complete state once the resync finishes, rejecting any that no
+	// longer pass (synapse partial_state_events).
+	if (await storage.getRoomPartialState(pdu.room_id)) {
+		await storage.recordPartialStateEvent(pdu.room_id, eventId);
+	}
+
 	if (pdu.state_key !== undefined) {
 		await storage.setStateEvent(pdu.room_id, pdu, eventId);
 	} else {

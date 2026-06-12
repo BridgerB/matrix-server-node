@@ -128,7 +128,8 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				event_id TEXT PRIMARY KEY,
 				room_id TEXT NOT NULL,
 				stream_pos INTEGER NOT NULL,
-				event_json TEXT NOT NULL
+				event_json TEXT NOT NULL,
+				rejected INTEGER NOT NULL DEFAULT 0
 			);
 			CREATE INDEX IF NOT EXISTS idx_events_room ON events(room_id);
 			CREATE INDEX IF NOT EXISTS idx_events_stream ON events(room_id, stream_pos);
@@ -343,6 +344,11 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				servers TEXT NOT NULL,
 				join_event_id TEXT NOT NULL
 			);
+			CREATE TABLE IF NOT EXISTS partial_state_events (
+				room_id TEXT NOT NULL,
+				event_id TEXT NOT NULL,
+				PRIMARY KEY (room_id, event_id)
+			);
 		`);
 
 		const maxPos = this.db
@@ -367,7 +373,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				"INSERT OR REPLACE INTO events (event_id, room_id, stream_pos, event_json) VALUES (?, ?, ?, ?)",
 			),
 			getEvent: this.db.prepare(
-				"SELECT event_id, event_json FROM events WHERE event_id = ?",
+				"SELECT event_id, event_json, rejected FROM events WHERE event_id = ?",
 			),
 			insertTimelineEntry: this.db.prepare(
 				"INSERT OR REPLACE INTO events (event_id, room_id, stream_pos, event_json) VALUES (?, ?, ?, ?)",
@@ -654,14 +660,17 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 
 	async getEvent(
 		eventId: EventId,
-	): Promise<{ event: PDU; eventId: EventId } | undefined> {
+	): Promise<
+		{ event: PDU; eventId: EventId; rejected?: boolean } | undefined
+	> {
 		const row = this.stmts.getEvent.get(eventId) as
-			| { event_id: string; event_json: string }
+			| { event_id: string; event_json: string; rejected?: number }
 			| undefined;
 		if (!row) return undefined;
 		return {
 			event: JSON.parse(row.event_json),
 			eventId: row.event_id as EventId,
+			rejected: !!row.rejected,
 		};
 	}
 
@@ -680,13 +689,13 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		if (direction === "f") {
 			rows = this.db
 				.prepare(
-					"SELECT event_id, event_json, stream_pos FROM events WHERE room_id = ? AND stream_pos > ? ORDER BY stream_pos ASC LIMIT ?",
+					"SELECT event_id, event_json, stream_pos FROM events WHERE room_id = ? AND rejected = 0 AND stream_pos > ? ORDER BY stream_pos ASC LIMIT ?",
 				)
 				.all(roomId, fromPos, limit) as typeof rows;
 		} else {
 			rows = this.db
 				.prepare(
-					"SELECT event_id, event_json, stream_pos FROM events WHERE room_id = ? AND stream_pos < ? ORDER BY stream_pos DESC LIMIT ?",
+					"SELECT event_id, event_json, stream_pos FROM events WHERE room_id = ? AND rejected = 0 AND stream_pos < ? ORDER BY stream_pos DESC LIMIT ?",
 				)
 				.all(roomId, fromPos, limit) as typeof rows;
 		}
@@ -836,7 +845,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 	}> {
 		const countRow = this.db
 			.prepare(
-				"SELECT COUNT(*) as cnt FROM events WHERE room_id = ? AND stream_pos > ?",
+				"SELECT COUNT(*) as cnt FROM events WHERE room_id = ? AND rejected = 0 AND stream_pos > ?",
 			)
 			.get(roomId, since) as { cnt: number };
 		const total = countRow.cnt;
@@ -847,14 +856,14 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		if (limited) {
 			rows = this.db
 				.prepare(
-					"SELECT event_id, event_json, stream_pos FROM events WHERE room_id = ? AND stream_pos > ? ORDER BY stream_pos DESC LIMIT ?",
+					"SELECT event_id, event_json, stream_pos FROM events WHERE room_id = ? AND rejected = 0 AND stream_pos > ? ORDER BY stream_pos DESC LIMIT ?",
 				)
 				.all(roomId, since, limit) as typeof rows;
 			rows.reverse();
 		} else {
 			rows = this.db
 				.prepare(
-					"SELECT event_id, event_json, stream_pos FROM events WHERE room_id = ? AND stream_pos > ? ORDER BY stream_pos ASC",
+					"SELECT event_id, event_json, stream_pos FROM events WHERE room_id = ? AND rejected = 0 AND stream_pos > ? ORDER BY stream_pos ASC",
 				)
 				.all(roomId, since) as typeof rows;
 		}
@@ -2521,6 +2530,43 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			servers: JSON.parse(r.servers) as ServerName[],
 			joinEventId: r.join_event_id as EventId,
 		}));
+	}
+
+	async recordPartialStateEvent(
+		roomId: RoomId,
+		eventId: EventId,
+	): Promise<void> {
+		this.db
+			.prepare(
+				"INSERT OR IGNORE INTO partial_state_events (room_id, event_id) VALUES (?, ?)",
+			)
+			.run(roomId, eventId);
+	}
+
+	async takePartialStateEvents(roomId: RoomId): Promise<EventId[]> {
+		const rows = this.db
+			.prepare("SELECT event_id FROM partial_state_events WHERE room_id = ?")
+			.all(roomId) as { event_id: string }[];
+		this.db
+			.prepare("DELETE FROM partial_state_events WHERE room_id = ?")
+			.run(roomId);
+		return rows.map((r) => r.event_id as EventId);
+	}
+
+	async deleteEvent(eventId: EventId): Promise<void> {
+		const row = this.db
+			.prepare("SELECT room_id FROM events WHERE event_id = ?")
+			.get(eventId) as { room_id: string } | undefined;
+		// Mark the event rejected rather than deleting it: it stays in the events
+		// table so the DAG remains walkable (other events list it in prev_events),
+		// but it is dropped from current state, hidden from /sync and timeline
+		// reads, served as 404 by /event, and ignored when computing state at an
+		// event. Mirrors synapse keeping rejected events with a rejection_reason.
+		this.db
+			.prepare("UPDATE events SET rejected = 1 WHERE event_id = ?")
+			.run(eventId);
+		this.db.prepare("DELETE FROM state_events WHERE event_id = ?").run(eventId);
+		if (row) this.roomCache.delete(row.room_id as RoomId);
 	}
 
 	async waitForPartialStateClear(

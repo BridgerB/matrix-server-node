@@ -1470,12 +1470,25 @@ const resyncPartialStateRoom = async (
 				} catch {
 					continue;
 				}
-				// Only fill in state we don't already hold (the omitted members).
-				// Re-setting state we already have (create/power-levels/our own
-				// membership) would re-store those events at fresh stream positions
-				// and pollute the timeline, breaking other servers' joins/syncs.
+				// Fill in state we don't already hold (the omitted members). We skip
+				// re-setting state we already hold as the SAME event (create/power-
+				// levels/our own membership) — re-storing it at a fresh stream
+				// position would pollute the timeline. But if we hold a DIFFERENT
+				// event for this key — a value we guessed wrong under partial state
+				// (e.g. a membership learned from an event's auth chain that the
+				// resident has since superseded) — overwrite it with the resident's
+				// authoritative one.
 				const key = `${ev.type}\x1f${ev.state_key ?? ""}`;
-				if (current?.state_events.get(key)) continue;
+				const existing = current?.state_events.get(key);
+				if (existing) {
+					let existingId: EventId | undefined;
+					try {
+						existingId = computeEventId(existing, roomVersion);
+					} catch {
+						/* fall through to overwrite */
+					}
+					if (existingId === id) continue;
+				}
 				// Store as HISTORICAL state: it joins current state but is kept out of
 				// the forward timeline (pre-existing state we just learned, not new
 				// activity), so it surfaces in /sync's `state` block and /members
@@ -1507,6 +1520,26 @@ const resyncPartialStateRoom = async (
 				for (const member of revealedMembers) {
 					if (everChanged.has(member)) {
 						await storage.recordDeviceKeyChange(member);
+					}
+				}
+			}
+
+			// Re-auth events accepted under partial state against the now-complete
+			// state. An event we accepted because we lacked full state (e.g. a state
+			// event from a user who had actually already left) may no longer pass —
+			// reject it: deleteEvent removes it so /event 404s and it vanishes from
+			// state and /sync. Genuinely-valid events still pass and are untouched.
+			// Mirrors synapse update_state_for_partial_state_event.
+			// (State_accepted/rejected_incorrectly, Rejected_events_remain_rejected.)
+			const reconciled = await storage.getRoom(roomId);
+			if (reconciled) {
+				for (const evId of await storage.takePartialStateEvents(roomId)) {
+					const entry = await storage.getEvent(evId);
+					if (!entry) continue;
+					try {
+						checkEventAuth(entry.event, evId, reconciled);
+					} catch {
+						await storage.deleteEvent(evId);
 					}
 				}
 			}

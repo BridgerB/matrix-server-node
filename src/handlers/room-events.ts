@@ -1302,7 +1302,7 @@ export const getEvent =
 		await requireHistoryVisibleOr404(storage, roomId, eventId, req.userId);
 
 		const entry = await storage.getEvent(eventId);
-		if (!entry || entry.event.room_id !== roomId)
+		if (!entry || entry.event.room_id !== roomId || entry.rejected)
 			throw notFound("Event not found");
 
 		const clientEvent = pduToClientEvent(entry.event, entry.eventId);
@@ -1441,7 +1441,7 @@ export const getContext =
 		await requireHistoryVisibleOr404(storage, roomId, eventId, req.userId);
 
 		const entry = await storage.getEvent(eventId);
-		if (!entry || entry.event.room_id !== roomId)
+		if (!entry || entry.event.room_id !== roomId || entry.rejected)
 			throw notFound("Event not found");
 
 		// Honour limit=0 (the client asks for the bare target + tokens, e.g.
