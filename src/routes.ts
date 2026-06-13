@@ -1281,6 +1281,13 @@ export const registerRoutes = (
 			fedAuth,
 		);
 
+		// Spec endpoint is GET; keep POST registered too for any non-conforming
+		// caller (the handler reads only the path param, never a body).
+		router.get(
+			"/_matrix/federation/v1/user/devices/:userId",
+			postFederationUserDevices(storage),
+			fedAuth,
+		);
 		router.post(
 			"/_matrix/federation/v1/user/devices/:userId",
 			postFederationUserDevices(storage),

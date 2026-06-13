@@ -1250,51 +1250,22 @@ const processEdu = async (
 			const userServer = user_id.split(":").slice(1).join(":");
 			if (userServer !== origin) break;
 
-			if (!deleted && keys) {
-				// Cache the advertised device keys ONLY if we are already tracking
-				// this user — i.e. they share a fully-resolved (non-partial-state)
-				// room with us. During a partial-state join we are not yet sure they
-				// share a room, so caching now would let a later /keys/query be
-				// served from cache when it must instead federate (TestPartialStateJoin
-				// Device_list_tracking). The change is still recorded below.
-				let tracked = false;
-				for (const roomId of await storage.getRoomsForUser(user_id)) {
-					if (!(await storage.getRoomPartialState(roomId))) {
-						tracked = true;
-						break;
-					}
-				}
-				if (tracked) {
-					// Normalise the embedded user_id/device_id to the EDU's
-					// authoritative values, and fold the EDU's top-level
-					// device_display_name into unsigned.device_display_name so a
-					// later /keys/query served from this cache carries it (Synapse
-					// returns it under unsigned; TestFederationKeyUploadQuery).
-					const existingUnsigned = (
-						keys as DeviceKeys & { unsigned?: Record<string, unknown> }
-					).unsigned;
-					await storage.setDeviceKeys(user_id, device_id, {
-						...keys,
-						user_id,
-						device_id,
-						...(device_display_name || existingUnsigned
-							? {
-									unsigned: {
-										...existingUnsigned,
-										...(device_display_name
-											? { device_display_name }
-											: {}),
-									},
-								}
-							: {}),
-					} as DeviceKeys);
-				}
-			}
+			// A device-list update means our cached copy of this user's device
+			// list (if any) is now stale. Rather than trust the keys embedded in
+			// the EDU, evict the cache so the next /keys/query triggers a full
+			// device-list resync via GET /user/devices/{userId} — synapse's
+			// "stale device list" model. This is what makes a tracked user's keys
+			// re-fetched after they rotate them (TestPartialStateJoin
+			// Device_list_tracking), while an unchanged user keeps serving from
+			// cache. The embedded keys / device_display_name are intentionally
+			// unused here; the resync fetches the authoritative list.
+			void keys;
+			void device_display_name;
+			void deleted;
+			await storage.deleteDeviceKeys(user_id);
 
-			// Record the change on the device-key-change stream regardless of
-			// whether keys were embedded, so the user shows up in
-			// `device_lists.changed`. (setDeviceKeys also records a change, so
-			// this primarily covers the deleted / keyless case.)
+			// Record the change on the device-key-change stream so the user shows
+			// up in `device_lists.changed` and local syncers refetch their keys.
 			await storage.recordDeviceKeyChange(user_id);
 			break;
 		}

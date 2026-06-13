@@ -341,6 +341,12 @@ export const postKeysQuery =
 		// remote_queries and fans out one federation request per destination.
 		const localRequest: Record<string, string[]> = {};
 		const remoteByDest = new Map<ServerName, Record<string, string[]>>();
+		// Tracked remote users whose keys we don't yet hold: we fetch their full
+		// device list via GET /user/devices/{userId} (a "device-list resync") and
+		// cache it, rather than an on-demand /user/keys/query. This mirrors synapse,
+		// which tracks a user's devices through /user/devices and serves later
+		// /keys/query from the cache (TestPartialStateJoin Device_list_tracking).
+		const trackedUncached: UserId[] = [];
 		for (const [targetUserId, deviceIds] of Object.entries(
 			body.device_keys,
 		)) {
@@ -348,19 +354,21 @@ export const postKeysQuery =
 			if (!serverName || !federationClient || dest === serverName) {
 				localRequest[targetUserId] = deviceIds;
 			} else if (
-				(await isRemoteUserTracked(
-					storage,
-					targetUserId as UserId,
-					serverName,
-				)) &&
-				Object.keys(await storage.getAllDeviceKeys(targetUserId as UserId))
-					.length > 0
+				await isRemoteUserTracked(storage, targetUserId as UserId, serverName)
 			) {
-				// Tracked and already cached → serve from our cache, no federation
-				// round-trip. The cache is kept fresh by inbound m.device_list_update
-				// EDUs, which re-fetch and update it on change.
-				localRequest[targetUserId] = deviceIds;
+				if (
+					Object.keys(await storage.getAllDeviceKeys(targetUserId as UserId))
+						.length > 0
+				) {
+					// Tracked and already cached → serve from our cache, no federation
+					// round-trip.
+					localRequest[targetUserId] = deviceIds;
+				} else {
+					// Tracked but not yet cached → resync via /user/devices.
+					trackedUncached.push(targetUserId as UserId);
+				}
 			} else {
+				// Not tracked (no shared room) → on-demand /user/keys/query, no cache.
 				const group = remoteByDest.get(dest) ?? {};
 				group[targetUserId] = deviceIds;
 				remoteByDest.set(dest, group);
@@ -394,6 +402,56 @@ export const postKeysQuery =
 		// _query_devices_for_destination records failures and continues).
 		const failures: Record<string, unknown> = {};
 		if (federationClient) {
+			// Resync tracked-but-uncached users' device lists via /user/devices.
+			for (const u of trackedUncached) {
+				const dest = serverOf(u) as ServerName;
+				try {
+					const { body: respBody } = await federationClient.request(
+						dest,
+						"GET",
+						`/_matrix/federation/v1/user/devices/${encodeURIComponent(u)}`,
+					);
+					const resp = (respBody ?? {}) as {
+						devices?: {
+							device_id: DeviceId;
+							device_display_name?: string;
+							keys: DeviceKeys;
+						}[];
+						master_key?: CrossSigningKey;
+						self_signing_key?: CrossSigningKey;
+					};
+					const userDevices: Record<DeviceId, DeviceKeys> = {};
+					for (const d of resp.devices ?? []) {
+						if (!d.keys) continue;
+						// Fold the per-device display name into unsigned, matching what
+						// /keys/query returns (and our federation keys/query responder).
+						const existingUnsigned = (
+							d.keys as DeviceKeys & {
+								unsigned?: Record<string, unknown>;
+							}
+						).unsigned;
+						const keys: DeviceKeys = d.device_display_name
+							? ({
+									...d.keys,
+									unsigned: {
+										...existingUnsigned,
+										device_display_name: d.device_display_name,
+									},
+								} as DeviceKeys)
+							: d.keys;
+						userDevices[d.device_id] = keys;
+						await storage.setDeviceKeys(u, d.device_id, keys);
+					}
+					deviceKeys[u] = userDevices;
+					if (resp.master_key) masterKeys[u] = resp.master_key;
+					if (resp.self_signing_key) selfSigningKeys[u] = resp.self_signing_key;
+				} catch (err) {
+					failures[dest] = {
+						message: err instanceof Error ? err.message : String(err),
+					};
+				}
+			}
+
 			for (const [dest, group] of remoteByDest) {
 				try {
 					const { body: respBody } = await federationClient.request(
