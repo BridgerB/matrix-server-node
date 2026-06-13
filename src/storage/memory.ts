@@ -923,6 +923,13 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		return result;
 	}
 
+	async deleteDeviceKeys(userId: UserId): Promise<void> {
+		const prefix = `${userId}\x1f`;
+		for (const key of this.deviceKeysMap.keys()) {
+			if (key.startsWith(prefix)) this.deviceKeysMap.delete(key);
+		}
+	}
+
 	async addOneTimeKeys(
 		userId: UserId,
 		deviceId: DeviceId,

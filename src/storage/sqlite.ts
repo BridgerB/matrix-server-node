@@ -1393,6 +1393,10 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		return result;
 	}
 
+	async deleteDeviceKeys(userId: UserId): Promise<void> {
+		this.db.prepare("DELETE FROM device_keys WHERE user_id = ?").run(userId);
+	}
+
 	async addOneTimeKeys(
 		userId: UserId,
 		deviceId: DeviceId,

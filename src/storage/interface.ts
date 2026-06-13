@@ -319,6 +319,12 @@ export interface Storage {
 		deviceId: DeviceId,
 	): Promise<DeviceKeys | undefined>;
 	getAllDeviceKeys(userId: UserId): Promise<Record<DeviceId, DeviceKeys>>;
+	/**
+	 * Remove all cached device keys for a user. Used to evict a remote user's
+	 * cached keys when we stop tracking them (they left the last room we shared)
+	 * or when they re-join after a gap, so the next /keys/query re-fetches fresh.
+	 */
+	deleteDeviceKeys(userId: UserId): Promise<void>;
 
 	// E2EE - Device key change stream
 	recordDeviceKeyChange(userId: UserId): Promise<void>;

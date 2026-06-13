@@ -486,6 +486,15 @@ export const putSendJoin =
 		room.depth = Math.max(room.depth, event.depth + 1);
 		room.forward_extremities = [eventId];
 
+		// A remote user (re)joining means we may have missed their device-list
+		// updates while we were not tracking them (no shared room). Evict any
+		// cached keys so the next /keys/query re-fetches fresh ones rather than
+		// serving a stale cache (TestDeviceListUpdates when_remote_user_rejoins).
+		const joiner = event.state_key as UserId;
+		if (joiner.split(":").slice(1).join(":") !== serverName) {
+			await storage.deleteDeviceKeys(joiner);
+		}
+
 		// Ensure every NON-create state event we return carries room_id (so the
 		// receiver can store it). For a v12+ m.room.create event we do the OPPOSITE:
 		// strip any room_id, because MSC4291 makes the room ID the create event's

@@ -276,11 +276,32 @@ const serverOf = (userId: string): string =>
 const isRemoteUserTracked = async (
 	storage: Storage,
 	userId: UserId,
+	serverName?: ServerName,
 ): Promise<boolean> => {
 	const rooms = await storage.getRoomsForUser(userId);
 	for (const roomId of rooms) {
-		// A fully-resolved room → we are certain of its membership.
-		if (!(await storage.getRoomPartialState(roomId))) return true;
+		// A fully-resolved room → we are certain of its membership. But we only
+		// track (and cache keys for) the remote user while they still share that
+		// room with a LOCAL user; once our last local user leaves, we stop
+		// receiving their device-list updates, so any cache would go stale
+		// (TestDeviceListUpdates when_leaving_a_room_with_a_remote_user). When we
+		// have no serverName we cannot tell local from remote — fall back to the
+		// looser "any non-partial shared room" rule.
+		if (!(await storage.getRoomPartialState(roomId))) {
+			if (!serverName) return true;
+			const members = await storage.getMemberEvents(roomId);
+			for (const m of members) {
+				const sk = m.event.state_key;
+				if (!sk) continue;
+				if (
+					(m.event.content as { membership?: string }).membership !==
+					"join"
+				)
+					continue;
+				if (sk.split(":").slice(1).join(":") === serverName) return true;
+			}
+			continue;
+		}
 		// A partial-state room where we nonetheless WITNESSED this user join live
 		// (their join is in the forward timeline, not a resync-filled historical
 		// entry) → we are certain they are here. This is how a member who joins
@@ -327,7 +348,11 @@ export const postKeysQuery =
 			if (!serverName || !federationClient || dest === serverName) {
 				localRequest[targetUserId] = deviceIds;
 			} else if (
-				(await isRemoteUserTracked(storage, targetUserId as UserId)) &&
+				(await isRemoteUserTracked(
+					storage,
+					targetUserId as UserId,
+					serverName,
+				)) &&
 				Object.keys(await storage.getAllDeviceKeys(targetUserId as UserId))
 					.length > 0
 			) {
@@ -393,7 +418,13 @@ export const postKeysQuery =
 							// Cache for subsequent queries once we are tracking the
 							// user (they share a non-partial room with us), so the next
 							// /keys/query is served locally without federating.
-							if (await isRemoteUserTracked(storage, u as UserId)) {
+							if (
+							await isRemoteUserTracked(
+								storage,
+								u as UserId,
+								serverName,
+							)
+						) {
 								for (const [did, k] of Object.entries(keys)) {
 									await storage.setDeviceKeys(
 										u as UserId,

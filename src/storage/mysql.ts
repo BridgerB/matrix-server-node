@@ -1366,6 +1366,10 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 		return result;
 	}
 
+	async deleteDeviceKeys(userId: UserId): Promise<void> {
+		await this.query("DELETE FROM device_keys WHERE user_id = ?", [userId]);
+	}
+
 	async addOneTimeKeys(
 		userId: UserId,
 		deviceId: DeviceId,

@@ -1265,6 +1265,12 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		return result;
 	}
 
+	async deleteDeviceKeys(userId: UserId): Promise<void> {
+		await this.pool.query("DELETE FROM device_keys WHERE user_id = $1", [
+			userId,
+		]);
+	}
+
 	async addOneTimeKeys(
 		userId: UserId,
 		deviceId: DeviceId,
