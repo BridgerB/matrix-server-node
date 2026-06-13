@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createServer as createTlsServer } from "node:https";
 import { cors } from "./middleware/cors.ts";
-import { Router } from "./router.ts";
+import { createRouter } from "./router.ts";
 import { registerRoutes } from "./routes.ts";
 import { generateSigningKey, importSigningKey } from "./signing.ts";
 import type { Storage } from "./storage/interface.ts";
@@ -49,7 +49,7 @@ if (STORAGE_TYPE === "memory") {
 	console.log(`Unknown storage type: ${STORAGE_TYPE}, falling back to SQLite`);
 	storage = createSqliteStorage(DATABASE_PATH);
 }
-const router = new Router();
+const router = createRouter();
 
 router.use(cors);
 registerRoutes(router, storage, SERVER_NAME, signingKey);
