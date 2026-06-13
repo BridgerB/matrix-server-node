@@ -1,0 +1,16 @@
+# Git hooks managed by lefthook (https://lefthook.dev).
+# Installed automatically by `npm install` (the `prepare` script), or run
+# `npx lefthook install` manually.
+#
+# pre-commit: format the staged TypeScript with biome (`npm run format`). The
+# command must succeed for the commit to proceed; any files biome rewrites are
+# re-staged so the committed code is always formatted.
+pre-commit:
+  commands:
+    format:
+      # `*` spans path separators in lefthook's matcher, so this matches every
+      # .ts under src (both src/foo.ts and src/a/b.ts) — unlike `src/**/*.ts`,
+      # whose literal `/` after `**` skips top-level files.
+      glob: "src/*.ts"
+      run: npm run format
+      stage_fixed: true
