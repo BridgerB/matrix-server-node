@@ -624,6 +624,14 @@ export interface Storage {
 	 */
 	deleteEvent(eventId: EventId): Promise<void>;
 	/**
+	 * Clear the `rejected` flag on an event previously rejected via deleteEvent,
+	 * making it visible again (used at partial-state resync to ACCEPT an event
+	 * that was rejected under incomplete state but passes once full state is
+	 * known). Only meaningful on backends that keep rejected events (sqlite); a
+	 * no-op where deleteEvent is destructive. The caller re-adds it to state.
+	 */
+	unrejectEvent(eventId: EventId): Promise<void>;
+	/**
 	 * The stream position at which `roomId`'s partial-state resync most recently
 	 * completed (cleared), or undefined if it never did. Used by incremental
 	 * /sync to surface the newly-known member state when a room un-partial-states.

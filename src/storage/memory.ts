@@ -2020,6 +2020,12 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		}
 	}
 
+	async unrejectEvent(_eventId: EventId): Promise<void> {
+		// In-memory deleteEvent is destructive (no rejected flag is kept), so a
+		// rejected event cannot be restored. No-op; the partial-state resync
+		// re-evaluation path that needs this only runs against sqlite.
+	}
+
 	async waitForPartialStateClear(
 		roomId: RoomId,
 		timeoutMs: number,

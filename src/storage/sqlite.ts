@@ -2604,6 +2604,16 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		if (row) this.roomCache.delete(row.room_id as RoomId);
 	}
 
+	async unrejectEvent(eventId: EventId): Promise<void> {
+		const row = this.db
+			.prepare("SELECT room_id FROM events WHERE event_id = ?")
+			.get(eventId) as { room_id: string } | undefined;
+		this.db
+			.prepare("UPDATE events SET rejected = 0 WHERE event_id = ?")
+			.run(eventId);
+		if (row) this.roomCache.delete(row.room_id as RoomId);
+	}
+
 	async waitForPartialStateClear(
 		roomId: RoomId,
 		timeoutMs: number,

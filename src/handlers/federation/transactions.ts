@@ -1036,6 +1036,8 @@ const processPdu = async (
 	// fall back to current room state (the state as we know it). A failure here is
 	// likewise a rejection (the event stays as a rejected outlier), not a
 	// structural error.
+	const partialState = !!(await storage.getRoomPartialState(pdu.room_id));
+	let rejectedUnderPartial = false;
 	try {
 		checkEventAuth(pdu, eventId, resolvedStateBefore ?? room);
 	} catch (err) {
@@ -1045,18 +1047,37 @@ const processPdu = async (
 		// event from a member we just don't know about. Accept such events
 		// optimistically (same condition as the claimed-auth check above) —
 		// synapse persists them with partial state and reconciles at resync.
-		if (!lenientUnderPartial) {
+		if (lenientUnderPartial) {
+			// accepted optimistically; resync re-auths and may reject it.
+		} else if (partialState) {
+			// The event passed its CLAIMED-auth check (its own auth chain is sound)
+			// but fails against our incomplete/optimistic current state — e.g. the
+			// sender looks gone because of a kick we'll reject at resync. Don't drop
+			// it: persist it flagged rejected and re-evaluate at resync, where it is
+			// un-rejected and added to state if it then passes. (State_rejected_incorrectly.)
+			rejectedUnderPartial = true;
+		} else {
 			throw new RejectedEventError(
 				err instanceof Error ? err.message : "Auth check failed",
 			);
 		}
 	}
 
-	// Track events accepted while the room is partial-state so we can re-auth them
-	// against the complete state once the resync finishes, rejecting any that no
-	// longer pass (synapse partial_state_events).
-	if (await storage.getRoomPartialState(pdu.room_id)) {
+	// Track events processed while the room is partial-state — BOTH optimistically
+	// accepted and rejected-pending-reevaluation — so the resync re-auths each
+	// against the complete state, rejecting accepted ones that no longer pass and
+	// accepting rejected ones that now do (synapse partial_state_events).
+	if (partialState) {
 		await storage.recordPartialStateEvent(pdu.room_id, eventId);
+	}
+
+	if (rejectedUnderPartial) {
+		// Persist into the events table (so the DAG stays walkable and the resync
+		// can find it) but flagged rejected: not in current state, hidden from
+		// /sync + timeline, served as 404 by /event — until resync re-evaluates.
+		await storage.storeEvent(pdu, eventId);
+		await storage.deleteEvent(eventId);
+		return;
 	}
 
 	if (pdu.state_key !== undefined) {

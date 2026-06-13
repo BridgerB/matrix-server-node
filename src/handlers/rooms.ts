@@ -1553,89 +1553,122 @@ const resyncPartialStateRoom = async (
 			// target's membership) is reflected when we then re-auth the EARLIER
 			// events that depended on the reverted state (e.g. a state event the
 			// target legitimately sent before being wrongly kicked).
-			const psEntries: { id: EventId; event: PDU }[] = [];
+			// Re-auth every event we processed under partial state against the
+			// now-complete state and reconcile its accepted/rejected status, mirroring
+			// synapse update_state_for_partial_state_event:
+			//   - an event we ACCEPTED optimistically that no longer passes is rejected
+			//     (deleteEvent → 404 / gone from state & /sync), reverting its state key;
+			//   - an event we REJECTED under incomplete state that now passes is ACCEPTED
+			//     (unrejectEvent) and, if a state event, made current.
+			// We loop to a fixpoint because rejecting one event can revert a membership
+			// that flips an earlier event's validity (e.g. a bad kick is rejected →
+			// the target reverts to joined → a state event they sent becomes valid).
+			type ReEval = { id: EventId; event: PDU; rejected: boolean };
+			const entries: ReEval[] = [];
 			for (const evId of await storage.takePartialStateEvents(roomId)) {
 				const e = await storage.getEvent(evId);
-				if (e) psEntries.push({ id: evId, event: e.event });
+				if (e) {
+					entries.push({
+						id: evId,
+						event: e.event,
+						rejected: e.rejected ?? false,
+					});
+				}
 			}
-			// Index the partial-state events by state key so a rejected state event
-			// can fall back to the next-best value for its key.
-			const psByKey = new Map<string, { id: EventId; event: PDU }[]>();
-			for (const e of psEntries) {
+			// Index by state key (objects shared, so .rejected stays live).
+			const psByKey = new Map<string, ReEval[]>();
+			for (const e of entries) {
 				if (e.event.state_key === undefined) continue;
 				const k = `${e.event.type}\x1f${e.event.state_key}`;
 				const arr = psByKey.get(k);
 				if (arr) arr.push(e);
 				else psByKey.set(k, [e]);
 			}
-			const rejectedIds = new Set<EventId>();
-			psEntries.sort((a, b) => b.event.depth - a.event.depth);
-			for (const { id: evId, event } of psEntries) {
-				// Skip a self-membership transition (sender == state_key). Re-authing
-				// it against the final state is circular — the event sets the sender's
-				// own membership, so e.g. a member's own leave would look invalid
-				// ("already left") — and such events are self-authorising. The events
-				// these checks target are always third-party (a kick, or a state event
-				// from a user who had actually departed).
-				if (
-					event.type === "m.room.member" &&
-					event.sender === event.state_key
-				) {
-					continue;
-				}
-				const reconciled = await storage.getRoom(roomId);
-				if (!reconciled) break;
-				try {
-					checkEventAuth(event, evId, reconciled);
-				} catch {
-					rejectedIds.add(evId);
-					// Only repair the key if this rejected event is still its LIVE
-					// value. A newer event (e.g. the user's own later leave) may have
-					// already superseded it; rejecting this one must not resurrect a
-					// stale value over that newer one.
-					let wasCurrent = true;
-					if (event.state_key !== undefined) {
-						const curKey = `${event.type}\x1f${event.state_key}`;
-						const cur = reconciled.state_events.get(curKey);
-						if (cur) {
-							try {
-								wasCurrent = computeEventId(cur, roomVersion) === evId;
-							} catch {
-								/* unparseable current event: treat as live to be safe */
-							}
-						}
+			entries.sort((a, b) => b.event.depth - a.event.depth);
+			const isSelfMembership = (ev: PDU): boolean =>
+				ev.type === "m.room.member" && ev.sender === ev.state_key;
+			let changed = true;
+			let pass = 0;
+			while (changed && pass < 10) {
+				changed = false;
+				pass++;
+				for (const entry of entries) {
+					const { id: evId, event } = entry;
+					// A self-membership transition (sender == state_key) is
+					// self-authorising; re-authing it against the final state is circular
+					// (a member's own leave would look invalid), so keep its status.
+					if (isSelfMembership(event)) continue;
+					const reconciled = await storage.getRoom(roomId);
+					if (!reconciled) break;
+					let passes = true;
+					try {
+						checkEventAuth(event, evId, reconciled);
+					} catch {
+						passes = false;
 					}
-					await storage.deleteEvent(evId);
-					// A rejected STATE event's key must fall back to its prior valid
-					// value: the highest-depth OTHER partial-state event we still hold
-					// for that key (e.g. a bad kick rejected → the user reverts to the
-					// join they sent us moments earlier), else the resident's value.
-					if (event.state_key !== undefined && wasCurrent) {
-						const key = `${event.type}\x1f${event.state_key}`;
-						const prior = (psByKey.get(key) ?? [])
-							.filter(
+					if (passes && entry.rejected) {
+						// ACCEPT a previously-rejected event.
+						await storage.unrejectEvent(evId);
+						entry.rejected = false;
+						if (event.state_key !== undefined) {
+							const key = `${event.type}\x1f${event.state_key}`;
+							const supersededByNewer = (psByKey.get(key) ?? []).some(
 								(c) =>
 									c.id !== evId &&
-									!rejectedIds.has(c.id) &&
-									c.event.depth < event.depth,
-							)
-							.sort((a, b) => b.event.depth - a.event.depth)[0];
-						if (prior) {
-							await storage.setStateEventHistorical(
-								roomId,
-								prior.event,
-								prior.id,
+									!c.rejected &&
+									c.event.depth > event.depth,
 							);
-						} else {
-							const resident = residentState.get(key);
-							if (resident) {
-								await storage.setStateEventHistorical(
-									roomId,
-									resident.ev,
-									resident.id,
-								);
+							if (!supersededByNewer) {
+								await storage.setStateEventHistorical(roomId, event, evId);
 							}
 						}
+						changed = true;
+					} else if (!passes && !entry.rejected) {
+						// REJECT a previously-accepted event.
+						entry.rejected = true;
+						// Only repair the key if this event is still its LIVE value; a
+						// newer event may have superseded it (don't resurrect a stale value).
+						let wasCurrent = true;
+						if (event.state_key !== undefined) {
+							const curKey = `${event.type}\x1f${event.state_key}`;
+							const cur = reconciled.state_events.get(curKey);
+							if (cur) {
+								try {
+									wasCurrent = computeEventId(cur, roomVersion) === evId;
+								} catch {
+									/* unparseable current event: treat as live to be safe */
+								}
+							}
+						}
+						await storage.deleteEvent(evId);
+						if (event.state_key !== undefined && wasCurrent) {
+							const key = `${event.type}\x1f${event.state_key}`;
+							const prior = (psByKey.get(key) ?? [])
+								.filter(
+									(c) =>
+										c.id !== evId &&
+										!c.rejected &&
+										c.event.depth < event.depth,
+								)
+								.sort((a, b) => b.event.depth - a.event.depth)[0];
+							if (prior) {
+								await storage.setStateEventHistorical(
+									roomId,
+									prior.event,
+									prior.id,
+								);
+							} else {
+								const resident = residentState.get(key);
+								if (resident) {
+									await storage.setStateEventHistorical(
+										roomId,
+										resident.ev,
+										resident.id,
+									);
+								}
+							}
+						}
+						changed = true;
 					}
 				}
 			}

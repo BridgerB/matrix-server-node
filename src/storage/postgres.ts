@@ -2373,6 +2373,11 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		]);
 	}
 
+	async unrejectEvent(_eventId: EventId): Promise<void> {
+		// deleteEvent is destructive here (no rejected flag), so there is nothing
+		// to restore. No-op; partial-state resync re-evaluation targets sqlite.
+	}
+
 	async waitForPartialStateClear(
 		roomId: RoomId,
 		timeoutMs: number,
