@@ -1221,11 +1221,17 @@ const buildIncrementalSync = async (
 				storageGap = gapInWindow;
 			}
 
-			// MSC3706: keep the resynced member events out of the timeline (they are
+			// MSC3706: keep the RESYNCED member events out of the timeline (they are
 			// state we just learned, not live activity) so they appear in `state`.
+			// Only member events at or before the un-partial-state point are resync
+			// state; a member event that arrived AFTER it (e.g. a remote user
+			// rejoining once the join completed) is live timeline activity and must
+			// stay in the timeline (TestPartialStateJoin Device_list_tracking rejoin).
 			if (unPartialStatedThisWindow) {
 				candidates = candidates.filter(
-					(e) => e.clientEvent.type !== "m.room.member",
+					(e) =>
+						e.clientEvent.type !== "m.room.member" ||
+						e.streamPos > unPartialStatedAt,
 				);
 			}
 

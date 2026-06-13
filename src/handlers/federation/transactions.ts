@@ -1082,6 +1082,23 @@ const processPdu = async (
 
 	if (pdu.state_key !== undefined) {
 		await storage.setStateEvent(pdu.room_id, pdu, eventId);
+
+		// A remote user (re)joining means we may have missed their device-list
+		// updates while we did not (correctly) believe they shared a room — e.g.
+		// they were wrongly thought present, the resync corrected it, and now they
+		// genuinely rejoin. Evict any cached keys so the next /keys/query resyncs
+		// fresh rather than serving a stale cache. Mirrors the same eviction in
+		// putSendJoin. (TestPartialStateJoin Device_list_tracking rejoin cases.)
+		// Only for REMOTE users (absent from our users table); a local user's keys
+		// are authoritative, not a cache, and must never be evicted here.
+		if (
+			pdu.type === "m.room.member" &&
+			pdu.state_key === pdu.sender &&
+			(pdu.content as { membership?: string }).membership === "join" &&
+			!(await storage.getUserById(pdu.sender as UserId))
+		) {
+			await storage.deleteDeviceKeys(pdu.sender as UserId);
+		}
 	} else {
 		await storage.storeEvent(pdu, eventId);
 
