@@ -1,10 +1,10 @@
 import { forbidden, notFound } from "../../errors.ts";
-import { countJoinedMembers } from "../../events.ts";
+import { contentField, countJoinedMembers } from "../../events.ts";
 import { isServerAllowedByAcl } from "../../federation/acl.ts";
 import { domainOf } from "../../ids.ts";
 import type { Handler } from "../../router.ts";
 import type { Storage } from "../../storage/interface.ts";
-import type { PDU, StrippedStateEvent } from "../../types/events.ts";
+import type { StrippedStateEvent } from "../../types/events.ts";
 import type { RoomId, ServerName } from "../../types/index.ts";
 
 type RoomState = NonNullable<Awaited<ReturnType<Storage["getRoom"]>>>;
@@ -23,9 +23,6 @@ interface FederationRoomEntry {
 	children_state: StrippedStateEvent[];
 	allowed_room_ids: string[];
 }
-
-const contentField = (event: PDU | undefined, field: string): unknown =>
-	event ? (event.content as Record<string, unknown>)[field] : undefined;
 
 /**
  * The list of room IDs whose membership grants access to `room` via a

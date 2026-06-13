@@ -25,8 +25,8 @@ export const CREATOR_POWER_LEVEL = 2 ** 53;
  * `CANONICALJSON_MAX_INT`/`CANONICALJSON_MIN_INT`, i.e. `±(2**53 - 1)`).
  * Power-level values outside this range are rejected.
  */
-const CANONICALJSON_MAX_INT = 2 ** 53 - 1;
-const CANONICALJSON_MIN_INT = -(2 ** 53 - 1);
+export const CANONICALJSON_MAX_INT = 2 ** 53 - 1;
+export const CANONICALJSON_MIN_INT = -(2 ** 53 - 1);
 
 /**
  * Extract the numeric base version from a room-version string.
@@ -1056,6 +1056,10 @@ export const requireJoinedOrWorldReadable = async (
 	if (isWorldReadable(room)) return room;
 	throw notJoined();
 };
+
+/** Read a single field from an event's content, tolerating a missing event. */
+export const contentField = (event: PDU | undefined, field: string): unknown =>
+	event ? (event.content as Record<string, unknown>)[field] : undefined;
 
 export const countJoinedMembers = (
 	stateEvents: Map<string, { content: unknown }>,

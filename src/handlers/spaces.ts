@@ -1,5 +1,5 @@
 import { notFound } from "../errors.ts";
-import { countJoinedMembers, getMembership } from "../events.ts";
+import { contentField, countJoinedMembers, getMembership } from "../events.ts";
 import type { FederationClient } from "../federation/client.ts";
 import { domainOf } from "../ids.ts";
 import type { Handler } from "../router.ts";
@@ -16,9 +16,6 @@ type RoomState = NonNullable<Awaited<ReturnType<Storage["getRoom"]>>>;
 interface HierarchyRoom extends SpaceHierarchyRoom {
 	allowed_room_ids?: string[];
 }
-
-const contentField = (event: PDU | undefined, field: string): unknown =>
-	event ? (event.content as Record<string, unknown>)[field] : undefined;
 
 type Child = { state: StrippedStateEvent; roomId: RoomId };
 

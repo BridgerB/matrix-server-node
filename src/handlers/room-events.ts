@@ -50,6 +50,7 @@ import type {
 } from "../types/index.ts";
 import type { JsonObject } from "../types/json.ts";
 import { migrateRoomPushRules } from "./room-upgrade.ts";
+import { FORGOTTEN_ROOM_MARKER } from "./rooms.ts";
 
 /**
  * Access control for single-event fetch endpoints (`/event/:eventId`,
@@ -501,9 +502,6 @@ export const putStateEvent =
 
 		return { status: 200, body: { event_id: eventId } };
 	};
-
-/** Per-user marker (room account data) set when a user forgets a room. */
-const FORGOTTEN_ROOM_MARKER = "m.internal.forgotten";
 
 /** Throw 403 if the user has forgotten this room (read endpoints reject it). */
 const assertNotForgotten = async (

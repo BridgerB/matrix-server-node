@@ -66,8 +66,8 @@ const buildKnockRoom = async (
 	return { knock_state: { events } };
 };
 
-const DEFAULT_TIMELINE_LIMIT = 20;
-const MAX_TIMEOUT = 30000;
+export const DEFAULT_TIMELINE_LIMIT = 20;
+export const MAX_TIMEOUT = 30000;
 
 interface ResolvedFilter {
 	timelineLimit: number;

@@ -6,10 +6,8 @@ import type { Storage } from "../storage/interface.ts";
 import type { ClientEvent } from "../types/events.ts";
 import type { DeviceId, RoomId, UserId } from "../types/index.ts";
 import type { RoomPowerLevelsContent } from "../types/state-events.ts";
+import { DEFAULT_TIMELINE_LIMIT, MAX_TIMEOUT } from "./sync.ts";
 import { getThreadSubscriptionsForSync } from "./thread-subscriptions.ts";
-
-const MAX_TIMEOUT = 30000;
-const DEFAULT_TIMELINE_LIMIT = 20;
 
 interface SlidingSyncListFilter {
 	is_dm?: boolean;

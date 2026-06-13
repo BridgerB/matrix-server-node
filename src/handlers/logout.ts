@@ -1,10 +1,7 @@
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { UserId } from "../types/index.ts";
-
-/** MSC3890: per-device local notification settings, removed when the device goes. */
-const LOCAL_NOTIFICATION_SETTINGS_PREFIX =
-	"org.matrix.msc3890.local_notification_settings.";
+import { LOCAL_NOTIFICATION_SETTINGS_PREFIX } from "./devices.ts";
 
 export const postLogout =
 	(storage: Storage): Handler =>

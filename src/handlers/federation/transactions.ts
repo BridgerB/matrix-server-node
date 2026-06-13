@@ -1,4 +1,6 @@
 import {
+	CANONICALJSON_MAX_INT,
+	CANONICALJSON_MIN_INT,
 	checkEventAuth,
 	computeContentHash,
 	computeEventId,
@@ -23,10 +25,6 @@ import type {
 } from "../../types/index.ts";
 import type { RoomState } from "../../types/internal.ts";
 import type { JsonObject } from "../../types/json.ts";
-
-/** Bounds of an integer representable in canonical JSON (`±(2**53 - 1)`). */
-const CANONICALJSON_MAX_INT = 2 ** 53 - 1;
-const CANONICALJSON_MIN_INT = -(2 ** 53 - 1);
 
 /**
  * Marker for an event that passed the structural checks (content hash,
