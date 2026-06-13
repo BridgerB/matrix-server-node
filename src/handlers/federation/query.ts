@@ -15,42 +15,39 @@ import { buildPublicRoomEntry } from "../directory.ts";
  * Per the spec, a port — if present — must be a decimal number (1-65535).
  * e.g. "localhost", "example.com:8448" are valid; "localhost:http" is not.
  */
-function isValidServerName(serverName: string): boolean {
-	if (serverName.length === 0) return false;
+const isValidPort = (port: string): boolean =>
+	/^[0-9]+$/.test(port) && Number(port) >= 1 && Number(port) <= 65535;
 
-	let host = serverName;
-	let port: string | undefined;
-
+/** Split a server name into its host and optional port, or undefined if malformed. */
+const splitServerName = (
+	serverName: string,
+): { host: string; port?: string } | undefined => {
 	if (serverName.startsWith("[")) {
 		// IPv6 literal: [::1] or [::1]:8448
 		const closeIdx = serverName.indexOf("]");
-		if (closeIdx === -1) return false;
-		host = serverName.slice(1, closeIdx);
+		if (closeIdx === -1) return undefined;
+		const host = serverName.slice(1, closeIdx);
 		const rest = serverName.slice(closeIdx + 1);
-		if (rest.length > 0) {
-			if (!rest.startsWith(":")) return false;
-			port = rest.slice(1);
-		}
-		if (host.length === 0) return false;
-	} else {
-		const colonIdx = serverName.lastIndexOf(":");
-		if (colonIdx !== -1) {
-			host = serverName.slice(0, colonIdx);
-			port = serverName.slice(colonIdx + 1);
-		}
-		if (host.length === 0) return false;
-		// Hostname / IPv4: allow letters, digits, '-', '.'
-		if (!/^[a-zA-Z0-9.-]+$/.test(host)) return false;
+		if (rest.length > 0 && !rest.startsWith(":")) return undefined;
+		return host.length === 0
+			? undefined
+			: { host, port: rest.length > 0 ? rest.slice(1) : undefined };
 	}
 
-	if (port !== undefined) {
-		if (!/^[0-9]+$/.test(port)) return false;
-		const portNum = Number(port);
-		if (portNum < 1 || portNum > 65535) return false;
-	}
+	const colonIdx = serverName.lastIndexOf(":");
+	const host = colonIdx === -1 ? serverName : serverName.slice(0, colonIdx);
+	const port = colonIdx === -1 ? undefined : serverName.slice(colonIdx + 1);
+	// Hostname / IPv4: allow letters, digits, '-', '.'
+	if (host.length === 0 || !/^[a-zA-Z0-9.-]+$/.test(host)) return undefined;
+	return { host, port };
+};
 
-	return true;
-}
+const isValidServerName = (serverName: string): boolean => {
+	if (serverName.length === 0) return false;
+	const parts = splitServerName(serverName);
+	if (!parts) return false;
+	return parts.port === undefined || isValidPort(parts.port);
+};
 
 export const getQueryProfile =
 	(storage: Storage): Handler =>

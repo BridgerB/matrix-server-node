@@ -2,13 +2,13 @@ import { resolveSrv } from "node:dns/promises";
 import { request as httpsRequest, type RequestOptions } from "node:https";
 
 export interface ResolvedServer {
-	host: string;
-	port: number;
-	serverName: string;
+	readonly host: string;
+	readonly port: number;
+	readonly serverName: string;
 }
 
-const cache = new Map<string, { result: ResolvedServer; expiresAt: number }>();
 const CACHE_TTL = 5 * 60 * 1000;
+const cache = new Map<string, { result: ResolvedServer; expiresAt: number }>();
 
 const fetchJson = (url: string): Promise<unknown> =>
 	new Promise((resolve, reject) => {
@@ -42,55 +42,63 @@ const fetchJson = (url: string): Promise<unknown> =>
 		req.end();
 	});
 
-const doResolve = async (serverName: string): Promise<ResolvedServer> => {
-	const colonIdx = serverName.lastIndexOf(":");
-	if (colonIdx > 0 && !serverName.endsWith("]")) {
-		const host = serverName.slice(0, colonIdx);
-		const port = parseInt(serverName.slice(colonIdx + 1), 10);
-		if (!Number.isNaN(port)) return { host, port, serverName };
-	}
+/** Split a `host:port` authority, or undefined when it carries no explicit port. */
+const splitHostPort = (
+	authority: string,
+): { host: string; port: number } | undefined => {
+	const colon = authority.lastIndexOf(":");
+	if (colon <= 0 || authority.endsWith("]")) return undefined;
+	const port = Number(authority.slice(colon + 1));
+	if (Number.isNaN(port)) return undefined;
+	return { host: authority.slice(0, colon), port };
+};
 
+/** `.well-known/matrix/server` delegation for a server, if it advertises one. */
+const resolveWellKnown = async (
+	serverName: string,
+): Promise<ResolvedServer | undefined> => {
 	try {
 		const wk = await fetchJson(
 			`https://${serverName}/.well-known/matrix/server`,
 		);
-		if (wk && typeof wk === "object" && "m.server" in wk) {
-			const delegated = (wk as Record<string, unknown>)["m.server"] as string;
-			if (delegated) {
-				const dColon = delegated.lastIndexOf(":");
-				if (dColon > 0) {
-					return {
-						host: delegated.slice(0, dColon),
-						port: parseInt(delegated.slice(dColon + 1), 10),
-						serverName,
-					};
-				}
-				return { host: delegated, port: 8448, serverName };
-			}
-		}
-	} catch {}
+		const delegated = (wk as Record<string, unknown> | null)?.["m.server"];
+		if (typeof delegated !== "string" || !delegated) return undefined;
+		const hostPort = splitHostPort(delegated);
+		return hostPort
+			? { ...hostPort, serverName }
+			: { host: delegated, port: 8448, serverName };
+	} catch {
+		return undefined;
+	}
+};
 
+/** Highest-priority SRV target for `<service>.<serverName>`, if any exists. */
+const resolveSrvService = async (
+	service: string,
+	serverName: string,
+): Promise<ResolvedServer | undefined> => {
 	try {
-		const records = await resolveSrv(`_matrix-fed._tcp.${serverName}`);
-		if (records.length > 0) {
-			const best = records.sort(
-				(a, b) => a.priority - b.priority,
-			)[0] as (typeof records)[number];
-			return { host: best.name, port: best.port, serverName };
-		}
-	} catch {}
+		const records = await resolveSrv(`${service}.${serverName}`);
+		const best = records.toSorted((a, b) => a.priority - b.priority)[0];
+		return best ? { host: best.name, port: best.port, serverName } : undefined;
+	} catch {
+		return undefined;
+	}
+};
 
-	try {
-		const records = await resolveSrv(`_matrix._tcp.${serverName}`);
-		if (records.length > 0) {
-			const best = records.sort(
-				(a, b) => a.priority - b.priority,
-			)[0] as (typeof records)[number];
-			return { host: best.name, port: best.port, serverName };
-		}
-	} catch {}
+const doResolve = async (serverName: string): Promise<ResolvedServer> => {
+	const explicit = splitHostPort(serverName);
+	if (explicit) return { ...explicit, serverName };
 
-	return { host: serverName, port: 8448, serverName };
+	return (
+		(await resolveWellKnown(serverName)) ??
+		(await resolveSrvService("_matrix-fed._tcp", serverName)) ??
+		(await resolveSrvService("_matrix._tcp", serverName)) ?? {
+			host: serverName,
+			port: 8448,
+			serverName,
+		}
+	);
 };
 
 export const resolveServer = async (

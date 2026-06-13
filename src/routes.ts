@@ -1,5 +1,5 @@
 import { parseRegistrations } from "./appservice/registration.ts";
-import { FederationClient } from "./federation/client.ts";
+import { createFederationClient } from "./federation/client.ts";
 import { flushAllPendingEdus } from "./federation/outbound.ts";
 import {
 	postAppservicePing,
@@ -277,7 +277,7 @@ export const registerRoutes = (
 
 	// Create federation client early so client-server handlers can use it for federation joins
 	const federationClient = signingKey
-		? new FederationClient(serverName as ServerName, signingKey)
+		? createFederationClient(serverName as ServerName, signingKey)
 		: undefined;
 
 	// Durable outbound EDU retry: replay any EDUs queued for destinations that
