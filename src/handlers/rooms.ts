@@ -221,6 +221,7 @@ const collectMembershipDestinations = async (
 	serverName: string,
 	roomId: RoomId,
 	targetUserId: UserId,
+	sender?: string,
 ): Promise<ServerName[]> => {
 	const destinations = new Set<ServerName>();
 
@@ -237,6 +238,45 @@ const collectMembershipDestinations = async (
 	const targetServer = domainOf(targetUserId);
 	if (targetServer && targetServer !== serverName) {
 		destinations.add(targetServer as ServerName);
+
+		// A server that knows the room ONLY through the target's pending invite
+		// (out-of-band) hears about a change to that invite only from the original
+		// inviter. A third party kicking the invitee must NOT reach the invitee's
+		// otherwise-non-resident server — from that server's view the invite still
+		// stands (TestFederationRoomsInvite "Non-invitee user cannot rescind invite
+		// over federation"). We therefore drop the target's server when (a) the
+		// caller named a `sender`, (b) the target is merely invited, (c) that
+		// sender is not the inviter, and (d) the server has no OTHER member keeping
+		// it in the room. The inviter's own rescission, a change to a joined
+		// target, or another resident member all keep the server as a destination.
+		if (sender) {
+			const members = await storage.getMemberEvents(roomId);
+			let targetMembership: string | undefined;
+			let targetInviter: string | undefined;
+			let otherMemberOnTargetServer = false;
+			for (const { event } of members) {
+				const sk = event.state_key;
+				if (!sk) continue;
+				const m = membershipOf(event);
+				if (sk === targetUserId) {
+					targetMembership = m;
+					targetInviter = event.sender;
+				} else if (
+					(m === "join" || m === "invite" || m === "knock") &&
+					domainOf(sk) === targetServer
+				) {
+					otherMemberOnTargetServer = true;
+				}
+			}
+			const inviteOnly = targetMembership === "invite";
+			if (
+				inviteOnly &&
+				targetInviter !== sender &&
+				!otherMemberOnTargetServer
+			) {
+				destinations.delete(targetServer as ServerName);
+			}
+		}
 	}
 
 	return [...destinations];
@@ -757,6 +797,7 @@ const sendMembershipEvent = async (
 					serverName,
 					roomId,
 					targetUserId,
+					sender,
 				)
 			: [];
 
@@ -2403,6 +2444,7 @@ export const postKick =
 			serverName,
 			roomId as RoomId,
 			body.user_id as UserId,
+			req.userId as string,
 		);
 
 		const eventId = await sendMembershipEvent(
