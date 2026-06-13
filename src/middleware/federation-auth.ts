@@ -57,6 +57,11 @@ export const requireFederationAuth =
 				`Could not fetch key ${params.key} from ${params.origin}`,
 			);
 
+		const hasContent =
+			typeof req.body === "object" &&
+			req.body !== null &&
+			Object.keys(req.body).length > 0;
+
 		const signedObj: Record<string, unknown> = {
 			method: req.method,
 			// The signed URI is the request target EXACTLY as the origin sent it.
@@ -67,18 +72,8 @@ export const requireFederationAuth =
 			uri: req.raw.url ?? req.path,
 			origin: params.origin,
 			destination: params.destination,
-		};
-		if (
-			req.body !== undefined &&
-			req.body !== null &&
-			typeof req.body === "object" &&
-			Object.keys(req.body as object).length > 0
-		) {
-			signedObj.content = req.body;
-		}
-
-		signedObj.signatures = {
-			[params.origin]: { [params.key]: params.sig },
+			...(hasContent ? { content: req.body } : {}),
+			signatures: { [params.origin]: { [params.key]: params.sig } },
 		};
 
 		const valid = verifyJsonSignature(
