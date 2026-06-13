@@ -3,7 +3,7 @@ import type { Handler } from "../../router.ts";
 import type { Storage } from "../../storage/interface.ts";
 import type { CrossSigningKey, DeviceKeys } from "../../types/e2ee.ts";
 import type { DeviceId, KeyId, UserId } from "../../types/index.ts";
-import { queryDeviceKeys } from "../e2ee.ts";
+import { queryDeviceKeys, withDeviceDisplayName } from "../e2ee.ts";
 
 /**
  * GET-style federation query for a single user's device list.
@@ -102,31 +102,18 @@ export const postFederationKeysQuery =
 				// Enrich each device with its display name under
 				// unsigned.device_display_name (Synapse: include_displaynames).
 				const devices = await storage.getAllDevices(userId as UserId);
-				const displayNames = new Map<string, string>();
-				for (const d of devices) {
-					if (d.display_name)
-						displayNames.set(d.device_id, d.display_name);
-				}
+				const displayNames = new Map(
+					devices
+						.filter((d) => d.display_name)
+						.map((d) => [d.device_id, d.display_name as string]),
+				);
 
 				const enriched: Record<DeviceId, DeviceKeys> = {};
 				for (const [deviceId, keys] of Object.entries(userKeys)) {
-					const displayName = displayNames.get(deviceId);
-					if (displayName) {
-						const existingUnsigned = (
-							keys as DeviceKeys & {
-								unsigned?: Record<string, unknown>;
-							}
-						).unsigned;
-						enriched[deviceId as DeviceId] = {
-							...keys,
-							unsigned: {
-								...existingUnsigned,
-								device_display_name: displayName,
-							},
-						} as DeviceKeys;
-					} else {
-						enriched[deviceId as DeviceId] = keys;
-					}
+					enriched[deviceId as DeviceId] = withDeviceDisplayName(
+						keys,
+						displayNames.get(deviceId),
+					);
 				}
 				deviceKeys[userId as UserId] = enriched;
 

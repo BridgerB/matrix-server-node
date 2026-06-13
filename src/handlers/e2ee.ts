@@ -268,6 +268,25 @@ export const queryDeviceKeys = async (
 const serverOf = (userId: string): string =>
 	userId.slice(userId.indexOf(":") + 1);
 
+/**
+ * Return a copy of `keys` with `device_display_name` folded into `unsigned`,
+ * matching what /keys/query returns (synapse's include_displaynames). The input
+ * is not mutated; when there is no display name the original object is returned.
+ */
+export const withDeviceDisplayName = (
+	keys: DeviceKeys,
+	displayName: string | undefined,
+): DeviceKeys => {
+	if (!displayName) return keys;
+	const { unsigned } = keys as DeviceKeys & {
+		unsigned?: Record<string, unknown>;
+	};
+	return {
+		...keys,
+		unsigned: { ...unsigned, device_display_name: displayName },
+	} as DeviceKeys;
+};
+
 // A remote user's device list is "tracked" — and therefore safe to cache and
 // serve without a fresh federation round-trip — once they share a fully-resolved
 // (non-partial-state) room with us. While the only shared room is still
@@ -423,22 +442,7 @@ export const postKeysQuery =
 					const userDevices: Record<DeviceId, DeviceKeys> = {};
 					for (const d of resp.devices ?? []) {
 						if (!d.keys) continue;
-						// Fold the per-device display name into unsigned, matching what
-						// /keys/query returns (and our federation keys/query responder).
-						const existingUnsigned = (
-							d.keys as DeviceKeys & {
-								unsigned?: Record<string, unknown>;
-							}
-						).unsigned;
-						const keys: DeviceKeys = d.device_display_name
-							? ({
-									...d.keys,
-									unsigned: {
-										...existingUnsigned,
-										device_display_name: d.device_display_name,
-									},
-								} as DeviceKeys)
-							: d.keys;
+						const keys = withDeviceDisplayName(d.keys, d.device_display_name);
 						userDevices[d.device_id] = keys;
 						await storage.setDeviceKeys(u, d.device_id, keys);
 					}

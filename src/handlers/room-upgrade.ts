@@ -267,11 +267,43 @@ export const postRoomUpgrade =
 	};
 
 /**
- * Migrate room-scoped push rules from `oldRoomId` to `newRoomId` for every
- * local user who is joined to the old room. For each such user, if their
- * `m.push_rules` global account data contains a rule in the `room` ruleset
- * whose `rule_id` equals `oldRoomId`, a copy of that rule (with `rule_id` set
- * to `newRoomId`) is added. The original rule is left in place.
+ * Copy a user's `room`-ruleset push rule for `oldRoomId` to `newRoomId` in their
+ * `m.push_rules` global account data, leaving the original in place. Idempotent:
+ * a no-op if the user has no rule for the old room or already has one for the
+ * new room. The account-data object is rebuilt rather than mutated in place.
+ */
+const copyRoomPushRule = async (
+	storage: Storage,
+	userId: UserId,
+	oldRoomId: RoomId,
+	newRoomId: RoomId,
+): Promise<void> => {
+	const raw = await storage.getGlobalAccountData(userId, "m.push_rules");
+	if (!raw) return;
+
+	const pushRules = raw as unknown as PushRulesContent;
+	const roomRules = pushRules.global?.room;
+	if (!Array.isArray(roomRules)) return;
+
+	const existing = roomRules.find((r) => r.rule_id === oldRoomId);
+	if (!existing) return;
+	if (roomRules.some((r) => r.rule_id === newRoomId)) return;
+
+	const copied: PushRule = { ...existing, rule_id: newRoomId };
+	const updated: PushRulesContent = {
+		...pushRules,
+		global: { ...pushRules.global, room: [...roomRules, copied] },
+	};
+	await storage.setGlobalAccountData(
+		userId,
+		"m.push_rules",
+		updated as unknown as JsonObject,
+	);
+};
+
+/**
+ * Migrate room-scoped push rules from `oldRoomId` to `newRoomId` for every local
+ * user who is joined to the old room.
  *
  * This is shared between the two ways a room can be upgraded:
  *   1. `POST /rooms/{roomId}/upgrade` (handled here, in `postRoomUpgrade`).
@@ -289,43 +321,18 @@ export async function migrateRoomPushRules(
 	newRoomId: RoomId,
 ): Promise<void> {
 	const suffix = `:${serverName}`;
-	const localUsers = new Set<string>();
-	for (const [key, event] of oldRoom.state_events) {
-		if (!key.startsWith("m.room.member\x1f")) continue;
-		const userId = event.state_key;
-		if (!userId || !userId.endsWith(suffix)) continue;
-		const membership = (event.content as { membership?: string }).membership;
-		if (membership === "join") localUsers.add(userId);
-	}
+	const localJoinedMembers = [...oldRoom.state_events]
+		.filter(([key]) => key.startsWith("m.room.member\x1f"))
+		.map(([, event]) => event)
+		.filter(
+			(event) =>
+				event.state_key?.endsWith(suffix) &&
+				(event.content as { membership?: string }).membership === "join",
+		)
+		.map((event) => event.state_key as UserId);
 
-	for (const userId of localUsers) {
-		const raw = await storage.getGlobalAccountData(
-			userId as never,
-			"m.push_rules",
-		);
-		if (!raw) continue;
-
-		const pushRules = raw as unknown as PushRulesContent;
-		const roomRules = pushRules.global?.room;
-		if (!Array.isArray(roomRules)) continue;
-
-		const existing = roomRules.find((r) => r.rule_id === oldRoomId);
-		if (!existing) continue;
-
-		// Avoid duplicating if a rule for the new room already exists.
-		if (roomRules.some((r) => r.rule_id === newRoomId)) continue;
-
-		const copied: PushRule = {
-			...existing,
-			rule_id: newRoomId,
-		};
-		roomRules.push(copied);
-
-		await storage.setGlobalAccountData(
-			userId as never,
-			"m.push_rules",
-			raw as JsonObject,
-		);
+	for (const userId of localJoinedMembers) {
+		await copyRoomPushRule(storage, userId, oldRoomId, newRoomId);
 	}
 }
 
@@ -356,18 +363,6 @@ export async function copyPredecessorPushRulesOnJoin(
 	)?.predecessor?.room_id;
 	if (!oldRoomId || oldRoomId === newRoomId) return;
 
-	const raw = await storage.getGlobalAccountData(userId, "m.push_rules");
-	if (!raw) return;
-	const pushRules = raw as unknown as PushRulesContent;
-	const roomRules = pushRules.global?.room;
-	if (!Array.isArray(roomRules)) return;
-
-	const existing = roomRules.find((r) => r.rule_id === oldRoomId);
-	if (!existing) return;
-	if (roomRules.some((r) => r.rule_id === newRoomId)) return;
-
-	const copied: PushRule = { ...existing, rule_id: newRoomId };
-	roomRules.push(copied);
-	await storage.setGlobalAccountData(userId, "m.push_rules", raw as JsonObject);
+	await copyRoomPushRule(storage, userId, oldRoomId as RoomId, newRoomId);
 }
 
