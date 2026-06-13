@@ -1,5 +1,6 @@
 import { generateToken } from "../crypto.ts";
 import { domainOf } from "../ids.ts";
+import { membershipOf } from "../events.ts";
 import { badJson } from "../errors.ts";
 import type { FederationClient } from "../federation/client.ts";
 import { deliverEduToDestination } from "../federation/outbound.ts";
@@ -311,7 +312,7 @@ const isRemoteUserTracked = async (
 				const sk = m.event.state_key;
 				if (!sk) continue;
 				if (
-					(m.event.content as { membership?: string }).membership !==
+					membershipOf(m.event) !==
 					"join"
 				)
 					continue;
@@ -329,7 +330,7 @@ const isRemoteUserTracked = async (
 			if (
 				event.type === "m.room.member" &&
 				event.state_key === userId &&
-				(event.content as { membership?: string }).membership === "join"
+				membershipOf(event) === "join"
 			) {
 				return true;
 			}
@@ -848,7 +849,7 @@ export const getKeysChanges =
 				const sk = event.state_key as UserId | undefined;
 				if (
 					event.type === "m.room.member" &&
-					(event.content as { membership?: string }).membership === "join" &&
+					membershipOf(event) === "join" &&
 					sk &&
 					sk !== userId
 				) {

@@ -22,6 +22,7 @@ import {
 	selectAuthEvents,
 	sendStateEvent,
 	validateAdditionalCreators,
+	membershipOf,
 } from "../events.ts";
 import type { FederationClient } from "../federation/client.ts";
 import { fanoutEdu, fanoutEvent } from "../federation/outbound.ts";
@@ -1514,7 +1515,7 @@ const resyncPartialStateRoom = async (
 				await storage.setStateEventHistorical(roomId, ev, id);
 				if (
 					ev.type === "m.room.member" &&
-					(ev.content as { membership?: string }).membership === "join" &&
+					membershipOf(ev) === "join" &&
 					ev.state_key
 				) {
 					revealedMembers.push(ev.state_key as UserId);
@@ -1693,7 +1694,7 @@ const resyncPartialStateRoom = async (
 				if (ev.type === "m.room.member") {
 					joinMembership.set(
 						ev.state_key ?? "",
-						(ev.content as { membership?: string }).membership,
+						membershipOf(ev),
 					);
 				}
 			}
@@ -1705,8 +1706,7 @@ const resyncPartialStateRoom = async (
 				for (const [k, ev] of reconciledRoom.state_events) {
 					if (!k.startsWith("m.room.member\x1f")) continue;
 					const sk = ev.state_key ?? "";
-					const membership = (ev.content as { membership?: string })
-						.membership;
+					const membership = membershipOf(ev);
 					currentMembership.set(sk, membership);
 					if (membership === "join") addMemberServer(sk);
 				}

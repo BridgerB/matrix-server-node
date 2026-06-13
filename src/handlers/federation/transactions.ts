@@ -3,6 +3,7 @@ import {
 	computeContentHash,
 	computeEventId,
 	makeStateKey,
+	membershipOf,
 } from "../../events.ts";
 import { isServerAllowedByAcl } from "../../federation/acl.ts";
 import type { FederationClient } from "../../federation/client.ts";
@@ -1094,7 +1095,7 @@ const processPdu = async (
 		if (
 			pdu.type === "m.room.member" &&
 			pdu.state_key === pdu.sender &&
-			(pdu.content as { membership?: string }).membership === "join" &&
+			membershipOf(pdu) === "join" &&
 			!(await storage.getUserById(pdu.sender as UserId))
 		) {
 			await storage.deleteDeviceKeys(pdu.sender as UserId);

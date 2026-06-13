@@ -1,4 +1,5 @@
 import { generateToken } from "../crypto.ts";
+import { membershipOf } from "../events.ts";
 import { domainOf } from "../ids.ts";
 import type { FederationClient } from "../federation/client.ts";
 import type { Handler } from "../router.ts";
@@ -34,8 +35,7 @@ export const sendReceiptEdu = async (
 	const members = await storage.getMemberEvents(roomId);
 	const destinations = new Set<ServerName>();
 	for (const { event } of members) {
-		const membership = (event.content as { membership?: string } | undefined)
-			?.membership;
+		const membership = membershipOf(event);
 		if (membership !== "join") continue;
 		const memberId = event.state_key;
 		if (!memberId) continue;

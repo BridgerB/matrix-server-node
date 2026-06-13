@@ -599,13 +599,18 @@ const getEventPowerLevel = (
 	}
 	return isState ? (pl.state_default ?? 50) : (pl.events_default ?? 0);
 };
+/** The `membership` field of an m.room.member event's content (or undefined). */
+export const membershipOf = (event: {
+	content?: unknown;
+}): string | undefined =>
+	(event.content as { membership?: string } | undefined)?.membership;
+
 export const getMembership = (
 	roomState: RoomState,
 	userId: UserId,
 ): string | undefined => {
 	const memberEvent = roomState.state_events.get(`m.room.member\x1f${userId}`);
-	return (memberEvent?.content as Record<string, unknown> | undefined)
-		?.membership as string | undefined;
+	return membershipOf(memberEvent ?? {});
 };
 
 const checkMembershipAuth = (event: PDU, roomState: RoomState): void => {

@@ -12,6 +12,7 @@ import {
 	selectAuthEvents,
 	sendStateEvent,
 	validateAdditionalCreators,
+	membershipOf,
 } from "../events.ts";
 import type { FederationClient } from "../federation/client.ts";
 import { fanoutEvent } from "../federation/outbound.ts";
@@ -327,7 +328,7 @@ export async function migrateRoomPushRules(
 		.filter(
 			(event) =>
 				event.state_key?.endsWith(suffix) &&
-				(event.content as { membership?: string }).membership === "join",
+				membershipOf(event) === "join",
 		)
 		.map((event) => event.state_key as UserId);
 
