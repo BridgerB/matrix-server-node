@@ -6,7 +6,7 @@ import { Router } from "./router.ts";
 import { registerRoutes } from "./routes.ts";
 import { generateSigningKey, importSigningKey } from "./signing.ts";
 import type { Storage } from "./storage/interface.ts";
-import { MemoryStorage } from "./storage/memory.ts";
+import { createMemoryStorage } from "./storage/memory.ts";
 import { MysqlStorage } from "./storage/mysql.ts";
 import { PostgresStorage } from "./storage/postgres.ts";
 import { SqliteStorage } from "./storage/sqlite.ts";
@@ -35,7 +35,7 @@ if (!KEY_SEED) {
 let storage: Storage;
 if (STORAGE_TYPE === "memory") {
 	console.log("Using in-memory storage");
-	storage = new MemoryStorage();
+	storage = createMemoryStorage();
 } else if (STORAGE_TYPE === "sqlite") {
 	console.log(`Using SQLite storage at ${DATABASE_PATH}`);
 	storage = new SqliteStorage(DATABASE_PATH);
