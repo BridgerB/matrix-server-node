@@ -30,11 +30,11 @@ const serverFromUserId = (userId: string): string => {
  * DAG ourselves. This is an approximation of full state resolution but is exact
  * for the linear / simple DAGs exercised by the federation backfill tests.
  */
-async function stateAtEvent(
+const stateAtEvent = async (
 	storage: Storage,
 	event: PDU,
 	includeSelf = true,
-): Promise<Map<string, PDU>> {
+): Promise<Map<string, PDU>> => {
 	const latestByKey = new Map<string, PDU>();
 	const visited = new Set<EventId>();
 	// Seed with the prev_events; if the event itself is a state event it is
@@ -84,11 +84,11 @@ async function stateAtEvent(
  *   - Otherwise the server must have a member that is `join`ed (for `joined`)
  *     or `join`ed/`invite`d (for `invited`) in the state at that event.
  */
-async function eventVisibleToServer(
+const eventVisibleToServer = async (
 	storage: Storage,
 	event: PDU,
 	server: string,
-): Promise<boolean> {
+): Promise<boolean> => {
 	const state = await stateAtEvent(storage, event);
 	const visEvent = state.get("m.room.history_visibility\x1f");
 	const visibility =
@@ -117,12 +117,12 @@ async function eventVisibleToServer(
  * current room state regardless of the event id, so we cannot rely on it for
  * historical queries. With no `event_id` we fall back to the current state.
  */
-async function resolveStateMap(
+const resolveStateMap = async (
 	storage: Storage,
 	roomId: RoomId,
 	room: { state_events: Map<string, PDU> },
 	eventId: EventId | null,
-): Promise<Map<string, PDU> | undefined> {
+): Promise<Map<string, PDU> | undefined> => {
 	if (!eventId) return room.state_events;
 	const entry = await storage.getEvent(eventId);
 	if (entry && entry.event.room_id === roomId) {
@@ -157,10 +157,10 @@ async function resolveStateMap(
  * with the state events' immediate `auth_events`; `getAuthChain` then follows
  * the closure (and includes the seeds themselves).
  */
-async function authChainForState(
+const authChainForState = async (
 	storage: Storage,
 	stateEvents: PDU[],
-): Promise<PDU[]> {
+): Promise<PDU[]> => {
 	const authEventIds = new Set<EventId>();
 	for (const event of stateEvents) {
 		for (const id of event.auth_events) authEventIds.add(id);
