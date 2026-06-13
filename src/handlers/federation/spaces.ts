@@ -1,5 +1,5 @@
 import { forbidden, notFound } from "../../errors.ts";
-import { contentField, countJoinedMembers, iterMembers } from "../../events.ts";
+import { contentField, iterMembers, roomSummaryFields } from "../../events.ts";
 import { isServerAllowedByAcl } from "../../federation/acl.ts";
 import { domainOf } from "../../ids.ts";
 import type { Handler } from "../../router.ts";
@@ -118,42 +118,9 @@ export const buildFederationRoomEntry = (
 		});
 	}
 
-	const histVis = contentField(
-		room.state_events.get("m.room.history_visibility\x1f"),
-		"history_visibility",
-	);
-	const guestAccess = contentField(
-		room.state_events.get("m.room.guest_access\x1f"),
-		"guest_access",
-	);
-
 	return {
 		room_id: roomId,
-		name: contentField(room.state_events.get("m.room.name\x1f"), "name") as
-			| string
-			| undefined,
-		topic: contentField(room.state_events.get("m.room.topic\x1f"), "topic") as
-			| string
-			| undefined,
-		avatar_url: contentField(
-			room.state_events.get("m.room.avatar\x1f"),
-			"url",
-		) as string | undefined,
-		canonical_alias: contentField(
-			room.state_events.get("m.room.canonical_alias\x1f"),
-			"alias",
-		) as string | undefined,
-		num_joined_members: countJoinedMembers(room.state_events),
-		world_readable: histVis === "world_readable",
-		guest_can_join: guestAccess === "can_join",
-		join_rule: contentField(
-			room.state_events.get("m.room.join_rules\x1f"),
-			"join_rule",
-		) as string | undefined,
-		room_type: contentField(
-			room.state_events.get("m.room.create\x1f"),
-			"type",
-		) as string | undefined,
+		...roomSummaryFields(room),
 		children_state: childrenState,
 		allowed_room_ids: getAllowedRoomIds(room),
 	};

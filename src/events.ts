@@ -1125,6 +1125,39 @@ export const getStateContent = (
 		: undefined;
 };
 
+export interface RoomSummaryFields {
+	name?: string;
+	topic?: string;
+	avatar_url?: string;
+	canonical_alias?: string;
+	num_joined_members: number;
+	world_readable: boolean;
+	guest_can_join: boolean;
+	join_rule?: string;
+	room_type?: string;
+}
+
+/** The common room-summary projection shared by the space-hierarchy endpoints. */
+export const roomSummaryFields = (room: RoomState): RoomSummaryFields => {
+	const get = (type: string, field: string): string | undefined =>
+		contentField(room.state_events.get(makeStateKey(type)), field) as
+			| string
+			| undefined;
+	return {
+		name: get("m.room.name", "name"),
+		topic: get("m.room.topic", "topic"),
+		avatar_url: get("m.room.avatar", "url"),
+		canonical_alias: get("m.room.canonical_alias", "alias"),
+		num_joined_members: countJoinedMembers(room.state_events),
+		world_readable:
+			get("m.room.history_visibility", "history_visibility") ===
+			"world_readable",
+		guest_can_join: get("m.room.guest_access", "guest_access") === "can_join",
+		join_rule: get("m.room.join_rules", "join_rule"),
+		room_type: get("m.room.create", "type"),
+	};
+};
+
 /**
  * Separator for packing several identifiers into one composite string key
  * (state-event map keys, txn-idempotency keys, the various in-memory index
