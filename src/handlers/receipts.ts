@@ -49,22 +49,14 @@ export const sendReceiptEdu = async (
 	const data: { ts: number; thread_id?: string } = { ts };
 	if (threadId !== undefined) data.thread_id = threadId;
 
+	// Federation m.receipt EDU (server-server-api): content is keyed
+	// room_id -> receipt_type -> user_id -> { data: { ts }, event_ids: [...] }.
 	const edu = {
 		edu_type: "m.receipt",
 		content: {
 			[roomId]: {
 				[receiptType]: {
-					[userId]: data,
-				},
-			},
-			// Top-level room_id is what our inbound handler reads; keep both so the
-			// EDU is interpretable by the inbound handler regardless of nesting.
-			room_id: roomId,
-			receipts: {
-				[eventId]: {
-					[receiptType]: {
-						[userId]: data,
-					},
+					[userId]: { data, event_ids: [eventId] },
 				},
 			},
 		},
