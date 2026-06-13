@@ -11,7 +11,6 @@ import { resolveState } from "../../state-resolution.ts";
 import type { Handler } from "../../router.ts";
 import type { SigningKey } from "../../signing.ts";
 import type { Storage } from "../../storage/interface.ts";
-import type { DeviceKeys } from "../../types/e2ee.ts";
 import type { EDU, PDU } from "../../types/events.ts";
 import type {
 	DeviceId,
@@ -1289,16 +1288,12 @@ const processEdu = async (
 			// device keys so `/keys/query` returns them without a round-trip.
 			//
 			// Spec content: { user_id, device_id, stream_id, prev_id?,
-			//   deleted?, device_display_name?, keys? }
-			const { user_id, device_id, deleted, keys, device_display_name } =
-				content as {
+			//   deleted?, device_display_name?, keys? }. We only need user_id and
+			// device_id: the keys/display name embedded in the EDU are deliberately
+			// ignored (see below).
+			const { user_id, device_id } = content as {
 				user_id?: UserId;
 				device_id?: DeviceId;
-				stream_id?: number;
-				prev_id?: number[];
-				deleted?: boolean;
-				device_display_name?: string;
-				keys?: DeviceKeys;
 			};
 
 			if (!user_id || !device_id) break;
@@ -1312,14 +1307,9 @@ const processEdu = async (
 			// list (if any) is now stale. Rather than trust the keys embedded in
 			// the EDU, evict the cache so the next /keys/query triggers a full
 			// device-list resync via GET /user/devices/{userId} — synapse's
-			// "stale device list" model. This is what makes a tracked user's keys
-			// re-fetched after they rotate them (TestPartialStateJoin
-			// Device_list_tracking), while an unchanged user keeps serving from
-			// cache. The embedded keys / device_display_name are intentionally
-			// unused here; the resync fetches the authoritative list.
-			void keys;
-			void device_display_name;
-			void deleted;
+			// "stale device list" model. This re-fetches a tracked user's keys
+			// after they rotate them, while an unchanged user keeps serving from
+			// cache.
 			await storage.deleteDeviceKeys(user_id);
 
 			// Record the change on the device-key-change stream so the user shows

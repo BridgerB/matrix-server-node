@@ -277,10 +277,9 @@ export const postRoomUpgrade =
  *   1. `POST /rooms/{roomId}/upgrade` (handled here, in `postRoomUpgrade`).
  *   2. A "manual" upgrade where the client creates the replacement room itself
  *      and then sends an `m.room.tombstone` event to the old room. That path
- *      flows through `putStateEvent` (src/handlers/room-events.ts), which must
- *      call `migrateRoomPushRules` whenever it persists an `m.room.tombstone`
- *      state event carrying a `replacement_room`. See SHARED-NEED note at the
- *      bottom of this file.
+ *      flows through `putStateEvent` (src/handlers/room-events.ts), which calls
+ *      this whenever it persists an `m.room.tombstone` state event carrying a
+ *      `replacement_room`.
  */
 export async function migrateRoomPushRules(
 	storage: Storage,
@@ -372,42 +371,3 @@ export async function copyPredecessorPushRulesOnJoin(
 	await storage.setGlobalAccountData(userId, "m.push_rules", raw as JsonObject);
 }
 
-/*
- * SHARED-NEED (manual room upgrade push-rule migration)
- * -----------------------------------------------------
- * Complement's TestPushRuleRoomUpgrade runs two sub-cases per scenario:
- *   - `useManualRoomUpgrade=false`: client calls POST /rooms/{id}/upgrade,
- *     which lands in `postRoomUpgrade` above and DOES migrate push rules.
- *   - `useManualRoomUpgrade=true` ("manually upgrading a room ..."): the client
- *     creates the replacement room itself, then sends `m.room.tombstone` to the
- *     old room via PUT /rooms/{id}/state/m.room.tombstone/. This path NEVER
- *     reaches `postRoomUpgrade`; it goes through `putStateEvent`
- *     (src/handlers/room-events.ts). With no hook there, push rules are never
- *     copied to the replacement room and the manual sub-case fails.
- *
- * Fix that cannot live in this file (per the edit-scope constraint): after
- * `putStateEvent` successfully persists an `m.room.tombstone` state event,
- * it must call the exported `migrateRoomPushRules` here. Concretely, in
- * src/handlers/room-events.ts `putStateEvent`, immediately after the
- * `await storage.setStateEvent(roomId, event, eventId)` line, add:
- *
- *   if (
- *     eventType === "m.room.tombstone" &&
- *     stateKey === "" &&
- *     typeof (newContent as { replacement_room?: unknown }).replacement_room ===
- *       "string"
- *   ) {
- *     await migrateRoomPushRules(
- *       storage,
- *       serverName,
- *       room,
- *       roomId as RoomId,
- *       (newContent as { replacement_room: string }).replacement_room as RoomId,
- *     );
- *   }
- *
- * (with `import { migrateRoomPushRules } from "./room-upgrade.ts";`). The
- * `room` value there is the old room's state returned by `requireJoinedRoom`,
- * which already contains every local joined member, so the helper resolves the
- * correct set of users.
- */
