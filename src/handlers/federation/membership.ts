@@ -7,9 +7,8 @@ import {
 import {
 	checkEventAuth,
 	computeEventId,
+	findAuthorisingLocalUser,
 	getMembership,
-	getPowerLevels,
-	getUserPowerLevel,
 	selectAuthEvents,
 	stripV12CreateRoomId,
 } from "../../events.ts";
@@ -107,40 +106,6 @@ const toStrippedState = (value: unknown): StrippedStateEvent[] => {
 		});
 	}
 	return out;
-};
-
-/**
- * For a restricted (or knock_restricted) room, find a LOCAL user who is joined
- * to this room and has permission to issue invites. This user is placed in the
- * joining member event's `content.join_authorised_via_users_server` so that the
- * resulting join event passes auth on every server. Returns undefined if no such
- * local user exists (the caller should then fail the make_join so the requesting
- * server can fail over to another resident server).
- */
-const findAuthorisingLocalUser = (
-	room: RoomState,
-	localServerName: string,
-): UserId | undefined => {
-	const pl = getPowerLevels(room);
-	const invitePl = pl.invite ?? 0;
-
-	for (const [key, event] of room.state_events) {
-		if (!key.startsWith("m.room.member\x1f")) continue;
-		const membership = (event.content as Record<string, unknown>).membership as
-			| string
-			| undefined;
-		if (membership !== "join") continue;
-
-		const memberId = key.slice("m.room.member\x1f".length) as UserId;
-		// Only local users can authorise a local-style join on this server.
-		const memberServer = domainOf(memberId);
-		if (memberServer !== localServerName) continue;
-
-		if (getUserPowerLevel(memberId, room) >= invitePl) {
-			return memberId;
-		}
-	}
-	return undefined;
 };
 
 /**

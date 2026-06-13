@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { badJson, forbidden, notJoined, roomNotFound } from "./errors.ts";
 import type { FederationClient } from "./federation/client.ts";
 import { fanoutEvent } from "./federation/outbound.ts";
+import { domainOf } from "./ids.ts";
 import type { SigningKey } from "./signing.ts";
 import { signEvent } from "./signing.ts";
 import type { Storage } from "./storage/interface.ts";
@@ -585,6 +586,48 @@ export const getUserPowerLevel = (
 	}
 	const pl = plEvent.content as unknown as RoomPowerLevelsContent;
 	return pl.users?.[userId] ?? pl.users_default ?? 0;
+};
+
+/**
+ * Find the local user best able to authorise a restricted-room join (MSC3083):
+ * a currently-joined user on `localServerName` whose power level meets the
+ * room's invite threshold. Prefers the highest power level, breaking ties by the
+ * lexicographically smallest user ID so the same authoriser is chosen on every
+ * invocation regardless of Map iteration order. Returns undefined when no such
+ * local user exists (the join must then be performed over federation).
+ */
+export const findAuthorisingLocalUser = (
+	room: RoomState,
+	localServerName: string,
+): UserId | undefined => {
+	const pl = getPowerLevels(room);
+	const invitePl = pl.invite ?? 0;
+
+	let best: UserId | undefined;
+	let bestPl = -Infinity;
+
+	for (const [key, event] of room.state_events) {
+		if (!key.startsWith("m.room.member\x1f")) continue;
+		const membership = (event.content as Record<string, unknown>).membership as
+			| string
+			| undefined;
+		if (membership !== "join") continue;
+
+		const memberId = key.slice("m.room.member\x1f".length) as UserId;
+		if (domainOf(memberId) !== localServerName) continue;
+
+		const memberPl = getUserPowerLevel(memberId, room);
+		if (memberPl < invitePl) continue;
+
+		if (
+			memberPl > bestPl ||
+			(memberPl === bestPl && (!best || memberId < best))
+		) {
+			best = memberId;
+			bestPl = memberPl;
+		}
+	}
+	return best;
 };
 
 const getEventPowerLevel = (

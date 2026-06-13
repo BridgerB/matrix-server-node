@@ -14,6 +14,7 @@ import {
 	computeEventId,
 	computeRoomIdV12,
 	type EventContext,
+	findAuthorisingLocalUser,
 	getMembership,
 	getPowerLevels,
 	getUserPowerLevel,
@@ -64,44 +65,6 @@ import { copyPredecessorPushRulesOnJoin } from "./room-upgrade.ts";
  * only marginally meets the invite level), which is the safest authoriser to
  * record so the join passes auth on every participating server.
  */
-const findAuthorisingLocalUser = (
-	room: RoomState,
-	localServerName: string,
-): UserId | undefined => {
-	const pl = getPowerLevels(room);
-	const invitePl = pl.invite ?? 0;
-
-	let best: UserId | undefined;
-	let bestPl = -Infinity;
-
-	for (const [key, event] of room.state_events) {
-		if (!key.startsWith("m.room.member\x1f")) continue;
-		const membership = (event.content as Record<string, unknown>).membership as
-			| string
-			| undefined;
-		if (membership !== "join") continue;
-
-		const memberId = key.slice("m.room.member\x1f".length) as UserId;
-		const memberServer = domainOf(memberId);
-		if (memberServer !== localServerName) continue;
-
-		const memberPl = getUserPowerLevel(memberId, room);
-		if (memberPl < invitePl) continue;
-
-		// Prefer the highest power level; break ties deterministically by the
-		// lexicographically smallest user ID so the same authoriser is chosen on
-		// every invocation regardless of Map iteration order.
-		if (
-			memberPl > bestPl ||
-			(memberPl === bestPl && (!best || memberId < best))
-		) {
-			best = memberId;
-			bestPl = memberPl;
-		}
-	}
-	return best;
-};
-
 /**
  * Compute the set of REMOTE servers (excluding our own) that currently have a
  * joined user able to issue invites in this room. When our server is resident in
