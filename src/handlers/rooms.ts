@@ -1580,12 +1580,28 @@ const resyncPartialStateRoom = async (
 					checkEventAuth(event, evId, reconciled);
 				} catch {
 					rejectedIds.add(evId);
+					// Only repair the key if this rejected event is still its LIVE
+					// value. A newer event (e.g. the user's own later leave) may have
+					// already superseded it; rejecting this one must not resurrect a
+					// stale value over that newer one.
+					let wasCurrent = true;
+					if (event.state_key !== undefined) {
+						const curKey = `${event.type}\x1f${event.state_key}`;
+						const cur = reconciled.state_events.get(curKey);
+						if (cur) {
+							try {
+								wasCurrent = computeEventId(cur, roomVersion) === evId;
+							} catch {
+								/* unparseable current event: treat as live to be safe */
+							}
+						}
+					}
 					await storage.deleteEvent(evId);
 					// A rejected STATE event's key must fall back to its prior valid
 					// value: the highest-depth OTHER partial-state event we still hold
 					// for that key (e.g. a bad kick rejected → the user reverts to the
 					// join they sent us moments earlier), else the resident's value.
-					if (event.state_key !== undefined) {
+					if (event.state_key !== undefined && wasCurrent) {
 						const key = `${event.type}\x1f${event.state_key}`;
 						const prior = (psByKey.get(key) ?? [])
 							.filter(
@@ -1618,33 +1634,52 @@ const resyncPartialStateRoom = async (
 			// Outbound device-list reconciliation: re-send any local device-list
 			// changes we made while partial-state to servers that should have had
 			// them but didn't because we didn't know they were in the room. The
-			// candidate set is every server that was joined at our join OR is joined
-			// NOW (after reconciliation) — the latter covers a server whose user
-			// joined after our join and was then wrongly kicked during the partial
-			// join — minus the servers the resident actually named.
+			// candidate set (built below, mirroring synapse) is every server whose
+			// membership changed between the join snapshot and the now-complete state,
+			// plus every currently-joined server, minus the servers the resident named
+			// at join (resyncOutgoingDeviceListPokes subtracts those and ourselves).
 			const serversAtJoin = new Set<ServerName>();
 			const addMemberServer = (sk: string | undefined): void => {
 				if (!sk) return;
 				const srv = sk.split(":").slice(1).join(":");
 				if (srv) serversAtJoin.add(srv as ServerName);
 			};
+			// Membership at the join snapshot (resident's /state), keyed by user.
+			const joinMembership = new Map<string, string | undefined>();
 			for (const ev of stateEvents) {
-				if (
-					ev.type === "m.room.member" &&
-					(ev.content as { membership?: string }).membership === "join"
-				) {
-					addMemberServer(ev.state_key);
+				if (ev.type === "m.room.member") {
+					joinMembership.set(
+						ev.state_key ?? "",
+						(ev.content as { membership?: string }).membership,
+					);
 				}
 			}
+			// Current membership (after reconciliation): collect currently-joined
+			// servers and note each member's current membership for the diff below.
 			const reconciledRoom = await storage.getRoom(roomId);
+			const currentMembership = new Map<string, string | undefined>();
 			if (reconciledRoom) {
 				for (const [k, ev] of reconciledRoom.state_events) {
-					if (
-						k.startsWith("m.room.member\x1f") &&
-						(ev.content as { membership?: string }).membership === "join"
-					) {
-						addMemberServer(ev.state_key);
-					}
+					if (!k.startsWith("m.room.member\x1f")) continue;
+					const sk = ev.state_key ?? "";
+					const membership = (ev.content as { membership?: string })
+						.membership;
+					currentMembership.set(sk, membership);
+					if (membership === "join") addMemberServer(sk);
+				}
+			}
+			// Servers whose membership CHANGED between the join snapshot and now
+			// (synapse handle_room_un_partial_stated). Essential for a server whose
+			// user joined AFTER our join then left/was-kicked before resync: absent
+			// from the join snapshot and not currently joined, so neither endpoint
+			// alone surfaces it, but its membership did change.
+			const memberKeys = new Set<string>([
+				...joinMembership.keys(),
+				...currentMembership.keys(),
+			]);
+			for (const sk of memberKeys) {
+				if (joinMembership.get(sk) !== currentMembership.get(sk)) {
+					addMemberServer(sk);
 				}
 			}
 			await resyncOutgoingDeviceListPokes(

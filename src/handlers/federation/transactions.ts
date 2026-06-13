@@ -972,6 +972,32 @@ const processPdu = async (
 
 	// The create event is special: it has no prev/auth events to validate
 	// against and is authed purely by checkEventAuth below.
+	// MSC3706 leniency: while the room is partial-state and we do not yet hold the
+	// SENDER's membership (it was omitted from send_join and arrives at resync),
+	// defer the STATE-BEFORE check below — an auth check against our incomplete
+	// state can wrongly reject a valid event from a member we just don't know
+	// about. Gated on the sender being unknown so structurally-bad events from
+	// KNOWN senders are still rejected, and (since a non-partial room never sets
+	// it) it never weakens normal federation auth. The claimed-auth check is NOT
+	// deferred: it auths against the event's OWN auth_events, which the event
+	// always supplies, so it is always decidable — a sender who genuinely lacks
+	// permission per their declared auth chain is rejected immediately.
+	//
+	// A self-membership transition (sender == state_key, e.g. a user leaving) is
+	// ALSO deferred even when we DO hold the sender's membership: under partial
+	// state that membership may itself be an optimistically-accepted event that
+	// the resync will reject (e.g. a bad kick that wrongly set the user to leave),
+	// so our "current" value is untrustworthy. The self-leave already passed the
+	// claimed-auth check against its own (consistent) auth chain and is
+	// self-authorising, so accept it and let the resync reconcile — without this,
+	// a user wrongly kicked during the partial join could never actually leave.
+	const haveSender = room.state_events.has(`m.room.member\x1f${pdu.sender}`);
+	const isSelfMembership =
+		pdu.type === "m.room.member" && pdu.sender === pdu.state_key;
+	const lenientUnderPartial =
+		!!(await storage.getRoomPartialState(pdu.room_id)) &&
+		(!haveSender || isSelfMembership);
+
 	if (pdu.type !== "m.room.create") {
 		// Claimed-auth-state check (Synapse check_state_independent +
 		// check_state_dependent_auth_rules). Reconstruct the state from the event's
@@ -1013,18 +1039,13 @@ const processPdu = async (
 	try {
 		checkEventAuth(pdu, eventId, resolvedStateBefore ?? room);
 	} catch (err) {
-		// MSC3706: while the room is partial-state we do not yet hold every
-		// member event (they were omitted from send_join and arrive at resync), so
-		// an auth check against our incomplete state can wrongly reject a perfectly
-		// valid event from a member we just don't know about. Accept such events
-		// optimistically — synapse persists them with partial state and reconciles
-		// at resync. We only do so when our state genuinely lacks the sender's
-		// membership, so structurally-bad events are still rejected.
-		const haveSender = room.state_events.has(
-			`m.room.member\x1f${pdu.sender}`,
-		);
-		const partial = !!(await storage.getRoomPartialState(pdu.room_id));
-		if (!(partial && !haveSender)) {
+		// MSC3706: while the room is partial-state we do not yet hold every member
+		// event (they were omitted from send_join and arrive at resync), so an auth
+		// check against our incomplete state can wrongly reject a perfectly valid
+		// event from a member we just don't know about. Accept such events
+		// optimistically (same condition as the claimed-auth check above) —
+		// synapse persists them with partial state and reconciles at resync.
+		if (!lenientUnderPartial) {
 			throw new RejectedEventError(
 				err instanceof Error ? err.message : "Auth check failed",
 			);

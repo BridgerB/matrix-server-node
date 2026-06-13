@@ -724,15 +724,15 @@ const checkMembershipAuth = (event: PDU, roomState: RoomState): void => {
 				}
 				return;
 			}
-			// Kick: target must currently be join, invite, or knock (rejecting a
-			// knock is a leave issued by a member with kick power).
-			if (
-				targetMembership !== "join" &&
-				targetMembership !== "invite" &&
-				targetMembership !== "knock"
-			) {
-				throw forbidden("Cannot kick a user who is not in the room");
-			}
+			// Kick: authorized purely by power level — the spec's m.room.member
+			// `leave` rule (and synapse's _is_membership_change_allowed) does NOT
+			// require the target to currently be join/invite/knock. Kicking an
+			// already-departed (or, under partial state, not-yet-known) target is
+			// allowed as long as the PL checks below pass; it is simply idempotent
+			// state-wise. This matters for partial-state joins, where a kick whose
+			// auth_events legitimately omit the target's membership must pass the
+			// claimed-auth check and only be rejected later if the SENDER turns out
+			// to have already left (caught by the state-before / resync re-auth).
 			const kickPl = pl.kick ?? 50;
 			if (senderPl < kickPl || senderPl <= targetPl) {
 				throw forbidden(`You cannot kick user ${targetUserId}.`);
