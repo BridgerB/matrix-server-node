@@ -39,8 +39,8 @@ import {
 import { indexRelation } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { JsonObject } from "../types/json.ts";
 import type { UserId } from "../types/identifiers.ts";
+import type { JsonObject } from "../types/json.ts";
 
 /** Account-data type under which a user's pending delayed events are persisted. */
 const ACCOUNT_DATA_TYPE = "org.matrix.msc4140.delayed_events";

@@ -1,9 +1,9 @@
 import { createHash, randomBytes } from "node:crypto";
 import { request as httpsRequest, type RequestOptions } from "node:https";
-import { resolveServer } from "../federation/discovery.ts";
 import { MatrixError, notFound } from "../errors.ts";
+import { resolveServer } from "../federation/discovery.ts";
 import type { Handler } from "../router.ts";
-import { signJson, type SigningKey } from "../signing.ts";
+import { type SigningKey, signJson } from "../signing.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { ServerName } from "../types/index.ts";
 import type { StoredMedia } from "../types/internal.ts";

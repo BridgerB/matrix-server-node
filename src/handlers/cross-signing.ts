@@ -1,7 +1,7 @@
-import { canonicalJson } from "../events.ts";
 import { generateSessionId } from "../crypto.ts";
 import { verifyPassword } from "../crypto-utils.ts";
 import { badJson, forbidden } from "../errors.ts";
+import { canonicalJson } from "../events.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { CrossSigningKey } from "../types/e2ee.ts";

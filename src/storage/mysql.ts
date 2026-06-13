@@ -41,11 +41,11 @@ import {
 	eventToStrippedState,
 	INVITE_STATE_TYPES,
 } from "./ephemeral.ts";
+import type { Storage, StoredSession } from "./interface.ts";
 import {
 	collapseReceiptsMsc4102,
 	PENDING_FEDERATION_EDU_CAP,
 } from "./interface.ts";
-import type { Storage, StoredSession } from "./interface.ts";
 import { rowToSession, rowToUser } from "./sql-helpers.ts";
 
 export class MysqlStorage extends EphemeralMixin implements Storage {

@@ -9,9 +9,9 @@ import { isServerAllowedByAcl } from "../../federation/acl.ts";
 import type { FederationClient } from "../../federation/client.ts";
 import { verifyOriginSignature } from "../../federation/verify.ts";
 import { domainOf } from "../../ids.ts";
-import { resolveState } from "../../state-resolution.ts";
 import type { Handler } from "../../router.ts";
 import type { SigningKey } from "../../signing.ts";
+import { resolveState } from "../../state-resolution.ts";
 import type { Storage } from "../../storage/interface.ts";
 import type { EDU, PDU } from "../../types/events.ts";
 import type {

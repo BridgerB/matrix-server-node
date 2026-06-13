@@ -1,9 +1,9 @@
-import { forbidden, missingToken } from "../errors.ts";
-import { extractAccessToken } from "./auth.ts";
 import { findAppserviceByToken } from "../appservice/registration.ts";
-import type { AppserviceRegistration } from "../types/appservice.ts";
+import { forbidden, missingToken } from "../errors.ts";
 import type { Middleware } from "../router.ts";
+import type { AppserviceRegistration } from "../types/appservice.ts";
 import type { DeviceId, UserId } from "../types/identifiers.ts";
+import { extractAccessToken } from "./auth.ts";
 
 /**
  * Middleware that authenticates requests from application services.

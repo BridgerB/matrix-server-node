@@ -270,9 +270,10 @@ const mainlineSort = (
 	}
 
 	// mainline_map: event_id → depth (1-based from the root end).
-	const mainlineMap = new Map<EventId, number>();
 	const reversed = [...mainline].reverse();
-	reversed.forEach((id, i) => mainlineMap.set(id, i + 1));
+	const mainlineMap = new Map<EventId, number>(
+		reversed.map((id, i) => [id, i + 1]),
+	);
 
 	const mainlineDepth = (event: PDU): number => {
 		let tmp: PDU | undefined = event;

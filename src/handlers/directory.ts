@@ -1,5 +1,4 @@
 import { badJson, forbidden, notFound } from "../errors.ts";
-import { domainOf } from "../ids.ts";
 import {
 	buildEvent,
 	checkEventAuth,
@@ -10,13 +9,14 @@ import {
 	requireJoinedRoom,
 	selectAuthEvents,
 } from "../events.ts";
+import type { FederationClient } from "../federation/client.ts";
+import { domainOf } from "../ids.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type {
 	PublicRoomEntry,
 	PublicRoomsResponse,
 } from "../types/directory.ts";
-import type { FederationClient } from "../federation/client.ts";
 import type { RoomAlias, RoomId, ServerName, UserId } from "../types/index.ts";
 import type { JsonObject } from "../types/json.ts";
 

@@ -2,5 +2,12 @@
 	"$schema": "https://biomejs.dev/schemas/2.4.5/schema.json",
 	"files": {
 		"includes": ["src/**/*.ts"]
+	},
+	"linter": {
+		"rules": {
+			"style": {
+				"noNonNullAssertion": "off"
+			}
+		}
 	}
 }

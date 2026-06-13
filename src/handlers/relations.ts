@@ -222,8 +222,8 @@ const addChildMetadata = (
 		.replace(/=+$/, "");
 
 	const unsigned = (clientEvent.unsigned ?? {}) as Record<string, unknown>;
-	unsigned["children"] = { [REL_TYPE]: kids.length };
-	unsigned["children_hash"] = hash;
+	unsigned.children = { [REL_TYPE]: kids.length };
+	unsigned.children_hash = hash;
 	clientEvent.unsigned = unsigned as ClientEvent["unsigned"];
 };
 

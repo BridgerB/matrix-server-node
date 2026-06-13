@@ -1,5 +1,4 @@
 import { randomBytes } from "node:crypto";
-import { domainOf } from "../ids.ts";
 import { generateRoomId } from "../crypto.ts";
 import {
 	badJson,
@@ -19,17 +18,15 @@ import {
 	getPowerLevels,
 	getUserPowerLevel,
 	isRoomVersion12Plus,
+	membershipOf,
 	selectAuthEvents,
 	sendStateEvent,
 	validateAdditionalCreators,
-	membershipOf,
 } from "../events.ts";
 import type { FederationClient } from "../federation/client.ts";
 import { fanoutEdu, fanoutEvent } from "../federation/outbound.ts";
+import { domainOf } from "../ids.ts";
 import { getInviteRuleForTarget } from "../invite-filter.ts";
-import { resyncOutgoingDeviceListPokes } from "./e2ee.ts";
-import { copyPredecessorPushRulesOnJoin } from "./room-upgrade.ts";
-
 import type { Handler } from "../router.ts";
 import type { SigningKey } from "../signing.ts";
 import { signEvent } from "../signing.ts";
@@ -48,6 +45,8 @@ import type { JsonObject } from "../types/json.ts";
 import type { CreateRoomRequest } from "../types/room-operations.ts";
 import type { RoomVersion } from "../types/room-versions.ts";
 import type { RoomPowerLevelsContent } from "../types/state-events.ts";
+import { resyncOutgoingDeviceListPokes } from "./e2ee.ts";
+import { copyPredecessorPushRulesOnJoin } from "./room-upgrade.ts";
 
 /**
  * For a restricted (or knock_restricted) room, find a LOCAL user who is joined
@@ -380,7 +379,7 @@ export const postCreateRoom =
 
 		// Room versions before 11 require "creator" in create event content
 		const roomVersionNum = parseInt(roomVersion, 10);
-		if (!isNaN(roomVersionNum) && roomVersionNum < 11) {
+		if (!Number.isNaN(roomVersionNum) && roomVersionNum < 11) {
 			createContent.creator = userId;
 		}
 
@@ -1750,7 +1749,7 @@ const resyncPartialStateRoom = async (
 			// 4. Resync complete — clear the flag (wakes /members and /sync waiters).
 			await storage.clearRoomPartialState(roomId);
 			return;
-		} catch (e) {
+		} catch (_e) {
 			// Try the next server (PartialStateJoinSyncsUsingOtherHomeservers).
 		}
 	}

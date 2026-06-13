@@ -1,7 +1,7 @@
 import { forbidden, notFound } from "../../errors.ts";
-import { domainOf } from "../../ids.ts";
 import { computeEventId, redactEvent } from "../../events.ts";
 import { isServerAllowedByAcl } from "../../federation/acl.ts";
+import { domainOf } from "../../ids.ts";
 import type { Handler } from "../../router.ts";
 import type { Storage } from "../../storage/interface.ts";
 import type { PDU } from "../../types/events.ts";
@@ -88,7 +88,7 @@ const eventVisibleToServer = async (
 	const state = await stateAtEvent(storage, event);
 	const visEvent = state.get("m.room.history_visibility\x1f");
 	const visibility =
-		(visEvent?.content["history_visibility"] as string | undefined) ?? "shared";
+		(visEvent?.content.history_visibility as string | undefined) ?? "shared";
 
 	if (visibility !== "invited" && visibility !== "joined") {
 		return true;
@@ -98,7 +98,7 @@ const eventVisibleToServer = async (
 		if (!key.startsWith("m.room.member\x1f")) continue;
 		const stateKey = key.slice("m.room.member\x1f".length);
 		if (domainOf(stateKey) !== server) continue;
-		const membership = stateEvent.content["membership"] as string | undefined;
+		const membership = stateEvent.content.membership as string | undefined;
 		if (membership === "join") return true;
 		if (membership === "invite" && visibility === "invited") return true;
 	}

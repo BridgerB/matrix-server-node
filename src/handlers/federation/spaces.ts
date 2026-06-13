@@ -1,7 +1,7 @@
 import { forbidden, notFound } from "../../errors.ts";
-import { domainOf } from "../../ids.ts";
 import { countJoinedMembers } from "../../events.ts";
 import { isServerAllowedByAcl } from "../../federation/acl.ts";
+import { domainOf } from "../../ids.ts";
 import type { Handler } from "../../router.ts";
 import type { Storage } from "../../storage/interface.ts";
 import type { PDU, StrippedStateEvent } from "../../types/events.ts";

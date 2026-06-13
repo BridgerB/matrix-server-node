@@ -1,16 +1,20 @@
-import { MatrixError } from "../errors.ts";
+import {
+	findAppserviceForUser,
+	parseRegistrations,
+} from "../appservice/registration.ts";
 import {
 	badAlias,
 	badJson,
 	forbidden,
 	invalidParam,
+	MatrixError,
 	missingParam,
 	notFound,
 } from "../errors.ts";
 import {
-	parseRegistrations,
-	findAppserviceForUser,
-} from "../appservice/registration.ts";
+	matchesRoomEventFilter,
+	parseRoomEventFilter,
+} from "../event-filter.ts";
 import {
 	buildEvent,
 	canonicalJson,
@@ -28,19 +32,14 @@ import {
 	requireJoinedRoom,
 	selectAuthEvents,
 } from "../events.ts";
-import { signEvent } from "../signing.ts";
-import {
-	matchesRoomEventFilter,
-	parseRoomEventFilter,
-} from "../event-filter.ts";
 import type { FederationClient } from "../federation/client.ts";
-import { verifyOriginSignature } from "../federation/verify.ts";
 import { fanoutEvent } from "../federation/outbound.ts";
+import { verifyOriginSignature } from "../federation/verify.ts";
 import { getIgnoredUsers } from "../ignored-users.ts";
 import { bundleAggregations, indexRelation } from "../relations.ts";
-import { migrateRoomPushRules } from "./room-upgrade.ts";
 import type { Handler } from "../router.ts";
 import type { SigningKey } from "../signing.ts";
+import { signEvent } from "../signing.ts";
 import type { Storage } from "../storage/interface.ts";
 import type {
 	EventId,
@@ -50,6 +49,7 @@ import type {
 	UserId,
 } from "../types/index.ts";
 import type { JsonObject } from "../types/json.ts";
+import { migrateRoomPushRules } from "./room-upgrade.ts";
 
 /**
  * Access control for single-event fetch endpoints (`/event/:eventId`,
@@ -925,7 +925,7 @@ export const getMessages =
 				"m.relates_to"
 			];
 			if (relatesTo && typeof relatesTo === "object") {
-				const rt = (relatesTo as Record<string, unknown>)["rel_type"];
+				const rt = (relatesTo as Record<string, unknown>).rel_type;
 				if (typeof rt === "string") return rt;
 			}
 			return undefined;
@@ -970,7 +970,9 @@ export const getMessages =
 					// LATER (higher stream index) — ancestors backfilled after their
 					// descendants (jump-to-date fetches a remote event + its chain).
 					const streamIdx = new Map<EventId, number>();
-					localAll.events.forEach((e, i) => streamIdx.set(e.eventId, i));
+					localAll.events.forEach((e, i) => {
+						streamIdx.set(e.eventId, i);
+					});
 					const outOfOrder = localAll.events.some((e, i) =>
 						e.event.prev_events.some((p) => {
 							const pi = streamIdx.get(p as EventId);
@@ -1812,9 +1814,7 @@ const backfillRemoteEventById = async (
 			try {
 				await storage.storeEvent(event, id);
 				await indexRelation(storage, event, id);
-			} catch {
-				continue;
-			}
+			} catch {}
 		}
 
 		const stored = await storage.getEvent(eventId);

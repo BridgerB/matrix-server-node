@@ -1,8 +1,8 @@
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { findAppserviceByToken } from "../appservice/registration.ts";
 import { badJson, forbidden, notFound } from "../errors.ts";
 import { extractAccessToken } from "../middleware/auth.ts";
-import { findAppserviceByToken } from "../appservice/registration.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { AppserviceRegistration } from "../types/appservice.ts";

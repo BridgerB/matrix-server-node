@@ -1,4 +1,4 @@
-import { MatrixError, badJson, missingParam, notFound } from "../errors.ts";
+import { badJson, MatrixError, missingParam, notFound } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { KeyBackupData } from "../types/e2ee.ts";

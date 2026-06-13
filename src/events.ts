@@ -525,8 +525,8 @@ export const selectAuthEvents = (
 		// join carrying the authorising-user field. We key this off the member
 		// content rather than the live join_rules so the auth chain is stable
 		// regardless of later join-rule changes.
-		if (content?.["membership"] === "join") {
-			const authorisingUser = content["join_authorised_via_users_server"] as
+		if (content?.membership === "join") {
+			const authorisingUser = content.join_authorised_via_users_server as
 				| string
 				| undefined;
 			if (authorisingUser && authorisingUser !== stateKey) {
@@ -909,7 +909,7 @@ export const checkEventAuth = (
 	if (event.type === "m.room.power_levels") {
 		const roomVersion = roomState.room_version ?? "1";
 		const versionNum = parseInt(roomVersion, 10);
-		if (!isNaN(versionNum) && versionNum >= 10) {
+		if (!Number.isNaN(versionNum) && versionNum >= 10) {
 			validateIntegerPowerLevels(event);
 		}
 		// MSC4289: in v12+ the room creator(s) hold an implicit infinite power
@@ -969,11 +969,7 @@ export const checkEventAuth = (
 	// by another user ID (normal power levels still apply, so this is a stricter
 	// gate, never a looser one).
 	const stateKey = event.state_key;
-	if (
-		stateKey !== undefined &&
-		stateKey.startsWith("@") &&
-		stateKey !== event.sender
-	) {
+	if (stateKey?.startsWith("@") && stateKey !== event.sender) {
 		if (isMsc3757Enabled(roomState.room_version)) {
 			// Parse the owning user ID out of the state key: it is the state key
 			// up to (but excluding) the first "_" that appears after the domain's

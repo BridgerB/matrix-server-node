@@ -73,7 +73,7 @@ const sendCommand = async (
 	expectedPrefix: string,
 ): Promise<string> => {
 	return new Promise<string>((resolve, reject) => {
-		socket.write(command + "\r\n", "utf-8", (err) => {
+		socket.write(`${command}\r\n`, "utf-8", (err) => {
 			if (err) {
 				reject(err);
 				return;

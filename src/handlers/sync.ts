@@ -1,8 +1,8 @@
 import { MatrixError } from "../errors.ts";
 import { matchesRoomEventFilter } from "../event-filter.ts";
 import { pduToClientEvent } from "../events.ts";
-import { getIgnoredUsers } from "../ignored-users.ts";
 import { getIgnoredInviteSenders } from "../ignored-invites.ts";
+import { getIgnoredUsers } from "../ignored-users.ts";
 import { evaluatePushRules, getOrInitRules } from "../push-rules.ts";
 import { bundleAggregations } from "../relations.ts";
 import type { Handler } from "../router.ts";
@@ -878,7 +878,7 @@ const buildInitialSync = async (
 						matchesRoomEventFilter(e.clientEvent, filter.timelineFilter),
 					)
 				: recentWindow;
-			let timelineClientEvents = kept.map((e) => e.clientEvent);
+			const timelineClientEvents = kept.map((e) => e.clientEvent);
 
 			// Events still present in the timeline after filtering are already known
 			// to the client, so they are excluded from the `state` block.
@@ -1245,7 +1245,7 @@ const buildIncrementalSync = async (
 						)
 					: filteredCandidates;
 			const newEvents = kept;
-			let timelineClientEvents = kept.map((e) => e.clientEvent);
+			const timelineClientEvents = kept.map((e) => e.clientEvent);
 
 			await bundleAggregations(storage, timelineClientEvents, userId);
 

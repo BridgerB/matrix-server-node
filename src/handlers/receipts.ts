@@ -1,7 +1,7 @@
 import { generateToken } from "../crypto.ts";
 import { membershipOf } from "../events.ts";
-import { domainOf } from "../ids.ts";
 import type { FederationClient } from "../federation/client.ts";
+import { domainOf } from "../ids.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { EventId, RoomId, ServerName, UserId } from "../types/index.ts";

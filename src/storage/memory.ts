@@ -41,11 +41,11 @@ import {
 	eventToStrippedState,
 	INVITE_STATE_TYPES,
 } from "./ephemeral.ts";
+import type { Storage, StoredSession } from "./interface.ts";
 import {
 	collapseReceiptsMsc4102,
 	PENDING_FEDERATION_EDU_CAP,
 } from "./interface.ts";
-import type { Storage, StoredSession } from "./interface.ts";
 
 /** True for an empty JSON object `{}` (MSC3391 account-data tombstone). */
 function isEmptyJsonObject(content: JsonObject): boolean {

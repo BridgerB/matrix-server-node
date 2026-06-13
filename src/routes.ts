@@ -2,20 +2,10 @@ import { parseRegistrations } from "./appservice/registration.ts";
 import { createFederationClient } from "./federation/client.ts";
 import { flushAllPendingEdus } from "./federation/outbound.ts";
 import {
-	postAppservicePing,
-	putAppserviceDirectoryListRoom,
-} from "./handlers/appservice.ts";
-import {
 	getWhoAmI,
 	postChangePassword,
 	postDeactivate,
 } from "./handlers/account.ts";
-import {
-	getAdminLock,
-	getAdminSuspend,
-	putAdminLock,
-	putAdminSuspend,
-} from "./handlers/admin.ts";
 import {
 	deleteGlobalAccountData,
 	deleteRoomAccountData,
@@ -27,6 +17,26 @@ import {
 	putRoomAccountData,
 	putTag,
 } from "./handlers/account-data.ts";
+import {
+	getAdminLock,
+	getAdminSuspend,
+	putAdminLock,
+	putAdminSuspend,
+} from "./handlers/admin.ts";
+import {
+	postAppservicePing,
+	putAppserviceDirectoryListRoom,
+} from "./handlers/appservice.ts";
+import {
+	postDeviceSigningUpload,
+	postSignaturesUpload,
+} from "./handlers/cross-signing.ts";
+import {
+	getDelayedEvents,
+	postDelayedEventAction,
+	putDelayedEvent,
+	putDelayedStateEvent,
+} from "./handlers/delayed-events.ts";
 import {
 	deleteDevice,
 	deleteDevices,
@@ -77,6 +87,10 @@ import {
 import { getKeyQuery, postKeyQuery } from "./handlers/federation/key-notary.ts";
 import { getServerKeys } from "./handlers/federation/keys.ts";
 import {
+	getFederationMediaDownload,
+	getFederationMediaThumbnail,
+} from "./handlers/federation/media.ts";
+import {
 	getMakeJoin,
 	getMakeKnock,
 	getMakeLeave,
@@ -96,16 +110,8 @@ import {
 	getQueryProfile,
 	postFederationPublicRooms,
 } from "./handlers/federation/query.ts";
-import {
-	getFederationMediaDownload,
-	getFederationMediaThumbnail,
-} from "./handlers/federation/media.ts";
 import { postFederationHierarchy } from "./handlers/federation/spaces.ts";
 import { putFederationSend } from "./handlers/federation/transactions.ts";
-import {
-	postDeviceSigningUpload,
-	postSignaturesUpload,
-} from "./handlers/cross-signing.ts";
 import { getFilterById, postCreateFilter } from "./handlers/filters.ts";
 import {
 	deleteKeyBackupAll,
@@ -123,12 +129,6 @@ import {
 	putKeyBackupVersion,
 } from "./handlers/key-backup.ts";
 import { getLoginFlows, postLogin } from "./handlers/login.ts";
-import {
-	getSsoCallback,
-	getSsoConfig,
-	getSsoFallback,
-	getSsoRedirect,
-} from "./handlers/sso.ts";
 import { postLogout, postLogoutAll } from "./handlers/logout.ts";
 import {
 	getConfig,
@@ -173,18 +173,10 @@ import {
 	postFederationEventRelationships,
 } from "./handlers/relations.ts";
 import {
-	getDelayedEvents,
-	postDelayedEventAction,
-	putDelayedEvent,
-	putDelayedStateEvent,
-} from "./handlers/delayed-events.ts";
-import {
 	postReportEvent,
 	postReportRoom,
 	postReportUser,
 } from "./handlers/report.ts";
-import { getRoomInitialSync } from "./handlers/room-initial-sync.ts";
-import { getRoomSummary } from "./handlers/room-summary.ts";
 import {
 	getAllState,
 	getContext,
@@ -198,6 +190,8 @@ import {
 	putSendEvent,
 	putStateEvent,
 } from "./handlers/room-events.ts";
+import { getRoomInitialSync } from "./handlers/room-initial-sync.ts";
+import { getRoomSummary } from "./handlers/room-summary.ts";
 import { postRoomUpgrade } from "./handlers/room-upgrade.ts";
 import {
 	getJoinedRooms,
@@ -213,15 +207,15 @@ import {
 	resumePartialStateResyncs,
 } from "./handlers/rooms.ts";
 import { postSearch } from "./handlers/search.ts";
-import { getSpaceHierarchy } from "./handlers/spaces.ts";
 import { slidingSync } from "./handlers/sliding-sync.ts";
-import { getSync } from "./handlers/sync.ts";
-import { getThreads } from "./handlers/threads.ts";
+import { getSpaceHierarchy } from "./handlers/spaces.ts";
 import {
-	deleteThreadSubscription,
-	getThreadSubscription,
-	putThreadSubscription,
-} from "./handlers/thread-subscriptions.ts";
+	getSsoCallback,
+	getSsoConfig,
+	getSsoFallback,
+	getSsoRedirect,
+} from "./handlers/sso.ts";
+import { getSync } from "./handlers/sync.ts";
 import {
 	getProtocol,
 	getProtocols,
@@ -230,6 +224,12 @@ import {
 	getThirdpartyUser,
 	getThirdpartyUserByProtocol,
 } from "./handlers/thirdparty.ts";
+import {
+	deleteThreadSubscription,
+	getThreadSubscription,
+	putThreadSubscription,
+} from "./handlers/thread-subscriptions.ts";
+import { getThreads } from "./handlers/threads.ts";
 import {
 	getThreePids,
 	postAddThreePid,
@@ -250,8 +250,8 @@ import {
 	postThreePidUnbind,
 } from "./handlers/threepid-verify.ts";
 import { putTyping } from "./handlers/typing.ts";
-import { postUserDirectorySearch } from "./handlers/user-directory.ts";
 import { getUrlPreview } from "./handlers/url-preview.ts";
+import { postUserDirectorySearch } from "./handlers/user-directory.ts";
 import { getTurnServer } from "./handlers/voip.ts";
 import { requireAppserviceAuth } from "./middleware/appservice-auth.ts";
 import { requireAuth } from "./middleware/auth.ts";

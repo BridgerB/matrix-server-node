@@ -1,12 +1,12 @@
 import { pduToClientEvent } from "../events.ts";
 import { evaluatePushRules, getOrInitRules } from "../push-rules.ts";
-import { getThreadSubscriptionsForSync } from "./thread-subscriptions.ts";
 import { bundleAggregations } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { ClientEvent } from "../types/events.ts";
 import type { DeviceId, RoomId, UserId } from "../types/index.ts";
 import type { RoomPowerLevelsContent } from "../types/state-events.ts";
+import { getThreadSubscriptionsForSync } from "./thread-subscriptions.ts";
 
 const MAX_TIMEOUT = 30000;
 const DEFAULT_TIMELINE_LIMIT = 20;

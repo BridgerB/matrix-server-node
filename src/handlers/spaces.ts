@@ -1,7 +1,7 @@
 import { notFound } from "../errors.ts";
-import { domainOf } from "../ids.ts";
 import { countJoinedMembers, getMembership } from "../events.ts";
 import type { FederationClient } from "../federation/client.ts";
+import { domainOf } from "../ids.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { SpaceHierarchyRoom } from "../types/directory.ts";

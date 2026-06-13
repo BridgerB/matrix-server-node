@@ -268,7 +268,8 @@ export const getThreadSubscriptionsForSync = (
 		const roomId = parts[1]!;
 		const threadRootId = parts[2]!;
 
-		(result[roomId] ??= {})[threadRootId] = {
+		result[roomId] ??= {};
+		result[roomId][threadRootId] = {
 			automatic: state.subscription.automatic,
 			bump_stamp: state.subscription.bumpStamp,
 		};

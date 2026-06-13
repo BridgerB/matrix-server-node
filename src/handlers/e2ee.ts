@@ -1,9 +1,9 @@
 import { generateToken } from "../crypto.ts";
-import { domainOf } from "../ids.ts";
-import { membershipOf } from "../events.ts";
 import { badJson } from "../errors.ts";
+import { membershipOf } from "../events.ts";
 import type { FederationClient } from "../federation/client.ts";
 import { deliverEduToDestination } from "../federation/outbound.ts";
+import { domainOf } from "../ids.ts";
 import type { Handler } from "../router.ts";
 import type { SigningKey } from "../signing.ts";
 import type { Storage } from "../storage/interface.ts";
@@ -528,10 +528,12 @@ export const postKeysClaim =
 			const isLocal = !serverName || !federationClient || dest === serverName;
 			for (const [targetDeviceId, algorithm] of Object.entries(devices)) {
 				if (isLocal) {
-					(localClaims[targetUserId] ??= {})[targetDeviceId] = algorithm;
+					localClaims[targetUserId] ??= {};
+					localClaims[targetUserId][targetDeviceId] = algorithm;
 				} else {
 					const group = remoteByDest.get(dest) ?? {};
-					(group[targetUserId] ??= {})[targetDeviceId] = algorithm;
+					group[targetUserId] ??= {};
+					group[targetUserId][targetDeviceId] = algorithm;
 					remoteByDest.set(dest, group);
 				}
 			}
@@ -585,7 +587,8 @@ export const postKeysClaim =
 					};
 					if (resp.one_time_keys) {
 						for (const [u, devs] of Object.entries(resp.one_time_keys)) {
-							const existing = (oneTimeKeys[u as UserId] ??= {}) as Record<
+							oneTimeKeys[u as UserId] ??= {};
+							const existing = oneTimeKeys[u as UserId] as Record<
 								DeviceId,
 								Record<string, string | JsonObject>
 							>;

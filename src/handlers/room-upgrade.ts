@@ -8,11 +8,11 @@ import {
 	type EventContext,
 	getUserPowerLevel,
 	isRoomVersion12Plus,
+	membershipOf,
 	requireJoinedRoom,
 	selectAuthEvents,
 	sendStateEvent,
 	validateAdditionalCreators,
-	membershipOf,
 } from "../events.ts";
 import type { FederationClient } from "../federation/client.ts";
 import { fanoutEvent } from "../federation/outbound.ts";

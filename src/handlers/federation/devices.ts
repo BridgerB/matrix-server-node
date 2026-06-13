@@ -167,12 +167,16 @@ export const postFederationKeysClaim =
 						algorithm,
 					);
 					if (claimed) {
-						const userKeys = (oneTimeKeys[userId as UserId] ??= {}) as Record<
+						oneTimeKeys[userId as UserId] ??= {};
+						const userKeys = oneTimeKeys[userId as UserId] as Record<
 							DeviceId,
 							Record<KeyId, unknown>
 						>;
-						const deviceKeys = (userKeys[deviceId as DeviceId] ??=
-							{}) as Record<KeyId, unknown>;
+						userKeys[deviceId as DeviceId] ??= {};
+						const deviceKeys = userKeys[deviceId as DeviceId] as Record<
+							KeyId,
+							unknown
+						>;
 						deviceKeys[claimed.keyId] = claimed.key;
 					}
 				}
