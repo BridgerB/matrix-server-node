@@ -1,4 +1,5 @@
 import { notFound } from "../errors.ts";
+import { domainOf } from "../ids.ts";
 import { countJoinedMembers, getMembership } from "../events.ts";
 import type { FederationClient } from "../federation/client.ts";
 import type { Handler } from "../router.ts";
@@ -243,7 +244,7 @@ export const getSpaceHierarchy =
 			if (visited.has(roomId)) continue;
 			visited.add(roomId);
 
-			const roomServer = roomId.split(":").slice(1).join(":");
+			const roomServer = domainOf(roomId);
 			const isLocal =
 				localServer === undefined || roomServer === localServer;
 

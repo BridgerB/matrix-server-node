@@ -1,4 +1,5 @@
 import { forbidden, notFound } from "../../errors.ts";
+import { domainOf } from "../../ids.ts";
 import { computeEventId, redactEvent } from "../../events.ts";
 import { isServerAllowedByAcl } from "../../federation/acl.ts";
 import type { Handler } from "../../router.ts";
@@ -14,11 +15,6 @@ import type {
 /**
  * Extract the server name portion of a Matrix user ID (`@user:server`).
  */
-const serverFromUserId = (userId: string): string => {
-	const idx = userId.indexOf(":");
-	return idx === -1 ? "" : userId.slice(idx + 1);
-};
-
 /**
  * Reconstruct the room state visible at a given event by folding together all
  * state events reachable through its `prev_events` chain (plus the event itself
@@ -101,7 +97,7 @@ const eventVisibleToServer = async (
 	for (const [key, stateEvent] of state) {
 		if (!key.startsWith("m.room.member\x1f")) continue;
 		const stateKey = key.slice("m.room.member\x1f".length);
-		if (serverFromUserId(stateKey) !== server) continue;
+		if (domainOf(stateKey) !== server) continue;
 		const membership = stateEvent.content["membership"] as string | undefined;
 		if (membership === "join") return true;
 		if (membership === "invite" && visibility === "invited") return true;

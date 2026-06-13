@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { domainOf } from "../ids.ts";
 import { generateRoomId } from "../crypto.ts";
 import {
 	badJson,
@@ -80,7 +81,7 @@ const findAuthorisingLocalUser = (
 		if (membership !== "join") continue;
 
 		const memberId = key.slice("m.room.member\x1f".length) as UserId;
-		const memberServer = memberId.split(":").slice(1).join(":");
+		const memberServer = domainOf(memberId);
 		if (memberServer !== localServerName) continue;
 
 		const memberPl = getUserPowerLevel(memberId, room);
@@ -125,7 +126,7 @@ const serversThatCanIssueInvite = (
 		const memberId = key.slice("m.room.member\x1f".length) as UserId;
 		if (getUserPowerLevel(memberId, room) < invitePl) continue;
 
-		const memberServer = memberId.split(":").slice(1).join(":");
+		const memberServer = domainOf(memberId);
 		if (!memberServer || memberServer === localServerName) continue;
 		if (!servers.includes(memberServer as ServerName)) {
 			servers.push(memberServer as ServerName);
@@ -159,7 +160,7 @@ const isServerResidentInRoom = (
 			.membership as string | undefined;
 		if (membership !== "join") continue;
 		const memberId = key.slice("m.room.member\x1f".length);
-		const memberServer = memberId.split(":").slice(1).join(":");
+		const memberServer = domainOf(memberId);
 		if (memberServer === localServerName) return true;
 	}
 	return false;
@@ -227,7 +228,7 @@ const collectMembershipDestinations = async (
 		if (s && s !== serverName) destinations.add(s as ServerName);
 	}
 
-	const targetServer = targetUserId.split(":").slice(1).join(":");
+	const targetServer = domainOf(targetUserId);
 	if (targetServer && targetServer !== serverName) {
 		destinations.add(targetServer as ServerName);
 	}
@@ -627,7 +628,7 @@ export const postCreateRoom =
 			if (body.is_direct) inviteContent.is_direct = true;
 			for (const invitee of body.invite) {
 				const inviteeServer = invitee.includes(":")
-					? invitee.split(":").slice(1).join(":")
+					? domainOf(invitee)
 					: serverName;
 				if (signingKey && federationClient && inviteeServer !== serverName) {
 					// Remote invitee: invite over federation so their server learns of
@@ -823,7 +824,7 @@ const notifyDeviceListUpdateOnJoin = async (
 	if (await storage.getRoomPartialState(roomId)) return;
 
 	// Only the joining user's own server announces that user's devices.
-	const userServer = userId.split(":").slice(1).join(":");
+	const userServer = domainOf(userId);
 	if (userServer !== serverName) return;
 
 	// Enumerate the user's devices. The device list update is per-device; when
@@ -965,7 +966,7 @@ export const postJoin =
 			//     from actual room state, so safe to keep regardless.
 			const serverNameParams = req.query.getAll("server_name");
 			const roomServer = roomId.includes(":")
-				? roomId.split(":").slice(1).join(":")
+				? domainOf(roomId)
 				: undefined;
 
 			const serversToTry: string[] = [];
@@ -1005,7 +1006,7 @@ export const postJoin =
 					);
 					const inviter = inviteEvent?.sender;
 					if (typeof inviter === "string") {
-						const inviterServer = inviter.split(":").slice(1).join(":");
+						const inviterServer = domainOf(inviter);
 						if (
 							inviterServer &&
 							inviterServer !== serverName &&
@@ -1355,7 +1356,7 @@ const performFederationJoin = async (
 		// what lets us recover when the join-through server serves garbage state
 		// (PartialStateJoinSyncsUsingOtherHomeservers).
 		const stateSenderServers = (sendJoinBody.state ?? [])
-			.map((e) => (e.sender ? e.sender.split(":").slice(1).join(":") : ""))
+			.map((e) => (e.sender ? domainOf(e.sender) : ""))
 			.filter((s): s is string => !!s);
 		const resyncServers = [
 			...new Set(
@@ -1683,7 +1684,7 @@ const resyncPartialStateRoom = async (
 			const serversAtJoin = new Set<ServerName>();
 			const addMemberServer = (sk: string | undefined): void => {
 				if (!sk) return;
-				const srv = sk.split(":").slice(1).join(":");
+				const srv = domainOf(sk);
 				if (srv) serversAtJoin.add(srv as ServerName);
 			};
 			// Membership at the join snapshot (resident's /state), keyed by user.
@@ -1796,7 +1797,7 @@ export const postLeave =
 		// authoritative copy of the room lives on the owning server and must be
 		// told. This mirrors how dendrite/synapse distribute membership changes.
 		const roomServer = roomId.includes(":")
-			? roomId.split(":").slice(1).join(":")
+			? domainOf(roomId)
 			: undefined;
 		// If we are resident (hold the room's state with a joined local user) we can
 		// build the leave event ourselves and fan it out as a normal PDU — including
@@ -1968,7 +1969,7 @@ export const postInvite =
 		if (!body?.user_id) throw missingParam("Missing 'user_id'");
 
 		const inviteeServer = body.user_id.includes(":")
-			? body.user_id.split(":").slice(1).join(":")
+			? domainOf(body.user_id)
 			: serverName;
 
 		// MSC4155 invite filtering: when the invitee is local to this server, honour
@@ -2168,7 +2169,7 @@ export const postKnock =
 		// knock. Candidate servers come from ?server_name= and the room ID, plus
 		// any server we already know holds this room.
 		const roomServer = roomId.includes(":")
-			? roomId.split(":").slice(1).join(":")
+			? domainOf(roomId)
 			: undefined;
 		const needsFederation =
 			signingKey !== undefined &&

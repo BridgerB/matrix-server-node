@@ -1,4 +1,5 @@
 import { generateToken } from "../crypto.ts";
+import { domainOf } from "../ids.ts";
 import type { FederationClient } from "../federation/client.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
@@ -38,7 +39,7 @@ export const sendReceiptEdu = async (
 		if (membership !== "join") continue;
 		const memberId = event.state_key;
 		if (!memberId) continue;
-		const memberServer = memberId.split(":").slice(1).join(":");
+		const memberServer = domainOf(memberId);
 		if (memberServer && memberServer !== serverName) {
 			destinations.add(memberServer as ServerName);
 		}

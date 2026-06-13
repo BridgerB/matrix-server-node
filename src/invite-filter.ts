@@ -1,4 +1,5 @@
 import { globMatch } from "./glob.ts";
+import { domainOf } from "./ids.ts";
 import type { Storage } from "./storage/interface.ts";
 import type { UserId } from "./types/index.ts";
 import type { JsonObject } from "./types/json.ts";
@@ -39,7 +40,7 @@ export const getInviteRule = (
 	if (!config) return "allow";
 
 	const inviterServer = inviterUserId.includes(":")
-		? inviterUserId.split(":").slice(1).join(":")
+		? domainOf(inviterUserId)
 		: "";
 
 	const matchAny = (field: unknown, value: string): boolean => {

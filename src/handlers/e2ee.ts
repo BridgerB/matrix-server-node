@@ -1,4 +1,5 @@
 import { generateToken } from "../crypto.ts";
+import { domainOf } from "../ids.ts";
 import { badJson } from "../errors.ts";
 import type { FederationClient } from "../federation/client.ts";
 import { deliverEduToDestination } from "../federation/outbound.ts";
@@ -55,7 +56,7 @@ export const sendDeviceListUpdate = async (
 			if (membership !== "join") continue;
 			const memberId = event.state_key;
 			if (!memberId) continue;
-			const memberServer = memberId.split(":").slice(1).join(":");
+			const memberServer = domainOf(memberId);
 			if (memberServer && memberServer !== serverName) {
 				destinations.add(memberServer as ServerName);
 			}
@@ -265,9 +266,6 @@ export const queryDeviceKeys = async (
 };
 
 /** Extract the server-name portion of a Matrix user ID (`@local:server`). */
-const serverOf = (userId: string): string =>
-	userId.slice(userId.indexOf(":") + 1);
-
 /**
  * Return a copy of `keys` with `device_display_name` folded into `unsigned`,
  * matching what /keys/query returns (synapse's include_displaynames). The input
@@ -317,7 +315,7 @@ const isRemoteUserTracked = async (
 					"join"
 				)
 					continue;
-				if (sk.split(":").slice(1).join(":") === serverName) return true;
+				if (domainOf(sk) === serverName) return true;
 			}
 			continue;
 		}
@@ -369,7 +367,7 @@ export const postKeysQuery =
 		for (const [targetUserId, deviceIds] of Object.entries(
 			body.device_keys,
 		)) {
-			const dest = serverOf(targetUserId) as ServerName;
+			const dest = domainOf(targetUserId) as ServerName;
 			if (!serverName || !federationClient || dest === serverName) {
 				localRequest[targetUserId] = deviceIds;
 			} else if (
@@ -423,7 +421,7 @@ export const postKeysQuery =
 		if (federationClient) {
 			// Resync tracked-but-uncached users' device lists via /user/devices.
 			for (const u of trackedUncached) {
-				const dest = serverOf(u) as ServerName;
+				const dest = domainOf(u) as ServerName;
 				try {
 					const { body: respBody } = await federationClient.request(
 						dest,
@@ -563,7 +561,7 @@ export const postKeysClaim =
 		for (const [targetUserId, devices] of Object.entries(
 			body.one_time_keys,
 		)) {
-			const dest = serverOf(targetUserId) as ServerName;
+			const dest = domainOf(targetUserId) as ServerName;
 			const isLocal =
 				!serverName || !federationClient || dest === serverName;
 			for (const [targetDeviceId, algorithm] of Object.entries(devices)) {
@@ -687,7 +685,7 @@ export const putSendToDevice =
 		>();
 
 		for (const [targetUserId, devices] of Object.entries(body.messages)) {
-			const dest = serverOf(targetUserId) as ServerName;
+			const dest = domainOf(targetUserId) as ServerName;
 			const isLocal =
 				!serverName || !federationClient || dest === serverName;
 

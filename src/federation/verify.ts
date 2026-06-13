@@ -1,19 +1,11 @@
 import { forbidden } from "../errors.ts";
+import { domainOf } from "../ids.ts";
 import { verifyEventSignature } from "../signing.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { PDU } from "../types/events.ts";
 import type { KeyId, ServerName } from "../types/index.ts";
 import type { FederationClient } from "./client.ts";
 import { getServerKey } from "./key-store.ts";
-
-/**
- * Extract the server name (domain) part of a Matrix identifier such as a
- * user ID (`@alice:example.com`) — everything after the first colon.
- */
-const domainFromId = (id: string): ServerName => {
-	const idx = id.indexOf(":");
-	return (idx === -1 ? id : id.slice(idx + 1)) as ServerName;
-};
 
 /**
  * Verify that `event` carries a valid signature from `server` for one of the
@@ -97,7 +89,7 @@ export const verifyOriginSignature = async (
 	if (!isThirdPartyInvite) {
 		await verifyServerSignature(
 			event,
-			domainFromId(event.sender),
+			domainOf(event.sender) as ServerName,
 			storage,
 			federationClient,
 			roomVersion,

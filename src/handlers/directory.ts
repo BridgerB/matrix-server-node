@@ -1,4 +1,5 @@
 import { badJson, forbidden, notFound } from "../errors.ts";
+import { domainOf } from "../ids.ts";
 import {
 	buildEvent,
 	checkEventAuth,
@@ -187,7 +188,7 @@ export const putDirectoryRoom =
 		const existing = await storage.getRoomByAlias(roomAlias);
 		if (existing) throw badJson("Room alias already exists");
 
-		const aliasDomain = roomAlias.split(":").slice(1).join(":");
+		const aliasDomain = domainOf(roomAlias);
 		if (aliasDomain !== serverName)
 			throw badJson("Cannot create alias for remote server");
 
