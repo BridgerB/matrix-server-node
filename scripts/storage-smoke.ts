@@ -2,7 +2,7 @@
 // counter, the room cache, and basic event persistence directly against a
 // backend, without Docker/Complement. Run: `node scripts/storage-smoke.ts`.
 import { createMemoryStorage } from "../src/storage/memory.ts";
-import { SqliteStorage } from "../src/storage/sqlite.ts";
+import { createSqliteStorage } from "../src/storage/sqlite.ts";
 import type { Storage } from "../src/storage/interface.ts";
 
 const assert = (cond: unknown, msg: string): void => {
@@ -57,5 +57,5 @@ const smoke = async (name: string, s: Storage): Promise<void> => {
 };
 
 await smoke("memory", createMemoryStorage());
-await smoke("sqlite", new SqliteStorage(":memory:"));
+await smoke("sqlite", createSqliteStorage(":memory:"));
 console.log("STORAGE SMOKE: ALL PASS");

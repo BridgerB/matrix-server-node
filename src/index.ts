@@ -9,7 +9,7 @@ import type { Storage } from "./storage/interface.ts";
 import { createMemoryStorage } from "./storage/memory.ts";
 import { MysqlStorage } from "./storage/mysql.ts";
 import { PostgresStorage } from "./storage/postgres.ts";
-import { SqliteStorage } from "./storage/sqlite.ts";
+import { createSqliteStorage } from "./storage/sqlite.ts";
 
 const PORT = parseInt(process.env.PORT ?? "8008", 10);
 const SERVER_NAME = process.env.SERVER_NAME ?? "localhost";
@@ -38,7 +38,7 @@ if (STORAGE_TYPE === "memory") {
 	storage = createMemoryStorage();
 } else if (STORAGE_TYPE === "sqlite") {
 	console.log(`Using SQLite storage at ${DATABASE_PATH}`);
-	storage = new SqliteStorage(DATABASE_PATH);
+	storage = createSqliteStorage(DATABASE_PATH);
 } else if (STORAGE_TYPE === "postgres") {
 	console.log(`Using PostgreSQL storage at ${DATABASE_URL}`);
 	storage = await PostgresStorage.create(DATABASE_URL);
@@ -47,7 +47,7 @@ if (STORAGE_TYPE === "memory") {
 	storage = await MysqlStorage.create(DATABASE_URL);
 } else {
 	console.log(`Unknown storage type: ${STORAGE_TYPE}, falling back to SQLite`);
-	storage = new SqliteStorage(DATABASE_PATH);
+	storage = createSqliteStorage(DATABASE_PATH);
 }
 const router = new Router();
 
