@@ -30,6 +30,7 @@ export const postUserDirectorySearch =
 		// a public room.
 		const candidates = await storage.searchUserDirectory(body.search_term, 200);
 		for (const candidate of candidates) {
+			if (candidate.user_id === searcherId) continue;
 			if (results.has(candidate.user_id)) continue;
 			const candidateRooms = await storage.getRoomsForUser(candidate.user_id);
 			const sharesRoom = candidateRooms.some((r) => searcherRoomSet.has(r));
@@ -41,13 +42,13 @@ export const postUserDirectorySearch =
 		// or display name matches. This surfaces remote users we only know via
 		// room state — in particular members filled in by a partial-state resync,
 		// who are not in the local users table. They are inherently visible (a
-		// shared room with the searcher). The searcher may match here and appears
-		// in their own results, which is what the spec's directory expects.
+		// shared room with the searcher). The searcher is excluded from their own
+		// results, matching synapse (search_user_dir: `WHERE user_id != ?`).
 		for (const roomId of searcherRooms) {
 			const members = await storage.getMemberEvents(roomId as RoomId);
 			for (const m of members) {
 				const uid = m.event.state_key;
-				if (!uid || results.has(uid)) continue;
+				if (!uid || uid === searcherId || results.has(uid)) continue;
 				const content = m.event.content as {
 					membership?: string;
 					displayname?: string;
