@@ -26,6 +26,7 @@ import type { FederationClient } from "../federation/client.ts";
 import { fanoutEdu, fanoutEvent } from "../federation/outbound.ts";
 import { getInviteRuleForTarget } from "../invite-filter.ts";
 import { resyncOutgoingDeviceListPokes } from "./e2ee.ts";
+import { copyPredecessorPushRulesOnJoin } from "./room-upgrade.ts";
 
 import type { Handler } from "../router.ts";
 import type { SigningKey } from "../signing.ts";
@@ -1131,6 +1132,7 @@ export const postJoin =
 						roomId as RoomId,
 						userId as UserId,
 					).catch(() => {});
+					await copyPredecessorPushRulesOnJoin(storage, userId as UserId, roomId as RoomId);
 					return { status: 200, body: { room_id: roomId } };
 				}
 			} else {
@@ -1156,6 +1158,7 @@ export const postJoin =
 					roomId as RoomId,
 					userId as UserId,
 				).catch(() => {});
+				await copyPredecessorPushRulesOnJoin(storage, userId as UserId, roomId as RoomId);
 				return { status: 200, body: { room_id: roomId } };
 			}
 		}
@@ -1393,6 +1396,12 @@ const performFederationJoin = async (
 		// to exercise. This keeps faster-joins from regressing normal remote joins.
 		await storage.waitForPartialStateClear(roomId, 5000);
 	}
+
+	// If this room replaces an upgraded one, copy the joining user's room-scoped
+	// push rule across (the upgrade happened on a remote server; we only learn of
+	// it now). The create event carrying the predecessor is critical state we
+	// hold even for a partial-state join.
+	await copyPredecessorPushRulesOnJoin(storage, userId as UserId, roomId);
 
 	return { status: 200, body: { room_id: roomId } };
 };

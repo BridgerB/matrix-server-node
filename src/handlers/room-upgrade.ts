@@ -18,7 +18,7 @@ import { fanoutEvent } from "../federation/outbound.ts";
 import type { Handler } from "../router.ts";
 import type { SigningKey } from "../signing.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { EventId, RoomId } from "../types/index.ts";
+import type { EventId, RoomId, UserId } from "../types/index.ts";
 import type { RoomState } from "../types/internal.ts";
 import type { JsonObject } from "../types/json.ts";
 import type { PushRule, PushRulesContent } from "../types/push.ts";
@@ -328,6 +328,48 @@ export async function migrateRoomPushRules(
 			raw as JsonObject,
 		);
 	}
+}
+
+/**
+ * When a local user joins a room that REPLACES an earlier one (the room was
+ * upgraded — possibly on a remote server), copy that user's room-scoped push
+ * rule from the predecessor room to this one, mirroring synapse's
+ * copy_push_rules_from_room_to_room_for_user run when a server becomes aware of
+ * an upgrade. The predecessor is read from this room's `m.room.create` event
+ * (`content.predecessor.room_id`). Idempotent: skips if the user has no rule for
+ * the old room or already has one for the new room.
+ *
+ * This complements `migrateRoomPushRules` (which handles a LOCAL upgrade at the
+ * time the tombstone is sent): here the upgrade happened elsewhere and we only
+ * learn of it when our user joins the replacement room.
+ * (TestPushRuleRoomUpgrade "joining a remote upgraded room ...".)
+ */
+export async function copyPredecessorPushRulesOnJoin(
+	storage: Storage,
+	userId: UserId,
+	newRoomId: RoomId,
+): Promise<void> {
+	const createEv = await storage.getStateEvent(newRoomId, "m.room.create", "");
+	const oldRoomId = (
+		createEv?.event.content as
+			| { predecessor?: { room_id?: string } }
+			| undefined
+	)?.predecessor?.room_id;
+	if (!oldRoomId || oldRoomId === newRoomId) return;
+
+	const raw = await storage.getGlobalAccountData(userId, "m.push_rules");
+	if (!raw) return;
+	const pushRules = raw as unknown as PushRulesContent;
+	const roomRules = pushRules.global?.room;
+	if (!Array.isArray(roomRules)) return;
+
+	const existing = roomRules.find((r) => r.rule_id === oldRoomId);
+	if (!existing) return;
+	if (roomRules.some((r) => r.rule_id === newRoomId)) return;
+
+	const copied: PushRule = { ...existing, rule_id: newRoomId };
+	roomRules.push(copied);
+	await storage.setGlobalAccountData(userId, "m.push_rules", raw as JsonObject);
 }
 
 /*

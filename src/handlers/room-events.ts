@@ -38,6 +38,7 @@ import { verifyOriginSignature } from "../federation/verify.ts";
 import { fanoutEvent } from "../federation/outbound.ts";
 import { getIgnoredUsers } from "../ignored-users.ts";
 import { bundleAggregations, indexRelation } from "../relations.ts";
+import { migrateRoomPushRules } from "./room-upgrade.ts";
 import type { Handler } from "../router.ts";
 import type { SigningKey } from "../signing.ts";
 import type { Storage } from "../storage/interface.ts";
@@ -442,6 +443,27 @@ export const putStateEvent =
 
 		checkEventAuth(event, eventId, room);
 		await storage.setStateEvent(roomId, event, eventId);
+
+		// Manual room upgrade: a client can upgrade a room by creating the
+		// replacement itself and then sending an m.room.tombstone naming it
+		// (instead of calling POST /upgrade). Mirror postRoomUpgrade and copy each
+		// local joined user's room-scoped push rules to the replacement room.
+		// (TestPushRuleRoomUpgrade "manually upgrading a room ...".)
+		if (
+			eventType === "m.room.tombstone" &&
+			stateKey === "" &&
+			typeof (event.content as { replacement_room?: unknown })
+				.replacement_room === "string"
+		) {
+			await migrateRoomPushRules(
+				storage,
+				serverName,
+				room,
+				roomId as RoomId,
+				(event.content as { replacement_room: string })
+					.replacement_room as RoomId,
+			);
+		}
 
 		room.depth++;
 		room.forward_extremities = [eventId];
