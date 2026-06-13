@@ -21,21 +21,63 @@ export const postUserDirectorySearch =
 
 		const searcherRooms = await storage.getRoomsForUser(searcherId);
 		const searcherRoomSet = new Set(searcherRooms);
-		const publicRooms = new Set(await storage.getPublicRoomIds());
+		const directoryRooms = new Set(await storage.getPublicRoomIds());
+
+		// A room counts as "public" for directory visibility if it is publicly
+		// joinable (join_rules = public) or world-readable, OR it is listed in the
+		// public room directory — matching synapse's users_in_public_rooms, which
+		// is keyed off the room being publicly accessible rather than merely
+		// published. Cached per request since a room is checked once per candidate.
+		const publicnessCache = new Map<string, boolean>();
+		const isRoomPublic = async (roomId: string): Promise<boolean> => {
+			if (directoryRooms.has(roomId as RoomId)) return true;
+			const cached = publicnessCache.get(roomId);
+			if (cached !== undefined) return cached;
+			const room = await storage.getRoom(roomId as RoomId);
+			let pub = false;
+			if (room) {
+				const jr = room.state_events.get("m.room.join_rules\x1f");
+				if (
+					(jr?.content as { join_rule?: string } | undefined)?.join_rule ===
+					"public"
+				)
+					pub = true;
+				const hv = room.state_events.get("m.room.history_visibility\x1f");
+				if (
+					(hv?.content as { history_visibility?: string } | undefined)
+						?.history_visibility === "world_readable"
+				)
+					pub = true;
+			}
+			publicnessCache.set(roomId, pub);
+			return pub;
+		};
 
 		const results = new Map<string, DirectoryEntry>();
 
 		// 1. Local users from the directory index, filtered by directory
-		// visibility: visible to the searcher only if they share a room or are in
-		// a public room.
+		// visibility (synapse search_user_dir default clause): a candidate is
+		// visible if they are in a public room OR they share a room with the
+		// searcher. The searcher themselves is only ever surfaced via the
+		// public-room path (synapse's users_who_share_private_rooms never pairs a
+		// user with themselves), so a user searching a term that matches only
+		// their own id is found iff they are in a public room.
 		const candidates = await storage.searchUserDirectory(body.search_term, 200);
 		for (const candidate of candidates) {
-			if (candidate.user_id === searcherId) continue;
 			if (results.has(candidate.user_id)) continue;
+			const isSelf = candidate.user_id === searcherId;
 			const candidateRooms = await storage.getRoomsForUser(candidate.user_id);
+			let inPublicRoom = false;
+			for (const r of candidateRooms) {
+				if (await isRoomPublic(r)) {
+					inPublicRoom = true;
+					break;
+				}
+			}
 			const sharesRoom = candidateRooms.some((r) => searcherRoomSet.has(r));
-			const inPublicRoom = candidateRooms.some((r) => publicRooms.has(r));
-			if (sharesRoom || inPublicRoom) results.set(candidate.user_id, candidate);
+			if (inPublicRoom || (sharesRoom && !isSelf)) {
+				results.set(candidate.user_id, candidate);
+			}
 		}
 
 		// 2. Members (local AND remote) of the searcher's own rooms whose user ID
