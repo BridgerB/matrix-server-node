@@ -14,7 +14,7 @@ import type { RoomVersion } from "./room-versions.ts";
 export interface RoomState {
 	room_id: RoomId;
 	room_version: RoomVersion;
-	/** Current state map: "event_type\0state_key" -> event */
+	/** Current state map: "event_type\x1fstate_key" -> event */
 	state_events: Map<string, PDU>;
 	depth: number;
 	forward_extremities: EventId[];

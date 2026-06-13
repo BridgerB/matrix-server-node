@@ -9,6 +9,7 @@ import {
 	userInUse,
 	weakPassword,
 } from "../errors.ts";
+import { getOrInitRules } from "../push-rules.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type {
@@ -23,7 +24,12 @@ const REGISTRATION_FLOWS: { stages: AuthType[] }[] = [
 	{ stages: ["m.login.dummy"] },
 ];
 
-const MIN_PASSWORD_LENGTH = 8;
+// Minimum password length. The Matrix spec does not mandate a server-side
+// minimum, and Complement tests legitimately register with short passwords
+// (e.g. "hunter2", "secret"); an overly strict minimum (was 8) rejected those
+// with M_WEAK_PASSWORD. Keep it at 1 so only an empty password is rejected
+// (empty is also caught earlier by the missing-field check).
+const MIN_PASSWORD_LENGTH = 1;
 const USERNAME_RE = /^[a-z0-9._=\-/]+$/;
 
 export const postRegister =
@@ -111,6 +117,12 @@ export const postRegister =
 			created_at: now,
 		});
 
+		// Materialise the default push rules now, at registration, rather than
+		// lazily on first push-rule/sync access. A lazy init during /sync would
+		// write account data mid-sync and bump the stream, making an otherwise
+		// idle long-poll return immediately with a spurious m.push_rules change.
+		await getOrInitRules(storage, userId);
+
 		await storage.deleteUIAASession(sessionId);
 
 		if (body.inhibit_login) {
@@ -153,6 +165,9 @@ async function registerGuest(
 		is_deactivated: false,
 		created_at: now,
 	});
+
+	// See postRegister: materialise default push rules eagerly.
+	await getOrInitRules(storage, userId);
 
 	const body = (req.body ?? {}) as {
 		device_id?: string;

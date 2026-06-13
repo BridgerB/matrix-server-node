@@ -65,6 +65,9 @@ export const missingParam = (msg: string) =>
 export const invalidParam = (msg: string) =>
 	new MatrixError("M_INVALID_PARAM", msg, 400);
 
+export const badAlias = (msg = "Bad alias") =>
+	new MatrixError("M_BAD_ALIAS", msg, 400);
+
 export const roomNotFound = (msg = "Room not found") =>
 	new MatrixError("M_NOT_FOUND", msg, 404);
 

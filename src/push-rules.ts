@@ -139,6 +139,19 @@ export const getDefaultRules = (userId: UserId): PushRulesContent => ({
 				],
 				actions: ["notify", { set_tweak: "highlight" }],
 			},
+			{
+				rule_id: ".org.matrix.msc3930.rule.poll_response",
+				default: true,
+				enabled: true,
+				conditions: [
+					{
+						kind: "event_match",
+						key: "type",
+						pattern: "org.matrix.msc3381.poll.response",
+					},
+				],
+				actions: [],
+			},
 		],
 		content: [
 			{
@@ -146,6 +159,22 @@ export const getDefaultRules = (userId: UserId): PushRulesContent => ({
 				default: true,
 				enabled: true,
 				conditions: [{ kind: "contains_display_name" }],
+				actions: [
+					"notify",
+					{ set_tweak: "sound", value: "default" },
+					{ set_tweak: "highlight" },
+				],
+			},
+			{
+				// Legacy mention rule (Synapse `.m.rule.contains_user_name`): a
+				// message body containing the user's localpart at a word boundary is
+				// a highlight notification. This is what produces the mention
+				// highlights in TestThreadedReceipts, where messages embed the raw
+				// MXID (e.g. "Hello @bob:hs1!") rather than an `m.mentions` block.
+				rule_id: ".m.rule.contains_user_name",
+				default: true,
+				enabled: true,
+				pattern: userId.slice(1).split(":")[0] ?? userId,
 				actions: [
 					"notify",
 					{ set_tweak: "sound", value: "default" },
@@ -200,6 +229,60 @@ export const getDefaultRules = (userId: UserId): PushRulesContent => ({
 				enabled: true,
 				conditions: [
 					{ kind: "event_match", key: "type", pattern: "m.room.encrypted" },
+				],
+				actions: ["notify"],
+			},
+			{
+				rule_id: ".org.matrix.msc3930.rule.poll_start_one_to_one",
+				default: true,
+				enabled: true,
+				conditions: [
+					{ kind: "room_member_count", is: "2" },
+					{
+						kind: "event_match",
+						key: "type",
+						pattern: "org.matrix.msc3381.poll.start",
+					},
+				],
+				actions: ["notify", { set_tweak: "sound", value: "default" }],
+			},
+			{
+				rule_id: ".org.matrix.msc3930.rule.poll_start",
+				default: true,
+				enabled: true,
+				conditions: [
+					{
+						kind: "event_match",
+						key: "type",
+						pattern: "org.matrix.msc3381.poll.start",
+					},
+				],
+				actions: ["notify"],
+			},
+			{
+				rule_id: ".org.matrix.msc3930.rule.poll_end_one_to_one",
+				default: true,
+				enabled: true,
+				conditions: [
+					{ kind: "room_member_count", is: "2" },
+					{
+						kind: "event_match",
+						key: "type",
+						pattern: "org.matrix.msc3381.poll.end",
+					},
+				],
+				actions: ["notify", { set_tweak: "sound", value: "default" }],
+			},
+			{
+				rule_id: ".org.matrix.msc3930.rule.poll_end",
+				default: true,
+				enabled: true,
+				conditions: [
+					{
+						kind: "event_match",
+						key: "type",
+						pattern: "org.matrix.msc3381.poll.end",
+					},
 				],
 				actions: ["notify"],
 			},

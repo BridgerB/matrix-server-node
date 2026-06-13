@@ -1,7 +1,17 @@
 import pg from "pg";
 import { computeEventId } from "../events.ts";
-import type { CrossSigningKey, DeviceKeys, KeyBackupData, OneTimeKey } from "../types/e2ee.ts";
+import {
+	eventMatchesSearchTerm,
+	paginateSearchMatches,
+} from "../search-match.ts";
 import type {
+	CrossSigningKey,
+	DeviceKeys,
+	KeyBackupData,
+	OneTimeKey,
+} from "../types/e2ee.ts";
+import type {
+	EDU,
 	PDU,
 	StrippedStateEvent,
 	ToDeviceEvent,
@@ -31,6 +41,10 @@ import {
 	eventToStrippedState,
 	INVITE_STATE_TYPES,
 } from "./ephemeral.ts";
+import {
+	collapseReceiptsMsc4102,
+	PENDING_FEDERATION_EDU_CAP,
+} from "./interface.ts";
 import type { Storage, StoredSession } from "./interface.ts";
 import { rowToSession, rowToUser } from "./sql-helpers.ts";
 
@@ -133,6 +147,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				user_id TEXT NOT NULL,
 				type TEXT NOT NULL,
 				content JSONB NOT NULL,
+				stream_pos BIGINT NOT NULL DEFAULT 0,
 				PRIMARY KEY (user_id, type)
 			);
 
@@ -141,6 +156,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				room_id TEXT NOT NULL,
 				type TEXT NOT NULL,
 				content JSONB NOT NULL,
+				stream_pos BIGINT NOT NULL DEFAULT 0,
 				PRIMARY KEY (user_id, room_id, type)
 			);
 
@@ -150,7 +166,8 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				event_id TEXT NOT NULL,
 				receipt_type TEXT NOT NULL,
 				ts BIGINT NOT NULL,
-				PRIMARY KEY (room_id, user_id, receipt_type)
+				thread_id TEXT NOT NULL DEFAULT '',
+				PRIMARY KEY (room_id, user_id, receipt_type, thread_id)
 			);
 
 			CREATE TABLE IF NOT EXISTS media (
@@ -264,6 +281,14 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				PRIMARY KEY (origin, txn_id)
 			);
 
+			CREATE TABLE IF NOT EXISTS pending_federation_edus (
+				id BIGSERIAL PRIMARY KEY,
+				destination TEXT NOT NULL,
+				edu_json TEXT NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_pending_fed_edus_dest
+				ON pending_federation_edus (destination, id);
+
 			CREATE TABLE IF NOT EXISTS cross_signing_keys (
 				user_id TEXT NOT NULL,
 				key_type TEXT NOT NULL,
@@ -288,12 +313,23 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				key_json TEXT NOT NULL,
 				PRIMARY KEY (user_id, version, room_id, session_id)
 			);
+
+			CREATE TABLE IF NOT EXISTS device_list_stream (
+				user_id TEXT NOT NULL,
+				stream_pos BIGINT NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_device_list_stream ON device_list_stream(stream_pos);
 		`);
 
 		const {
 			rows: [maxPos],
 		} = await this.pool.query<{ m: string | null }>(
-			"SELECT MAX(stream_pos) AS m FROM events",
+			`SELECT MAX(m) AS m FROM (
+				SELECT MAX(stream_pos) AS m FROM events
+				UNION ALL SELECT MAX(stream_pos) FROM global_account_data
+				UNION ALL SELECT MAX(stream_pos) FROM room_account_data
+				UNION ALL SELECT MAX(stream_pos) FROM device_list_stream
+			) sub`,
 		);
 		this.streamCounter = maxPos?.m ? parseInt(maxPos.m, 10) : 0;
 
@@ -482,8 +518,8 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				],
 			);
 			for (const [key, event] of state.state_events) {
-				const [eventType, stateKey] = key.split("\0") as [string, string];
-				const eventId = computeEventId(event);
+				const [eventType, stateKey] = key.split("\x1f") as [string, string];
+				const eventId = computeEventId(event, state.room_version);
 				await client.query(
 					`INSERT INTO state_events (room_id, event_type, state_key, event_id, event_json) VALUES ($1, $2, $3, $4, $5)
 					 ON CONFLICT (room_id, event_type, state_key) DO UPDATE SET event_id = EXCLUDED.event_id, event_json = EXCLUDED.event_json`,
@@ -517,7 +553,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		);
 		const stateMap = new Map<string, PDU>();
 		for (const sr of stateRows) {
-			stateMap.set(`${sr.event_type}\0${sr.state_key}`, sr.event_json);
+			stateMap.set(`${sr.event_type}\x1f${sr.state_key}`, sr.event_json);
 		}
 
 		const room: RoomState = {
@@ -547,6 +583,13 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			[eventId, event.room_id, this.streamCounter, JSON.stringify(event)],
 		);
 		this.wakeWaiters();
+	}
+
+	async updateEvent(eventId: EventId, event: PDU): Promise<void> {
+		await this.pool.query(
+			"UPDATE events SET event_json = $1 WHERE event_id = $2",
+			[JSON.stringify(event), eventId],
+		);
 	}
 
 	async getEvent(
@@ -641,7 +684,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 
 		const cached = this.roomCache.get(roomId);
 		if (cached) {
-			const key = `${event.type}\0${event.state_key ?? ""}`;
+			const key = `${event.type}\x1f${event.state_key ?? ""}`;
 			cached.state_events.set(key, event);
 		}
 
@@ -930,17 +973,31 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		content: JsonObject,
 	): Promise<void> {
 		await this.pool.query(
-			"INSERT INTO global_account_data (user_id, type, content) VALUES ($1, $2, $3) ON CONFLICT (user_id, type) DO UPDATE SET content = EXCLUDED.content",
-			[userId, type, JSON.stringify(content)],
+			"INSERT INTO global_account_data (user_id, type, content, stream_pos) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, type) DO UPDATE SET content = EXCLUDED.content, stream_pos = EXCLUDED.stream_pos",
+			[userId, type, JSON.stringify(content), ++this.streamCounter],
 		);
+		this.wakeWaiters();
 	}
 
 	async getAllGlobalAccountData(
 		userId: UserId,
 	): Promise<{ type: string; content: JsonObject }[]> {
 		const { rows } = await this.pool.query(
-			"SELECT type, content FROM global_account_data WHERE user_id = $1",
+			// Exclude MSC3391 deletion tombstones (content '{}') from initial sync.
+			"SELECT type, content FROM global_account_data WHERE user_id = $1 AND content <> '{}'::jsonb",
 			[userId],
+		);
+		return rows.map((r) => ({ type: r.type, content: r.content }));
+	}
+
+	async getGlobalAccountDataSince(
+		userId: UserId,
+		since: number,
+	): Promise<{ type: string; content: JsonObject }[]> {
+		const { rows } = await this.pool.query(
+			// Include tombstones so incremental sync surfaces deletions.
+			"SELECT type, content FROM global_account_data WHERE user_id = $1 AND stream_pos > $2",
+			[userId, since],
 		);
 		return rows.map((r) => ({ type: r.type, content: r.content }));
 	}
@@ -964,9 +1021,30 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		content: JsonObject,
 	): Promise<void> {
 		await this.pool.query(
-			"INSERT INTO room_account_data (user_id, room_id, type, content) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, room_id, type) DO UPDATE SET content = EXCLUDED.content",
-			[userId, roomId, type, JSON.stringify(content)],
+			"INSERT INTO room_account_data (user_id, room_id, type, content, stream_pos) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (user_id, room_id, type) DO UPDATE SET content = EXCLUDED.content, stream_pos = EXCLUDED.stream_pos",
+			[userId, roomId, type, JSON.stringify(content), ++this.streamCounter],
 		);
+		this.wakeWaiters();
+	}
+	async deleteGlobalAccountData(userId: UserId, type: string): Promise<void> {
+		// MSC3391: leave a tombstone (content '{}') with a fresh stream position
+		// rather than removing the row, so incremental sync can surface it.
+		await this.pool.query(
+			"INSERT INTO global_account_data (user_id, type, content, stream_pos) VALUES ($1, $2, '{}'::jsonb, $3) ON CONFLICT (user_id, type) DO UPDATE SET content = EXCLUDED.content, stream_pos = EXCLUDED.stream_pos",
+			[userId, type, ++this.streamCounter],
+		);
+		this.wakeWaiters();
+	}
+	async deleteRoomAccountData(
+		userId: UserId,
+		roomId: RoomId,
+		type: string,
+	): Promise<void> {
+		await this.pool.query(
+			"INSERT INTO room_account_data (user_id, room_id, type, content, stream_pos) VALUES ($1, $2, $3, '{}'::jsonb, $4) ON CONFLICT (user_id, room_id, type) DO UPDATE SET content = EXCLUDED.content, stream_pos = EXCLUDED.stream_pos",
+			[userId, roomId, type, ++this.streamCounter],
+		);
+		this.wakeWaiters();
 	}
 
 	async getAllRoomAccountData(
@@ -974,10 +1052,27 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		roomId: RoomId,
 	): Promise<{ type: string; content: JsonObject }[]> {
 		const { rows } = await this.pool.query(
-			"SELECT type, content FROM room_account_data WHERE user_id = $1 AND room_id = $2",
+			// Exclude MSC3391 deletion tombstones from initial sync.
+			"SELECT type, content FROM room_account_data WHERE user_id = $1 AND room_id = $2 AND content <> '{}'::jsonb",
 			[userId, roomId],
 		);
 		return rows.map((r) => ({ type: r.type, content: r.content }));
+	}
+
+	async getRoomAccountDataSince(
+		userId: UserId,
+		since: number,
+	): Promise<{ roomId: RoomId; type: string; content: JsonObject }[]> {
+		const { rows } = await this.pool.query(
+			// Include tombstones so incremental sync surfaces deletions.
+			"SELECT room_id, type, content FROM room_account_data WHERE user_id = $1 AND stream_pos > $2",
+			[userId, since],
+		);
+		return rows.map((r) => ({
+			roomId: r.room_id as RoomId,
+			type: r.type,
+			content: r.content,
+		}));
 	}
 
 	async setReceipt(
@@ -986,29 +1081,40 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		eventId: EventId,
 		receiptType: string,
 		ts: Timestamp,
+		threadId?: string,
 	): Promise<void> {
 		await this.pool.query(
-			"INSERT INTO receipts (room_id, user_id, event_id, receipt_type, ts) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (room_id, user_id, receipt_type) DO UPDATE SET event_id = EXCLUDED.event_id, ts = EXCLUDED.ts",
-			[roomId, userId, eventId, receiptType, ts],
+			"INSERT INTO receipts (room_id, user_id, event_id, receipt_type, ts, thread_id) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (room_id, user_id, receipt_type, thread_id) DO UPDATE SET event_id = EXCLUDED.event_id, ts = EXCLUDED.ts",
+			[roomId, userId, eventId, receiptType, ts, threadId ?? ""],
 		);
 		this.wakeWaiters();
 	}
 
-	async getReceipts(
-		roomId: RoomId,
-	): Promise<
-		{ eventId: EventId; receiptType: string; userId: UserId; ts: Timestamp }[]
+	async getReceipts(roomId: RoomId): Promise<
+		{
+			eventId: EventId;
+			receiptType: string;
+			userId: UserId;
+			ts: Timestamp;
+			threadId?: string;
+		}[]
 	> {
 		const { rows } = await this.pool.query(
-			"SELECT event_id, receipt_type, user_id, ts FROM receipts WHERE room_id = $1",
+			"SELECT event_id, receipt_type, user_id, ts, thread_id FROM receipts WHERE room_id = $1",
 			[roomId],
 		);
-		return rows.map((r) => ({
-			eventId: r.event_id as EventId,
-			receiptType: r.receipt_type,
-			userId: r.user_id as UserId,
-			ts: Number(r.ts),
-		}));
+		return collapseReceiptsMsc4102(
+			rows.map((r) => ({
+				eventId: r.event_id as EventId,
+				receiptType: r.receipt_type,
+				userId: r.user_id as UserId,
+				ts: Number(r.ts),
+				threadId:
+					r.thread_id === null || r.thread_id === ""
+						? undefined
+						: (r.thread_id as string),
+			})),
+		);
 	}
 
 	async storeMedia(media: StoredMedia, data: Buffer): Promise<void> {
@@ -1075,7 +1181,15 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		const hash = createHash("sha256").update(data).digest("base64");
 		await this.pool.query(
 			"UPDATE media SET content_type = $1, upload_name = $2, file_size = $3, content_hash = $4, data = $5 WHERE origin = $6 AND media_id = $7",
-			[contentType, fileName ?? null, data.length, hash, data, serverName, mediaId],
+			[
+				contentType,
+				fileName ?? null,
+				data.length,
+				hash,
+				data,
+				serverName,
+				mediaId,
+			],
 		);
 		return true;
 	}
@@ -1109,6 +1223,23 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			"INSERT INTO device_keys (user_id, device_id, keys_json) VALUES ($1, $2, $3) ON CONFLICT (user_id, device_id) DO UPDATE SET keys_json = EXCLUDED.keys_json",
 			[userId, deviceId, JSON.stringify(keys)],
 		);
+		await this.recordDeviceKeyChange(userId);
+	}
+
+	async recordDeviceKeyChange(userId: UserId): Promise<void> {
+		await this.pool.query(
+			"INSERT INTO device_list_stream (user_id, stream_pos) VALUES ($1, $2)",
+			[userId, ++this.streamCounter],
+		);
+		this.wakeWaiters();
+	}
+
+	async getChangedDeviceUsers(since: number, until: number): Promise<UserId[]> {
+		const { rows } = await this.pool.query<{ user_id: string }>(
+			"SELECT DISTINCT user_id FROM device_list_stream WHERE stream_pos > $1 AND stream_pos <= $2",
+			[since, until],
+		);
+		return rows.map((r) => r.user_id as UserId);
 	}
 
 	async getDeviceKeys(
@@ -1132,6 +1263,12 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		const result: Record<DeviceId, DeviceKeys> = {};
 		for (const r of rows) result[r.device_id as DeviceId] = r.keys_json;
 		return result;
+	}
+
+	async deleteDeviceKeys(userId: UserId): Promise<void> {
+		await this.pool.query("DELETE FROM device_keys WHERE user_id = $1", [
+			userId,
+		]);
 	}
 
 	async addOneTimeKeys(
@@ -1273,7 +1410,8 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			user_signing_key?: CrossSigningKey;
 		} = {};
 		for (const r of rows) {
-			const key = typeof r.key_json === "string" ? JSON.parse(r.key_json) : r.key_json;
+			const key =
+				typeof r.key_json === "string" ? JSON.parse(r.key_json) : r.key_json;
 			if (r.key_type === "master_key") result.master_key = key;
 			else if (r.key_type === "self_signing_key") result.self_signing_key = key;
 			else if (r.key_type === "user_signing_key") result.user_signing_key = key;
@@ -1293,9 +1431,8 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		> = {};
 		for (const [targetUserId, keyMap] of Object.entries(signatures)) {
 			for (const [keyId, signedObject] of Object.entries(keyMap)) {
-				const signedSigs = (
-					signedObject as Record<string, unknown>
-				).signatures as Record<string, Record<string, string>> | undefined;
+				const signedSigs = (signedObject as Record<string, unknown>)
+					.signatures as Record<string, Record<string, string>> | undefined;
 				if (!signedSigs) {
 					failures[targetUserId] ??= {};
 					(
@@ -1357,11 +1494,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 						}
 						await this.pool.query(
 							"UPDATE cross_signing_keys SET key_json = $1 WHERE user_id = $2 AND key_type = $3",
-							[
-								JSON.stringify(key),
-								targetUserId,
-								crossKeyType,
-							],
+							[JSON.stringify(key), targetUserId, crossKeyType],
 						);
 						matched = true;
 						break;
@@ -1438,9 +1571,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		const count = parseInt(countRow!.cnt, 10);
 
 		const authData =
-			typeof v.auth_data === "string"
-				? JSON.parse(v.auth_data)
-				: v.auth_data;
+			typeof v.auth_data === "string" ? JSON.parse(v.auth_data) : v.auth_data;
 
 		return {
 			version: v.version,
@@ -1505,10 +1636,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			| KeyBackupData
 			| { sessions: Record<string, KeyBackupData> }
 			| {
-					rooms: Record<
-						RoomId,
-						{ sessions: Record<string, KeyBackupData> }
-					>;
+					rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
 			  },
 	): Promise<{ count: number; etag: string } | undefined> {
 		// Verify version exists and is latest
@@ -1528,10 +1656,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			}
 		} else {
 			const allKeys = keys as {
-				rooms: Record<
-					RoomId,
-					{ sessions: Record<string, KeyBackupData> }
-				>;
+				rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
 			};
 			for (const [rid, roomData] of Object.entries(allKeys.rooms)) {
 				for (const [sid, data] of Object.entries(roomData.sessions)) {
@@ -1594,10 +1719,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		| KeyBackupData
 		| { sessions: Record<string, KeyBackupData> }
 		| {
-				rooms: Record<
-					RoomId,
-					{ sessions: Record<string, KeyBackupData> }
-				>;
+				rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
 		  }
 		| undefined
 	> {
@@ -1618,9 +1740,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			const sessions: Record<string, KeyBackupData> = {};
 			for (const r of rows) {
 				sessions[r.session_id] =
-					typeof r.key_json === "string"
-						? JSON.parse(r.key_json)
-						: r.key_json;
+					typeof r.key_json === "string" ? JSON.parse(r.key_json) : r.key_json;
 			}
 			return { sessions };
 		} else {
@@ -1636,9 +1756,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				const rid = r.room_id as RoomId;
 				if (!result[rid]) result[rid] = { sessions: {} };
 				result[rid]!.sessions[r.session_id] =
-					typeof r.key_json === "string"
-						? JSON.parse(r.key_json)
-						: r.key_json;
+					typeof r.key_json === "string" ? JSON.parse(r.key_json) : r.key_json;
 			}
 			return { rooms: result };
 		}
@@ -2040,57 +2158,30 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		from?: string,
 	): Promise<{
 		events: { event: PDU; eventId: EventId; streamPos: number }[];
+		count: number;
 		nextBatch?: string;
 	}> {
-		if (roomIds.length === 0) return { events: [] };
+		if (roomIds.length === 0) return { events: [], count: 0 };
 
-		let sql =
-			"SELECT event_id, event_json, stream_pos FROM events WHERE room_id = ANY($1)";
-		const params: unknown[] = [roomIds];
-		let paramIdx = 2;
+		const { rows } = await this.pool.query(
+			"SELECT event_id, event_json, stream_pos FROM events WHERE room_id = ANY($1) ORDER BY stream_pos DESC",
+			[roomIds],
+		);
 
-		if (from) {
-			sql += ` AND stream_pos < $${paramIdx++}`;
-			params.push(parseInt(from, 10));
-		}
-		sql += " ORDER BY stream_pos DESC";
-
-		const { rows } = await this.pool.query(sql, params);
-		const term = searchTerm.toLowerCase();
-		const results: { event: PDU; eventId: EventId; streamPos: number }[] = [];
-
+		const allMatches: { event: PDU; eventId: EventId; streamPos: number }[] =
+			[];
 		for (const row of rows) {
-			if (results.length >= limit) break;
 			const event = row.event_json as PDU;
-			const content = event.content as Record<string, unknown>;
-			let matched = false;
-			for (const key of keys) {
-				const field =
-					key === "content.body"
-						? content.body
-						: key === "content.name"
-							? content.name
-							: key === "content.topic"
-								? content.topic
-								: undefined;
-				if (typeof field === "string" && field.toLowerCase().includes(term)) {
-					matched = true;
-					break;
-				}
-			}
-			if (matched)
-				results.push({
+			if (eventMatchesSearchTerm(event, keys, searchTerm)) {
+				allMatches.push({
 					event,
 					eventId: row.event_id as EventId,
 					streamPos: parseInt(row.stream_pos, 10),
 				});
+			}
 		}
 
-		const nextBatch =
-			results.length === limit && results.length > 0
-				? String(results[results.length - 1]?.streamPos)
-				: undefined;
-		return { events: results, nextBatch };
+		return paginateSearchMatches(allMatches, limit, from);
 	}
 
 	async storeServerKeys(
@@ -2163,7 +2254,149 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				.join(":") as ServerName;
 			servers.add(serverName);
 		}
+		const ps = this.partialStateRooms.get(roomId);
+		if (ps) for (const s of ps.servers) servers.add(s);
 		return [...servers];
+	}
+
+	private partialStateRooms = new Map<
+		string,
+		{ servers: ServerName[]; joinEventId: EventId }
+	>();
+	private partialStateWaiters = new Map<string, Set<() => void>>();
+	private unPartialStatedAt = new Map<string, number>();
+
+	async getRoomUnPartialStatedAt(
+		roomId: RoomId,
+	): Promise<number | undefined> {
+		return this.unPartialStatedAt.get(roomId);
+	}
+
+	async setStateEventHistorical(
+		roomId: RoomId,
+		event: PDU,
+		eventId: EventId,
+	): Promise<void> {
+		await this.setStateEvent(roomId, event, eventId);
+	}
+
+	async markRoomPartialState(
+		roomId: RoomId,
+		servers: ServerName[],
+		joinEventId: EventId,
+	): Promise<void> {
+		this.partialStateRooms.set(roomId, { servers, joinEventId });
+	}
+
+	async clearRoomPartialState(roomId: RoomId): Promise<void> {
+		this.partialStateRooms.delete(roomId);
+		this.streamCounter++;
+		this.unPartialStatedAt.set(roomId, this.streamCounter);
+		const waiters = this.partialStateWaiters.get(roomId);
+		if (waiters) {
+			this.partialStateWaiters.delete(roomId);
+			for (const w of waiters) w();
+		}
+		this.wakeWaiters();
+	}
+
+	async getRoomPartialState(
+		roomId: RoomId,
+	): Promise<{ servers: ServerName[]; joinEventId: EventId } | undefined> {
+		return this.partialStateRooms.get(roomId);
+	}
+
+	async getAllPartialStateRooms(): Promise<
+		{ roomId: RoomId; servers: ServerName[]; joinEventId: EventId }[]
+	> {
+		return [...this.partialStateRooms.entries()].map(([roomId, v]) => ({
+			roomId: roomId as RoomId,
+			servers: v.servers,
+			joinEventId: v.joinEventId,
+		}));
+	}
+
+	private partialStateEvents = new Map<string, Set<EventId>>();
+
+	async recordPartialStateEvent(
+		roomId: RoomId,
+		eventId: EventId,
+	): Promise<void> {
+		let set = this.partialStateEvents.get(roomId);
+		if (!set) {
+			set = new Set();
+			this.partialStateEvents.set(roomId, set);
+		}
+		set.add(eventId);
+	}
+
+	async takePartialStateEvents(roomId: RoomId): Promise<EventId[]> {
+		const set = this.partialStateEvents.get(roomId);
+		this.partialStateEvents.delete(roomId);
+		return set ? [...set] : [];
+	}
+	private partialStateDevicePokes = new Map<string, Set<string>>();
+
+	async recordPartialStateDevicePoke(
+		roomId: RoomId,
+		userId: UserId,
+		deviceId: DeviceId,
+	): Promise<void> {
+		let set = this.partialStateDevicePokes.get(roomId);
+		if (!set) {
+			set = new Set();
+			this.partialStateDevicePokes.set(roomId, set);
+		}
+		set.add(`${userId}\x1f${deviceId}`);
+	}
+
+	async takePartialStateDevicePokes(
+		roomId: RoomId,
+	): Promise<{ userId: UserId; deviceId: DeviceId }[]> {
+		const set = this.partialStateDevicePokes.get(roomId);
+		this.partialStateDevicePokes.delete(roomId);
+		return set
+			? [...set].map((s) => {
+					const sep = s.indexOf("\x1f");
+					return {
+						userId: s.slice(0, sep) as UserId,
+						deviceId: s.slice(sep + 1) as DeviceId,
+					};
+				})
+			: [];
+	}
+
+	async deleteEvent(eventId: EventId): Promise<void> {
+		await this.pool.query("DELETE FROM events WHERE event_id = $1", [eventId]);
+		await this.pool.query("DELETE FROM state_events WHERE event_id = $1", [
+			eventId,
+		]);
+	}
+
+	async unrejectEvent(_eventId: EventId): Promise<void> {
+		// deleteEvent is destructive here (no rejected flag), so there is nothing
+		// to restore. No-op; partial-state resync re-evaluation targets sqlite.
+	}
+
+	async waitForPartialStateClear(
+		roomId: RoomId,
+		timeoutMs: number,
+	): Promise<void> {
+		if (!this.partialStateRooms.has(roomId)) return;
+		await new Promise<void>((resolve) => {
+			let set = this.partialStateWaiters.get(roomId);
+			if (!set) {
+				set = new Set();
+				this.partialStateWaiters.set(roomId, set);
+			}
+			const done = () => {
+				set?.delete(done);
+				clearTimeout(timer);
+				resolve();
+			};
+			const timer = setTimeout(done, timeoutMs);
+			set.add(done);
+		});
 	}
 
 	async getStateAtEvent(
@@ -2187,6 +2420,57 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		await this.pool.query(
 			"INSERT INTO federation_txns (origin, txn_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
 			[origin, txnId],
+		);
+	}
+
+	async enqueueFederationEdu(
+		destination: ServerName,
+		edu: EDU,
+	): Promise<number> {
+		const { rows } = await this.pool.query(
+			"INSERT INTO pending_federation_edus (destination, edu_json) VALUES ($1, $2) RETURNING id",
+			[destination, JSON.stringify(edu)],
+		);
+		const id = Number((rows[0] as { id: string | number }).id);
+		// Enforce the per-destination cap: delete oldest rows beyond the cap.
+		const { rowCount } = await this.pool.query(
+			"DELETE FROM pending_federation_edus WHERE id IN (SELECT id FROM pending_federation_edus WHERE destination = $1 ORDER BY id ASC OFFSET $2)",
+			[destination, PENDING_FEDERATION_EDU_CAP],
+		);
+		if (rowCount && rowCount > 0) {
+			console.warn(
+				`pending_federation_edus: dropped ${rowCount} EDU(s) for ${destination} (queue cap ${PENDING_FEDERATION_EDU_CAP} exceeded)`,
+			);
+		}
+		return id;
+	}
+
+	async getPendingFederationEdus(
+		destination: ServerName,
+		limit: number,
+	): Promise<{ id: number; edu: EDU }[]> {
+		const { rows } = await this.pool.query(
+			"SELECT id, edu_json FROM pending_federation_edus WHERE destination = $1 ORDER BY id ASC LIMIT $2",
+			[destination, limit],
+		);
+		return (rows as { id: string | number; edu_json: string }[]).map((r) => ({
+			id: Number(r.id),
+			edu: JSON.parse(r.edu_json) as EDU,
+		}));
+	}
+
+	async deleteFederationEdu(id: number): Promise<void> {
+		await this.pool.query("DELETE FROM pending_federation_edus WHERE id = $1", [
+			id,
+		]);
+	}
+
+	async getPendingFederationDestinations(): Promise<ServerName[]> {
+		const { rows } = await this.pool.query(
+			"SELECT DISTINCT destination FROM pending_federation_edus",
+		);
+		return (rows as { destination: string }[]).map(
+			(r) => r.destination as ServerName,
 		);
 	}
 
@@ -2223,9 +2507,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		this.verificationSessions.set(sessionId, { ...data });
 	}
 
-	async getVerificationSession(
-		sessionId: string,
-	): Promise<
+	async getVerificationSession(sessionId: string): Promise<
 		| {
 				medium: string;
 				address: string;
@@ -2279,7 +2561,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		try {
 			await client.query("BEGIN");
 			for (const event of authChain) {
-				const eventId = computeEventId(event);
+				const eventId = computeEventId(event, roomVersion);
 				this.streamCounter++;
 				await client.query(
 					"INSERT INTO events (event_id, room_id, stream_pos, event_json) VALUES ($1, $2, $3, $4) ON CONFLICT (event_id) DO NOTHING",
@@ -2290,7 +2572,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			let maxDepth = 0;
 			const extremities: EventId[] = [];
 			for (const event of stateEvents) {
-				const eventId = computeEventId(event);
+				const eventId = computeEventId(event, roomVersion);
 				this.streamCounter++;
 				await client.query(
 					"INSERT INTO events (event_id, room_id, stream_pos, event_json) VALUES ($1, $2, $3, $4) ON CONFLICT (event_id) DO NOTHING",

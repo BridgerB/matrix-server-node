@@ -1,5 +1,6 @@
 import { parseRegistrations } from "./appservice/registration.ts";
-import { FederationClient } from "./federation/client.ts";
+import { createFederationClient } from "./federation/client.ts";
+import { flushAllPendingEdus } from "./federation/outbound.ts";
 import {
 	postAppservicePing,
 	putAppserviceDirectoryListRoom,
@@ -16,6 +17,8 @@ import {
 	putAdminSuspend,
 } from "./handlers/admin.ts";
 import {
+	deleteGlobalAccountData,
+	deleteRoomAccountData,
 	deleteTag,
 	getGlobalAccountData,
 	getRoomAccountData,
@@ -164,7 +167,17 @@ import { postReadMarkers } from "./handlers/read-markers.ts";
 import { postReceipt } from "./handlers/receipts.ts";
 import { postRefresh } from "./handlers/refresh.ts";
 import { postRegister } from "./handlers/register.ts";
-import { getRelations } from "./handlers/relations.ts";
+import {
+	getRelations,
+	postEventRelationships,
+	postFederationEventRelationships,
+} from "./handlers/relations.ts";
+import {
+	getDelayedEvents,
+	postDelayedEventAction,
+	putDelayedEvent,
+	putDelayedStateEvent,
+} from "./handlers/delayed-events.ts";
 import {
 	postReportEvent,
 	postReportRoom,
@@ -197,12 +210,18 @@ import {
 	postKnock,
 	postLeave,
 	postUnban,
+	resumePartialStateResyncs,
 } from "./handlers/rooms.ts";
 import { postSearch } from "./handlers/search.ts";
 import { getSpaceHierarchy } from "./handlers/spaces.ts";
 import { slidingSync } from "./handlers/sliding-sync.ts";
 import { getSync } from "./handlers/sync.ts";
 import { getThreads } from "./handlers/threads.ts";
+import {
+	deleteThreadSubscription,
+	getThreadSubscription,
+	putThreadSubscription,
+} from "./handlers/thread-subscriptions.ts";
 import {
 	getProtocol,
 	getProtocols,
@@ -222,7 +241,6 @@ import {
 	getRegistrationTokenValidity,
 	postAccount3pidEmailRequestToken,
 	postAccount3pidMsisdnRequestToken,
-	postKnock as postKnockByAlias,
 	postLoginGetToken,
 	postPasswordEmailRequestToken,
 	postPasswordMsisdnRequestToken,
@@ -239,7 +257,7 @@ import { requireAppserviceAuth } from "./middleware/appservice-auth.ts";
 import { requireAuth } from "./middleware/auth.ts";
 import { requireFederationAuth } from "./middleware/federation-auth.ts";
 import { rateLimit } from "./middleware/rate-limit.ts";
-import type { Router } from "./router.ts";
+import type { Handler, Router } from "./router.ts";
 import type { SigningKey } from "./signing.ts";
 import type { Storage } from "./storage/interface.ts";
 import type { ServerName } from "./types/index.ts";
@@ -251,7 +269,7 @@ export const registerRoutes = (
 	signingKey?: SigningKey,
 ): void => {
 	const registrations = parseRegistrations();
-	const auth = requireAuth(storage);
+	const auth = requireAuth(storage, registrations, serverName);
 	const asAuth = requireAppserviceAuth(registrations, serverName);
 	const loginRL = rateLimit("login");
 	const registerRL = rateLimit("register");
@@ -259,8 +277,24 @@ export const registerRoutes = (
 
 	// Create federation client early so client-server handlers can use it for federation joins
 	const federationClient = signingKey
-		? new FederationClient(serverName as ServerName, signingKey)
+		? createFederationClient(serverName as ServerName, signingKey)
 		: undefined;
+
+	// Durable outbound EDU retry: replay any EDUs queued for destinations that
+	// were unreachable, both once on startup (so a sender that restarted while a
+	// peer was down still recovers — the "stopped server" Complement case) and
+	// on a periodic timer (so a peer that comes back up is caught up even with no
+	// new outbound traffic). Mirrors Synapse's per-destination catch-up.
+	if (federationClient) {
+		const fc = federationClient;
+		const sweep = (): void => {
+			void flushAllPendingEdus(storage, serverName, fc).catch(() => {});
+		};
+		// Initial sweep shortly after startup (let listeners bind first).
+		setTimeout(sweep, 1000).unref();
+		// Periodic catch-up sweep.
+		setInterval(sweep, 5000).unref();
+	}
 
 	router.get("/_matrix/client/versions", versionsHandler(serverName));
 	router.get("/.well-known/matrix/server", wellKnownServerHandler(serverName));
@@ -384,23 +418,23 @@ export const registerRoutes = (
 		auth,
 	);
 
-	router.get("/_matrix/client/v3/profile/:userId", getProfile(storage));
+	router.get("/_matrix/client/v3/profile/:userId", getProfile(storage, serverName, federationClient));
 	router.get(
 		"/_matrix/client/v3/profile/:userId/displayname",
-		getDisplayName(storage),
+		getDisplayName(storage, serverName, federationClient),
 	);
 	router.get(
 		"/_matrix/client/v3/profile/:userId/avatar_url",
-		getAvatarUrl(storage),
+		getAvatarUrl(storage, serverName, federationClient),
 	);
 	router.put(
 		"/_matrix/client/v3/profile/:userId/displayname",
-		putDisplayName(storage, serverName),
+		putDisplayName(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.put(
 		"/_matrix/client/v3/profile/:userId/avatar_url",
-		putAvatarUrl(storage, serverName),
+		putAvatarUrl(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.get(
@@ -415,7 +449,16 @@ export const registerRoutes = (
 
 	router.get("/_matrix/client/v3/devices", getDevices(storage), auth);
 	router.get("/_matrix/client/v3/devices/:deviceId", getDevice(storage), auth);
-	router.put("/_matrix/client/v3/devices/:deviceId", putDevice(storage), auth);
+	router.put(
+		"/_matrix/client/v3/devices/:deviceId",
+		putDevice(
+			storage,
+			serverName as ServerName,
+			signingKey,
+			federationClient,
+		),
+		auth,
+	);
 	router.delete(
 		"/_matrix/client/v3/devices/:deviceId",
 		deleteDevice(storage),
@@ -429,7 +472,7 @@ export const registerRoutes = (
 
 	router.get(
 		"/_matrix/client/v3/directory/room/:roomAlias",
-		getDirectoryRoom(storage),
+		getDirectoryRoom(storage, serverName, federationClient),
 	);
 	router.put(
 		"/_matrix/client/v3/directory/room/:roomAlias",
@@ -455,7 +498,7 @@ export const registerRoutes = (
 
 	router.post(
 		"/_matrix/client/v3/createRoom",
-		postCreateRoom(storage, serverName),
+		postCreateRoom(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.get("/_matrix/client/v3/joined_rooms", getJoinedRooms(storage), auth);
@@ -472,37 +515,37 @@ export const registerRoutes = (
 	);
 	router.post(
 		"/_matrix/client/v3/rooms/:roomId/leave",
-		postLeave(storage, serverName),
+		postLeave(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.post(
 		"/_matrix/client/v3/rooms/:roomId/invite",
-		postInvite(storage, serverName),
+		postInvite(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.post(
 		"/_matrix/client/v3/rooms/:roomId/knock",
-		postKnock(storage, serverName),
+		postKnock(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.post(
 		"/_matrix/client/v3/knock/:roomIdOrAlias",
-		postKnockByAlias(storage, serverName),
+		postKnock(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.post(
 		"/_matrix/client/v3/rooms/:roomId/kick",
-		postKick(storage, serverName),
+		postKick(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.post(
 		"/_matrix/client/v3/rooms/:roomId/ban",
-		postBan(storage, serverName),
+		postBan(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.post(
 		"/_matrix/client/v3/rooms/:roomId/unban",
-		postUnban(storage, serverName),
+		postUnban(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.post(
@@ -511,19 +554,44 @@ export const registerRoutes = (
 		auth,
 	);
 
+	// MSC4140: when `org.matrix.msc4140.delay` is present, the send/state PUT
+	// schedules a delayed event instead of sending immediately.
+	const sendDispatch: Handler = (req) =>
+		req.query.get("org.matrix.msc4140.delay") !== null
+			? putDelayedEvent(storage, serverName)(req)
+			: putSendEvent(storage, serverName, signingKey, federationClient)(req);
+	const stateDispatch: Handler = (req) =>
+		req.query.get("org.matrix.msc4140.delay") !== null
+			? putDelayedStateEvent(storage, serverName)(req)
+			: putStateEvent(storage, serverName, signingKey, federationClient)(req);
+
 	router.put(
 		"/_matrix/client/v3/rooms/:roomId/send/:eventType/:txnId",
-		putSendEvent(storage, serverName),
+		sendDispatch,
 		auth,
 	);
 	router.put(
 		"/_matrix/client/v3/rooms/:roomId/state/:eventType/:stateKey",
-		putStateEvent(storage, serverName),
+		stateDispatch,
 		auth,
 	);
 	router.put(
 		"/_matrix/client/v3/rooms/:roomId/state/:eventType",
-		putStateEvent(storage, serverName),
+		stateDispatch,
+		auth,
+	);
+	router.get(
+		"/_matrix/client/unstable/org.matrix.msc4140/delayed_events",
+		getDelayedEvents(storage, serverName),
+		auth,
+	);
+	router.post(
+		"/_matrix/client/unstable/org.matrix.msc4140/delayed_events/:delayId/:action",
+		postDelayedEventAction(),
+	);
+	router.post(
+		"/_matrix/client/unstable/event_relationships",
+		postEventRelationships(storage, serverName as ServerName, federationClient),
 		auth,
 	);
 
@@ -544,7 +612,7 @@ export const registerRoutes = (
 	);
 	router.get(
 		"/_matrix/client/v3/rooms/:roomId/messages",
-		getMessages(storage),
+		getMessages(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.get(
@@ -564,7 +632,7 @@ export const registerRoutes = (
 	);
 	router.get(
 		"/_matrix/client/v3/rooms/:roomId/timestamp_to_event",
-		getTimestampToEvent(storage),
+		getTimestampToEvent(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.get(
@@ -580,7 +648,7 @@ export const registerRoutes = (
 
 	router.put(
 		"/_matrix/client/v3/rooms/:roomId/redact/:eventId/:txnId",
-		postRedact(storage, serverName),
+		postRedact(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 
@@ -631,6 +699,17 @@ export const registerRoutes = (
 		putRoomAccountData(storage),
 		auth,
 	);
+	// MSC3391: account-data deletion (unstable prefix)
+	router.delete(
+		"/_matrix/client/unstable/org.matrix.msc3391/user/:userId/account_data/:type",
+		deleteGlobalAccountData(storage),
+		auth,
+	);
+	router.delete(
+		"/_matrix/client/unstable/org.matrix.msc3391/user/:userId/rooms/:roomId/account_data/:type",
+		deleteRoomAccountData(storage),
+		auth,
+	);
 
 	router.get(
 		"/_matrix/client/v3/user/:userId/rooms/:roomId/tags",
@@ -650,19 +729,19 @@ export const registerRoutes = (
 
 	router.put(
 		"/_matrix/client/v3/rooms/:roomId/typing/:userId",
-		putTyping(storage),
+		putTyping(storage, serverName as ServerName, signingKey, federationClient),
 		auth,
 	);
 
 	router.post(
 		"/_matrix/client/v3/rooms/:roomId/receipt/:receiptType/:eventId",
-		postReceipt(storage),
+		postReceipt(storage, serverName as ServerName, federationClient),
 		auth,
 	);
 
 	router.post(
 		"/_matrix/client/v3/rooms/:roomId/read_markers",
-		postReadMarkers(storage),
+		postReadMarkers(storage, serverName as ServerName, federationClient),
 		auth,
 	);
 
@@ -673,7 +752,7 @@ export const registerRoutes = (
 	);
 	router.put(
 		"/_matrix/client/v3/presence/:userId/status",
-		putPresence(storage),
+		putPresence(storage, serverName as ServerName, signingKey, federationClient),
 		auth,
 	);
 
@@ -694,44 +773,44 @@ export const registerRoutes = (
 	);
 	router.get(
 		"/_matrix/media/v3/download/:serverName/:mediaId",
-		getDownload(storage),
+		getDownload(storage, serverName, signingKey),
 	);
 	router.get(
 		"/_matrix/media/v3/download/:serverName/:mediaId/:fileName",
-		getDownload(storage),
+		getDownload(storage, serverName, signingKey),
 	);
 	router.get(
 		"/_matrix/media/v3/thumbnail/:serverName/:mediaId",
-		getThumbnail(storage),
+		getThumbnail(storage, serverName, signingKey),
 	);
 	router.get("/_matrix/media/v3/config", getConfig(), auth);
 
 	// Authenticated media endpoints (spec v1.11+)
 	router.get(
 		"/_matrix/client/v1/media/download/:serverName/:mediaId/:fileName",
-		getDownload(storage),
+		getDownload(storage, serverName, signingKey),
 		auth,
 	);
 	router.get(
 		"/_matrix/client/v1/media/download/:serverName/:mediaId",
-		getDownload(storage),
+		getDownload(storage, serverName, signingKey),
 		auth,
 	);
 	router.get(
 		"/_matrix/client/v1/media/thumbnail/:serverName/:mediaId",
-		getThumbnail(storage),
+		getThumbnail(storage, serverName, signingKey),
 		auth,
 	);
 	router.get("/_matrix/client/v1/media/config", getConfig(), auth);
 
 	router.get(
 		"/_matrix/client/v1/media/preview_url",
-		getUrlPreview(),
+		getUrlPreview(storage, serverName),
 		auth,
 	);
 	router.get(
 		"/_matrix/media/v3/preview_url",
-		getUrlPreview(),
+		getUrlPreview(storage, serverName),
 		auth,
 	);
 
@@ -785,9 +864,9 @@ export const registerRoutes = (
 	router.get("/_matrix/client/v3/pushers", getPushers(storage), auth);
 	router.post("/_matrix/client/v3/pushers/set", postPushersSet(storage), auth);
 
-	router.post("/_matrix/client/v3/keys/upload", postKeysUpload(storage), auth);
-	router.post("/_matrix/client/v3/keys/query", postKeysQuery(storage), auth);
-	router.post("/_matrix/client/v3/keys/claim", postKeysClaim(storage), auth);
+	router.post("/_matrix/client/v3/keys/upload", postKeysUpload(storage, serverName as ServerName, signingKey, federationClient), auth);
+	router.post("/_matrix/client/v3/keys/query", postKeysQuery(storage, serverName as ServerName, federationClient), auth);
+	router.post("/_matrix/client/v3/keys/claim", postKeysClaim(storage, serverName as ServerName, federationClient), auth);
 	router.get("/_matrix/client/v3/keys/changes", getKeysChanges(storage), auth);
 
 	router.post(
@@ -877,7 +956,7 @@ export const registerRoutes = (
 
 	router.put(
 		"/_matrix/client/v3/sendToDevice/:eventType/:txnId",
-		putSendToDevice(storage),
+		putSendToDevice(storage, serverName as ServerName, signingKey, federationClient),
 		auth,
 	);
 
@@ -943,6 +1022,23 @@ export const registerRoutes = (
 		auth,
 	);
 
+	// MSC4306 thread subscriptions
+	router.put(
+		"/_matrix/client/unstable/io.element.msc4306/rooms/:roomId/thread/:threadRootId/subscription",
+		putThreadSubscription(storage),
+		auth,
+	);
+	router.get(
+		"/_matrix/client/unstable/io.element.msc4306/rooms/:roomId/thread/:threadRootId/subscription",
+		getThreadSubscription(storage),
+		auth,
+	);
+	router.delete(
+		"/_matrix/client/unstable/io.element.msc4306/rooms/:roomId/thread/:threadRootId/subscription",
+		deleteThreadSubscription(storage),
+		auth,
+	);
+
 	router.get(
 		"/_matrix/client/v3/notifications",
 		getNotifications(storage),
@@ -965,13 +1061,13 @@ export const registerRoutes = (
 
 	router.get(
 		"/_matrix/client/v3/rooms/:roomId/hierarchy",
-		getSpaceHierarchy(storage),
+		getSpaceHierarchy(storage, serverName as ServerName, federationClient),
 		auth,
 	);
 
 	router.post(
 		"/_matrix/client/v3/rooms/:roomId/upgrade",
-		postRoomUpgrade(storage, serverName),
+		postRoomUpgrade(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 
@@ -1009,7 +1105,7 @@ export const registerRoutes = (
 	// v1 path aliases for endpoints Element Web uses
 	router.get(
 		"/_matrix/client/v1/rooms/:roomId/hierarchy",
-		getSpaceHierarchy(storage),
+		getSpaceHierarchy(storage, serverName as ServerName, federationClient),
 		auth,
 	);
 	router.get(
@@ -1034,7 +1130,7 @@ export const registerRoutes = (
 	);
 	router.get(
 		"/_matrix/client/v1/rooms/:roomId/timestamp_to_event",
-		getTimestampToEvent(storage),
+		getTimestampToEvent(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 
@@ -1164,7 +1260,11 @@ export const registerRoutes = (
 			getFederationEventAuth(storage),
 			fedAuth,
 		);
-		router.post(
+		// Federation backfill is a GET per the spec (server-server-api); the handler
+		// reads `v`/`limit` from the query string. Registering it as POST made our
+		// own outbound backfill — and any spec-compliant peer — get 405, breaking
+		// jump-to-date's remote event fetch.
+		router.get(
 			"/_matrix/federation/v1/backfill/:roomId",
 			postFederationBackfill(storage, serverName),
 			fedAuth,
@@ -1181,6 +1281,13 @@ export const registerRoutes = (
 			fedAuth,
 		);
 
+		// Spec endpoint is GET; keep POST registered too for any non-conforming
+		// caller (the handler reads only the path param, never a body).
+		router.get(
+			"/_matrix/federation/v1/user/devices/:userId",
+			postFederationUserDevices(storage),
+			fedAuth,
+		);
 		router.post(
 			"/_matrix/federation/v1/user/devices/:userId",
 			postFederationUserDevices(storage),
@@ -1213,6 +1320,11 @@ export const registerRoutes = (
 			putSendJoin(storage, serverName, signingKey, federationClient),
 			fedAuth,
 		);
+		router.put(
+			"/_matrix/federation/v1/send_join/:roomId/:eventId",
+			putSendJoin(storage, serverName, signingKey, federationClient),
+			fedAuth,
+		);
 		router.get(
 			"/_matrix/federation/v1/make_leave/:roomId/:userId",
 			getMakeLeave(storage, serverName),
@@ -1220,6 +1332,11 @@ export const registerRoutes = (
 		);
 		router.put(
 			"/_matrix/federation/v2/send_leave/:roomId/:eventId",
+			putSendLeave(storage, serverName, signingKey, federationClient),
+			fedAuth,
+		);
+		router.put(
+			"/_matrix/federation/v1/send_leave/:roomId/:eventId",
 			putSendLeave(storage, serverName, signingKey, federationClient),
 			fedAuth,
 		);
@@ -1243,6 +1360,15 @@ export const registerRoutes = (
 		router.get(
 			"/_matrix/federation/v1/hierarchy/:roomId",
 			postFederationHierarchy(storage),
+			fedAuth,
+		);
+		router.post(
+			"/_matrix/federation/unstable/event_relationships",
+			postFederationEventRelationships(
+				storage,
+				serverName as ServerName,
+				federationClient,
+			),
 			fedAuth,
 		);
 
@@ -1288,7 +1414,7 @@ export const registerRoutes = (
 	);
 	router.post(
 		"/_matrix/client/r0/createRoom",
-		postCreateRoom(storage, serverName),
+		postCreateRoom(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.get("/_matrix/client/r0/sync", getSync(storage, serverName), auth);
@@ -1300,12 +1426,12 @@ export const registerRoutes = (
 	router.get("/_matrix/client/r0/joined_rooms", getJoinedRooms(storage), auth);
 	router.put(
 		"/_matrix/client/r0/rooms/:roomId/send/:eventType/:txnId",
-		putSendEvent(storage, serverName),
+		putSendEvent(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.get(
 		"/_matrix/client/r0/rooms/:roomId/messages",
-		getMessages(storage),
+		getMessages(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.get(
@@ -1315,15 +1441,15 @@ export const registerRoutes = (
 	);
 	router.put(
 		"/_matrix/client/r0/rooms/:roomId/state/:eventType/:stateKey",
-		putStateEvent(storage, serverName),
+		putStateEvent(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.put(
 		"/_matrix/client/r0/rooms/:roomId/state/:eventType",
-		putStateEvent(storage, serverName),
+		putStateEvent(storage, serverName, signingKey, federationClient),
 		auth,
 	);
-	router.get("/_matrix/client/r0/profile/:userId", getProfile(storage));
+	router.get("/_matrix/client/r0/profile/:userId", getProfile(storage, serverName, federationClient));
 	router.get(
 		"/_matrix/client/r0/account/whoami",
 		getWhoAmI(),
@@ -1331,12 +1457,12 @@ export const registerRoutes = (
 	);
 	router.post(
 		"/_matrix/client/r0/rooms/:roomId/leave",
-		postLeave(storage, serverName),
+		postLeave(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.post(
 		"/_matrix/client/r0/rooms/:roomId/invite",
-		postInvite(storage, serverName),
+		postInvite(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.post(
@@ -1367,17 +1493,17 @@ export const registerRoutes = (
 	router.get("/_matrix/client/r0/capabilities", getCapabilities(), auth);
 	router.post("/_matrix/client/r0/logout", postLogout(storage), auth);
 	router.post("/_matrix/client/r0/logout/all", postLogoutAll(storage), auth);
-	router.post("/_matrix/client/r0/keys/upload", postKeysUpload(storage), auth);
-	router.post("/_matrix/client/r0/keys/query", postKeysQuery(storage), auth);
-	router.post("/_matrix/client/r0/keys/claim", postKeysClaim(storage), auth);
+	router.post("/_matrix/client/r0/keys/upload", postKeysUpload(storage, serverName as ServerName, signingKey, federationClient), auth);
+	router.post("/_matrix/client/r0/keys/query", postKeysQuery(storage, serverName as ServerName, federationClient), auth);
+	router.post("/_matrix/client/r0/keys/claim", postKeysClaim(storage, serverName as ServerName, federationClient), auth);
 	router.put(
 		"/_matrix/client/r0/sendToDevice/:eventType/:txnId",
-		putSendToDevice(storage),
+		putSendToDevice(storage, serverName as ServerName, signingKey, federationClient),
 		auth,
 	);
 	router.put(
 		"/_matrix/client/r0/rooms/:roomId/redact/:eventId/:txnId",
-		postRedact(storage, serverName),
+		postRedact(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.get("/_matrix/client/r0/pushrules", getAllPushRules(storage), auth);
@@ -1393,12 +1519,12 @@ export const registerRoutes = (
 	);
 	router.put(
 		"/_matrix/client/r0/rooms/:roomId/typing/:userId",
-		putTyping(storage),
+		putTyping(storage, serverName as ServerName, signingKey, federationClient),
 		auth,
 	);
 	router.post(
 		"/_matrix/client/r0/rooms/:roomId/receipt/:receiptType/:eventId",
-		postReceipt(storage),
+		postReceipt(storage, serverName as ServerName, federationClient),
 		auth,
 	);
 	router.get("/_matrix/client/r0/voip/turnServer", getTurnServer(), auth);
@@ -1422,7 +1548,7 @@ export const registerRoutes = (
 	router.post("/_matrix/client/r0/publicRooms", postPublicRooms(storage), auth);
 	router.get(
 		"/_matrix/client/r0/directory/room/:roomAlias",
-		getDirectoryRoom(storage),
+		getDirectoryRoom(storage, serverName, federationClient),
 	);
 	router.put(
 		"/_matrix/client/r0/directory/room/:roomAlias",
@@ -1436,7 +1562,7 @@ export const registerRoutes = (
 	);
 	router.put(
 		"/_matrix/client/r0/presence/:userId/status",
-		putPresence(storage),
+		putPresence(storage, serverName as ServerName, signingKey, federationClient),
 		auth,
 	);
 	router.post(
@@ -1462,17 +1588,17 @@ export const registerRoutes = (
 	);
 	router.post(
 		"/_matrix/client/r0/rooms/:roomId/kick",
-		postKick(storage, serverName),
+		postKick(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.post(
 		"/_matrix/client/r0/rooms/:roomId/ban",
-		postBan(storage, serverName),
+		postBan(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.post(
 		"/_matrix/client/r0/rooms/:roomId/unban",
-		postUnban(storage, serverName),
+		postUnban(storage, serverName, signingKey, federationClient),
 		auth,
 	);
 	router.post(
@@ -1489,4 +1615,15 @@ export const registerRoutes = (
 			error: "This server is not a policy server",
 		},
 	}));
+
+	// Resume background resyncs for any rooms left partial-state by a restart.
+	// The sqlite backend persists the flag; in-memory backends start empty.
+	// Fire-and-forget once all routes are wired up.
+	if (federationClient) {
+		void resumePartialStateResyncs(
+			storage,
+			serverName as ServerName,
+			federationClient,
+		);
+	}
 };

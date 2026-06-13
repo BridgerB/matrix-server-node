@@ -6,6 +6,7 @@ import type {
 } from "../types/e2ee.ts";
 import type { PresenceState } from "../types/ephemeral.ts";
 import type {
+	EDU,
 	PDU,
 	StrippedStateEvent,
 	ToDeviceEvent,
@@ -82,9 +83,21 @@ export interface Storage {
 
 	// Events
 	storeEvent(event: PDU, eventId: EventId): Promise<void>;
-	getEvent(
-		eventId: EventId,
-	): Promise<{ event: PDU; eventId: EventId } | undefined>;
+	/**
+	 * Overwrite the stored JSON of an existing event in place, without changing
+	 * its stream position. Used to persist redactions and other in-place edits.
+	 */
+	updateEvent(eventId: EventId, event: PDU): Promise<void>;
+	getEvent(eventId: EventId): Promise<
+		| {
+				event: PDU;
+				eventId: EventId;
+				/** True if the event was rejected (kept for the DAG, hidden from
+				 * state/sync, served as 404 by /event). */
+				rejected?: boolean;
+		  }
+		| undefined
+	>;
 	getEventsByRoom(
 		roomId: RoomId,
 		limit: number,
@@ -184,8 +197,19 @@ export interface Storage {
 		type: string,
 		content: JsonObject,
 	): Promise<void>;
+	/** Remove a global account-data entry (MSC3391). No-op if absent. */
+	deleteGlobalAccountData(userId: UserId, type: string): Promise<void>;
 	getAllGlobalAccountData(
 		userId: UserId,
+	): Promise<{ type: string; content: JsonObject }[]>;
+	/**
+	 * Global account-data entries changed since the given stream position
+	 * (stream_pos > since), INCLUDING MSC3391 deletion tombstones (content `{}`).
+	 * Used by incremental sync.
+	 */
+	getGlobalAccountDataSince(
+		userId: UserId,
+		since: number,
 	): Promise<{ type: string; content: JsonObject }[]>;
 	getRoomAccountData(
 		userId: UserId,
@@ -198,10 +222,25 @@ export interface Storage {
 		type: string,
 		content: JsonObject,
 	): Promise<void>;
+	/** Remove a room account-data entry (MSC3391). No-op if absent. */
+	deleteRoomAccountData(
+		userId: UserId,
+		roomId: RoomId,
+		type: string,
+	): Promise<void>;
 	getAllRoomAccountData(
 		userId: UserId,
 		roomId: RoomId,
 	): Promise<{ type: string; content: JsonObject }[]>;
+	/**
+	 * Room account-data entries changed since the given stream position
+	 * (stream_pos > since), INCLUDING MSC3391 deletion tombstones (content `{}`).
+	 * Used by incremental sync.
+	 */
+	getRoomAccountDataSince(
+		userId: UserId,
+		since: number,
+	): Promise<{ roomId: RoomId; type: string; content: JsonObject }[]>;
 
 	// Typing
 	setTyping(
@@ -211,6 +250,8 @@ export interface Storage {
 		timeout?: number,
 	): Promise<void>;
 	getTypingUsers(roomId: RoomId): Promise<UserId[]>;
+	/** Stream position at which the room's typing set last changed (0 if never). */
+	getTypingChangedAt(roomId: RoomId): Promise<number>;
 
 	// Receipts
 	setReceipt(
@@ -219,11 +260,16 @@ export interface Storage {
 		eventId: EventId,
 		receiptType: string,
 		ts: Timestamp,
+		threadId?: string,
 	): Promise<void>;
-	getReceipts(
-		roomId: RoomId,
-	): Promise<
-		{ eventId: EventId; receiptType: string; userId: UserId; ts: Timestamp }[]
+	getReceipts(roomId: RoomId): Promise<
+		{
+			eventId: EventId;
+			receiptType: string;
+			userId: UserId;
+			ts: Timestamp;
+			threadId?: string;
+		}[]
 	>;
 
 	// Presence
@@ -240,6 +286,8 @@ export interface Storage {
 		  }
 		| undefined
 	>;
+	/** Stream position at which `userId`'s presence last changed (0 if never). */
+	getPresenceChangedAt(userId: UserId): Promise<number>;
 
 	// Media
 	storeMedia(media: StoredMedia, data: Buffer): Promise<void>;
@@ -271,6 +319,16 @@ export interface Storage {
 		deviceId: DeviceId,
 	): Promise<DeviceKeys | undefined>;
 	getAllDeviceKeys(userId: UserId): Promise<Record<DeviceId, DeviceKeys>>;
+	/**
+	 * Remove all cached device keys for a user. Used to evict a remote user's
+	 * cached keys when we stop tracking them (they left the last room we shared)
+	 * or when they re-join after a gap, so the next /keys/query re-fetches fresh.
+	 */
+	deleteDeviceKeys(userId: UserId): Promise<void>;
+
+	// E2EE - Device key change stream
+	recordDeviceKeyChange(userId: UserId): Promise<void>;
+	getChangedDeviceUsers(since: number, until: number): Promise<UserId[]>;
 
 	// E2EE - One-time keys
 	addOneTimeKeys(
@@ -313,7 +371,9 @@ export interface Storage {
 	storeCrossSigningSignatures(
 		userId: UserId,
 		signatures: Record<string, Record<string, JsonObject>>,
-	): Promise<Record<string, Record<string, { errcode: string; error: string }>>>;
+	): Promise<
+		Record<string, Record<string, { errcode: string; error: string }>>
+	>;
 
 	// E2EE - Key backup
 	createKeyBackupVersion(
@@ -349,10 +409,7 @@ export interface Storage {
 			| KeyBackupData
 			| { sessions: Record<string, KeyBackupData> }
 			| {
-					rooms: Record<
-						RoomId,
-						{ sessions: Record<string, KeyBackupData> }
-					>;
+					rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
 			  },
 	): Promise<{ count: number; etag: string } | undefined>;
 	getKeyBackupKeys(
@@ -364,10 +421,7 @@ export interface Storage {
 		| KeyBackupData
 		| { sessions: Record<string, KeyBackupData> }
 		| {
-				rooms: Record<
-					RoomId,
-					{ sessions: Record<string, KeyBackupData> }
-				>;
+				rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
 		  }
 		| undefined
 	>;
@@ -492,6 +546,7 @@ export interface Storage {
 		from?: string,
 	): Promise<{
 		events: { event: PDU; eventId: EventId; streamPos: number }[];
+		count: number;
 		nextBatch?: string;
 	}>;
 
@@ -510,9 +565,126 @@ export interface Storage {
 		eventId: EventId,
 	): Promise<Map<string, PDU> | undefined>;
 
+	// Federation - Partial-state (faster) joins (MSC3706/MSC3902)
+	//
+	// A room joined with `omit_members=true`: we hold the create/power-levels/
+	// join-rules and our own membership, but the other member events were elided
+	// and are being fetched by a background resync. While a room is partial-state
+	// we must (a) reject inbound make/send_join/knock, (b) hide it from eager
+	// /sync, (c) block /members & /joined_members. `getRoomPartialState` returns
+	// undefined once the resync has completed and the flag is cleared.
+
+	/** Mark a room as partial-state, recording the servers to resync from and the join event. */
+	markRoomPartialState(
+		roomId: RoomId,
+		servers: ServerName[],
+		joinEventId: EventId,
+	): Promise<void>;
+	/** Clear the partial-state flag (resync complete); wakes any /sync or /members waiters. */
+	clearRoomPartialState(roomId: RoomId): Promise<void>;
+	/** The partial-state record, or undefined if the room is fully stated. */
+	getRoomPartialState(
+		roomId: RoomId,
+	): Promise<{ servers: ServerName[]; joinEventId: EventId } | undefined>;
+	/**
+	 * Every room still in partial state. Used at startup to resume background
+	 * resyncs that were interrupted by a restart (only the sqlite backend persists
+	 * these across a restart; the in-memory backends return their live set).
+	 */
+	getAllPartialStateRooms(): Promise<
+		{ roomId: RoomId; servers: ServerName[]; joinEventId: EventId }[]
+	>;
+	/** Resolve when `roomId` is no longer partial-state, or after `timeoutMs`. */
+	waitForPartialStateClear(roomId: RoomId, timeoutMs: number): Promise<void>;
+	/**
+	 * Record an event accepted while the room was partial-state. At resync these
+	 * are re-authed against the now-complete state; any that no longer pass are
+	 * rejected. Mirrors synapse's `partial_state_events`.
+	 */
+	recordPartialStateEvent(roomId: RoomId, eventId: EventId): Promise<void>;
+	/** Return and clear the events recorded by {@link recordPartialStateEvent}. */
+	takePartialStateEvents(roomId: RoomId): Promise<EventId[]>;
+	/**
+	 * Record that a local user's device list changed while `roomId` was
+	 * partial-state. At resync the change is re-sent to servers we only then
+	 * learn are in the room (synapse device_lists_outbound_pokes).
+	 */
+	recordPartialStateDevicePoke(
+		roomId: RoomId,
+		userId: UserId,
+		deviceId: DeviceId,
+	): Promise<void>;
+	/** Return and clear the pokes recorded by {@link recordPartialStateDevicePoke}. */
+	takePartialStateDevicePokes(
+		roomId: RoomId,
+	): Promise<{ userId: UserId; deviceId: DeviceId }[]>;
+	/**
+	 * Permanently remove an event — used to reject an event that was accepted
+	 * under partial state but fails re-auth once full state is known.
+	 */
+	deleteEvent(eventId: EventId): Promise<void>;
+	/**
+	 * Clear the `rejected` flag on an event previously rejected via deleteEvent,
+	 * making it visible again (used at partial-state resync to ACCEPT an event
+	 * that was rejected under incomplete state but passes once full state is
+	 * known). Only meaningful on backends that keep rejected events (sqlite); a
+	 * no-op where deleteEvent is destructive. The caller re-adds it to state.
+	 */
+	unrejectEvent(eventId: EventId): Promise<void>;
+	/**
+	 * The stream position at which `roomId`'s partial-state resync most recently
+	 * completed (cleared), or undefined if it never did. Used by incremental
+	 * /sync to surface the newly-known member state when a room un-partial-states.
+	 */
+	getRoomUnPartialStatedAt(roomId: RoomId): Promise<number | undefined>;
+	/**
+	 * Persist a state event learned during a partial-state resync as HISTORICAL
+	 * state: it becomes part of current state (getAllState / getMemberEvents) but
+	 * is given a negative stream position so it never appears in a forward sync
+	 * timeline (it is pre-existing state we only just learned, not live activity).
+	 */
+	setStateEventHistorical(
+		roomId: RoomId,
+		event: PDU,
+		eventId: EventId,
+	): Promise<void>;
+
 	// Federation - Transaction dedup
 	getFederationTxn(origin: ServerName, txnId: string): Promise<boolean>;
 	setFederationTxn(origin: ServerName, txnId: string): Promise<void>;
+
+	// Federation - Durable outbound EDU retry queue
+	//
+	// When an EDU (to-device message, device-list update, ...) cannot be
+	// delivered to a destination because it is unreachable, it is persisted
+	// here keyed by destination. The outbound sender replays a destination's
+	// pending EDUs the next time it successfully contacts that destination (and
+	// on startup, so a sender that restarts while a peer is down still recovers).
+	// Mirrors Synapse's PerDestinationQueue, which buffers pending EDUs and
+	// flushes them when a transaction to the destination next succeeds.
+
+	/**
+	 * Persist an EDU for later (re)delivery to `destination`. Returns the opaque
+	 * row id of the queued entry. Implementations cap the per-destination queue
+	 * length; when the cap is exceeded the oldest entry is dropped and a warning
+	 * is logged (callers need not handle this).
+	 */
+	enqueueFederationEdu(destination: ServerName, edu: EDU): Promise<number>;
+
+	/**
+	 * Return up to `limit` pending EDUs for `destination`, oldest first, each
+	 * with its opaque row id (for deletion after successful delivery).
+	 */
+	getPendingFederationEdus(
+		destination: ServerName,
+		limit: number,
+	): Promise<{ id: number; edu: EDU }[]>;
+
+	/** Delete a delivered pending EDU by its row id. */
+	deleteFederationEdu(id: number): Promise<void>;
+
+	/** Distinct destinations that currently have at least one pending EDU. */
+	getPendingFederationDestinations(): Promise<ServerName[]>;
 
 	// 3PID verification
 	storeVerificationToken(
@@ -527,9 +699,7 @@ export interface Storage {
 			userId?: string;
 		},
 	): Promise<void>;
-	getVerificationSession(
-		sessionId: string,
-	): Promise<
+	getVerificationSession(sessionId: string): Promise<
 		| {
 				medium: string;
 				address: string;
@@ -541,10 +711,7 @@ export interface Storage {
 		  }
 		| undefined
 	>;
-	validateVerificationToken(
-		sessionId: string,
-		token: string,
-	): Promise<boolean>;
+	validateVerificationToken(sessionId: string, token: string): Promise<boolean>;
 
 	// Login tokens (single-use tokens for m.login.token)
 	storeLoginToken(
@@ -564,4 +731,50 @@ export interface Storage {
 		stateEvents: PDU[],
 		authChain: PDU[],
 	): Promise<void>;
+}
+
+/**
+ * Receipt record as returned by {@link Storage.getReceipts}.
+ */
+export interface ReceiptRecord {
+	eventId: EventId;
+	receiptType: string;
+	userId: UserId;
+	ts: Timestamp;
+	threadId?: string;
+}
+
+/**
+ * Apply the MSC4102 read-receipt preference rule.
+ *
+ * Receipts are persisted per (userId, receiptType, threadId) so threaded and
+ * unthreaded receipts coexist in storage. When surfacing receipts to clients
+ * we must collapse to a single record per (userId, receiptType, eventId):
+ * if both an unthreaded receipt and a threaded receipt exist for that triple,
+ * the UNTHREADED one wins (its emitted content carries no `thread_id`).
+ */
+/**
+ * Maximum number of pending outbound EDUs retained per destination in the
+ * durable retry queue. Beyond this the oldest entries are dropped (logged) so
+ * an indefinitely-unreachable peer cannot grow the queue without bound. Mirrors
+ * Synapse's PerDestinationQueue.MAX_PENDING_EDUS bounding.
+ */
+export const PENDING_FEDERATION_EDU_CAP = 1000;
+
+export function collapseReceiptsMsc4102(
+	rows: ReceiptRecord[],
+): ReceiptRecord[] {
+	const byKey = new Map<string, ReceiptRecord>();
+	for (const row of rows) {
+		const key = `${row.userId}\x1f${row.receiptType}\x1f${row.eventId}`;
+		const existing = byKey.get(key);
+		// Prefer the unthreaded record; otherwise keep the first seen.
+		if (
+			!existing ||
+			(existing.threadId !== undefined && row.threadId === undefined)
+		) {
+			byKey.set(key, row);
+		}
+	}
+	return [...byKey.values()];
 }

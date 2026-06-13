@@ -1,8 +1,11 @@
 import { badJson, forbidden, notFound } from "../errors.ts";
 import { buildEvent, checkEventAuth, selectAuthEvents } from "../events.ts";
+import type { FederationClient } from "../federation/client.ts";
+import { fanoutEvent } from "../federation/outbound.ts";
 import type { Handler } from "../router.ts";
+import type { SigningKey } from "../signing.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { UserId } from "../types/index.ts";
+import type { ServerName, UserId } from "../types/index.ts";
 import type { JsonObject } from "../types/json.ts";
 
 const MAX_DISPLAYNAME_BYTES = 256;
@@ -12,12 +15,14 @@ const MAX_AVATAR_URL_BYTES = 1000;
 const extendedProfileFields = new Map<string, unknown>();
 
 const profileFieldKey = (userId: UserId, keyName: string): string =>
-	`${userId}\0${keyName}`;
+	`${userId}\x1f${keyName}`;
 
 const propagateProfileToRooms = async (
 	storage: Storage,
 	serverName: string,
 	userId: UserId,
+	signingKey?: SigningKey,
+	federationClient?: FederationClient,
 ): Promise<void> => {
 	const profile = await storage.getProfile(userId);
 	const rooms = await storage.getRoomsForUser(userId);
@@ -26,7 +31,7 @@ const propagateProfileToRooms = async (
 		const room = await storage.getRoom(roomId);
 		if (!room) continue;
 
-		const currentMember = room.state_events.get(`m.room.member\0${userId}`);
+		const currentMember = room.state_events.get(`m.room.member\x1f${userId}`);
 		if (!currentMember) continue;
 
 		const currentContent = currentMember.content as Record<string, unknown>;
@@ -48,18 +53,35 @@ const propagateProfileToRooms = async (
 			prevEvents: room.forward_extremities,
 			authEvents,
 			serverName,
+			roomVersion: room.room_version,
+			signingKey,
 		});
 
 		checkEventAuth(event, eventId, room);
 		await storage.setStateEvent(roomId, event, eventId);
 		room.depth += 1;
 		room.forward_extremities = [eventId];
+
+		// Federate the membership update to the room's servers (including those
+		// recorded for a partial-state room), so remote members see the new
+		// display name / avatar. Requires our signing key + a federation client.
+		if (signingKey && federationClient) {
+			await fanoutEvent(
+				storage,
+				serverName,
+				signingKey,
+				federationClient,
+				roomId as Parameters<typeof fanoutEvent>[4],
+				event,
+				eventId,
+			);
+		}
 	}
 };
 
 /** Collect all extended profile fields for a user */
 const getExtendedFields = (userId: UserId): Record<string, unknown> => {
-	const prefix = `${userId}\0`;
+	const prefix = `${userId}\x1f`;
 	const fields: Record<string, unknown> = {};
 	for (const [key, value] of extendedProfileFields) {
 		if (key.startsWith(prefix)) {
@@ -71,35 +93,103 @@ const getExtendedFields = (userId: UserId): Record<string, unknown> => {
 };
 
 export const getProfile =
-	(storage: Storage): Handler =>
+	(
+		storage: Storage,
+		serverName?: string,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const userId = req.params.userId as UserId;
+
+		// Remote user: fetch their profile over federation.
+		const userServer = userId.slice(userId.indexOf(":") + 1);
+		if (serverName && userServer !== serverName && federationClient) {
+			try {
+				const res = await federationClient.request(
+					userServer as ServerName,
+					"GET",
+					`/_matrix/federation/v1/query/profile?user_id=${encodeURIComponent(userId)}`,
+				);
+				if (res.status !== 200) throw notFound("User not found");
+				const p = res.body as {
+					displayname?: string;
+					avatar_url?: string;
+				};
+				return {
+					status: 200,
+					body: { displayname: p.displayname, avatar_url: p.avatar_url },
+				};
+			} catch {
+				throw notFound("User not found");
+			}
+		}
+
 		const profile = await storage.getProfile(userId);
 		if (!profile) throw notFound("User not found");
 		const extended = getExtendedFields(userId);
 		return { status: 200, body: { ...profile, ...extended } };
 	};
 
+/** Fetch a remote user's profile over federation; undefined if the user is local. */
+const fetchRemoteProfile = async (
+	userId: UserId,
+	serverName: string | undefined,
+	federationClient: FederationClient | undefined,
+): Promise<{ displayname?: string; avatar_url?: string } | undefined> => {
+	const userServer = userId.slice(userId.indexOf(":") + 1);
+	if (!serverName || userServer === serverName || !federationClient) {
+		return undefined;
+	}
+	const res = await federationClient.request(
+		userServer as ServerName,
+		"GET",
+		`/_matrix/federation/v1/query/profile?user_id=${encodeURIComponent(userId)}`,
+	);
+	if (res.status !== 200) throw notFound("User not found");
+	return res.body as { displayname?: string; avatar_url?: string };
+};
+
 export const getDisplayName =
-	(storage: Storage): Handler =>
+	(
+		storage: Storage,
+		serverName?: string,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const userId = req.params.userId as UserId;
+		const remote = await fetchRemoteProfile(userId, serverName, federationClient);
+		if (remote) {
+			return { status: 200, body: { displayname: remote.displayname ?? null } };
+		}
 		const profile = await storage.getProfile(userId);
 		if (!profile) throw notFound("User not found");
 		return { status: 200, body: { displayname: profile.displayname ?? null } };
 	};
 
 export const getAvatarUrl =
-	(storage: Storage): Handler =>
+	(
+		storage: Storage,
+		serverName?: string,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const userId = req.params.userId as UserId;
+		const remote = await fetchRemoteProfile(userId, serverName, federationClient);
+		if (remote) {
+			return { status: 200, body: { avatar_url: remote.avatar_url ?? null } };
+		}
 		const profile = await storage.getProfile(userId);
 		if (!profile) throw notFound("User not found");
 		return { status: 200, body: { avatar_url: profile.avatar_url ?? null } };
 	};
 
 export const putDisplayName =
-	(storage: Storage, serverName: string): Handler =>
+	(
+		storage: Storage,
+		serverName: string,
+		signingKey?: SigningKey,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const targetUserId = req.params.userId as UserId;
 		if (req.userId !== targetUserId)
@@ -114,12 +204,23 @@ export const putDisplayName =
 		}
 
 		await storage.setDisplayName(targetUserId, displayname ?? null);
-		await propagateProfileToRooms(storage, serverName, targetUserId);
+		await propagateProfileToRooms(
+			storage,
+			serverName,
+			targetUserId,
+			signingKey,
+			federationClient,
+		);
 		return { status: 200, body: {} };
 	};
 
 export const putAvatarUrl =
-	(storage: Storage, serverName: string): Handler =>
+	(
+		storage: Storage,
+		serverName: string,
+		signingKey?: SigningKey,
+		federationClient?: FederationClient,
+	): Handler =>
 	async (req) => {
 		const targetUserId = req.params.userId as UserId;
 		if (req.userId !== targetUserId)
@@ -134,7 +235,13 @@ export const putAvatarUrl =
 		}
 
 		await storage.setAvatarUrl(targetUserId, avatarUrl ?? null);
-		await propagateProfileToRooms(storage, serverName, targetUserId);
+		await propagateProfileToRooms(
+			storage,
+			serverName,
+			targetUserId,
+			signingKey,
+			federationClient,
+		);
 		return { status: 200, body: {} };
 	};
 

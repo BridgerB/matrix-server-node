@@ -1,5 +1,6 @@
 import { pduToClientEvent } from "../events.ts";
 import { evaluatePushRules, getOrInitRules } from "../push-rules.ts";
+import { getThreadSubscriptionsForSync } from "./thread-subscriptions.ts";
 import { bundleAggregations } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
@@ -38,6 +39,10 @@ interface SlidingSyncRequest {
 		e2ee?: { enabled?: boolean };
 		to_device?: { enabled?: boolean; since?: string };
 		account_data?: { enabled?: boolean };
+		"io.element.msc4308.thread_subscriptions"?: {
+			enabled?: boolean;
+			limit?: number;
+		};
 	};
 }
 
@@ -80,6 +85,12 @@ interface SlidingSyncResponse {
 		};
 		account_data?: {
 			global?: ClientEvent[];
+		};
+		"io.element.msc4308.thread_subscriptions"?: {
+			subscribed?: Record<
+				string,
+				Record<string, { automatic: boolean; bump_stamp: number }>
+			>;
 		};
 	};
 }
@@ -254,7 +265,7 @@ const buildRequiredState = async (
 		if (eventType === "*" && stateKey === "*") {
 			const allState = await storage.getAllState(roomId);
 			for (const s of allState) {
-				const key = `${s.event.type}\0${s.event.state_key ?? ""}`;
+				const key = `${s.event.type}\x1f${s.event.state_key ?? ""}`;
 				if (!seenKeys.has(key)) {
 					seenKeys.add(key);
 					events.push(pduToClientEvent(s.event, s.eventId));
@@ -268,7 +279,7 @@ const buildRequiredState = async (
 			const allState = await storage.getAllState(roomId);
 			for (const s of allState) {
 				if (s.event.type === eventType) {
-					const key = `${s.event.type}\0${s.event.state_key ?? ""}`;
+					const key = `${s.event.type}\x1f${s.event.state_key ?? ""}`;
 					if (!seenKeys.has(key)) {
 						seenKeys.add(key);
 						events.push(pduToClientEvent(s.event, s.eventId));
@@ -279,7 +290,7 @@ const buildRequiredState = async (
 		}
 
 		// Specific type and key
-		const key = `${eventType}\0${stateKey}`;
+		const key = `${eventType}\x1f${stateKey}`;
 		if (seenKeys.has(key)) continue;
 		const stateEvent = await storage.getStateEvent(roomId, eventType, stateKey);
 		if (stateEvent) {
@@ -653,6 +664,18 @@ export const slidingSync =
 				response.extensions.account_data = {
 					global: globalEvents,
 				};
+			}
+
+			// MSC4308 thread subscriptions extension
+			if (
+				body.extensions["io.element.msc4308.thread_subscriptions"]
+					?.enabled
+			) {
+				const subscribed = getThreadSubscriptionsForSync(userId, pos);
+				response.extensions[
+					"io.element.msc4308.thread_subscriptions"
+				] =
+					Object.keys(subscribed).length > 0 ? { subscribed } : {};
 			}
 		}
 

@@ -1,8 +1,12 @@
+import { createHash, randomBytes } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import * as http from "node:http";
 import * as https from "node:https";
 import { forbidden, invalidParam, missingParam } from "../errors.ts";
 import type { Handler } from "../router.ts";
+import type { Storage } from "../storage/interface.ts";
+import type { ServerName } from "../types/index.ts";
+import type { StoredMedia } from "../types/internal.ts";
 
 /**
  * Check if an IP address is private/internal (SSRF protection).
@@ -23,6 +27,7 @@ function isPrivateIp(ip: string): boolean {
 }
 
 const MAX_RESPONSE_SIZE = 50 * 1024; // 50KB
+const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
 const FETCH_TIMEOUT_MS = 10_000;
 
 /**
@@ -73,12 +78,13 @@ function parseOpenGraphTags(html: string): Record<string, string> {
 
 /**
  * Fetch a URL with timeout, following up to 3 redirects.
- * Returns the response body as a string (limited to MAX_RESPONSE_SIZE).
+ * Returns the response body as a Buffer (limited to maxSize) plus content type.
  */
-function fetchUrl(
+function fetchUrlRaw(
 	url: string,
+	maxSize: number,
 	maxRedirects = 3,
-): Promise<{ body: string; contentType: string }> {
+): Promise<{ body: Buffer; contentType: string }> {
 	return new Promise((resolve, reject) => {
 		const parsedUrl = new URL(url);
 		const transport = parsedUrl.protocol === "https:" ? https : http;
@@ -113,8 +119,13 @@ function fetchUrl(
 					// Handle relative redirects
 					if (redirectUrl.startsWith("/")) {
 						redirectUrl = `${parsedUrl.protocol}//${parsedUrl.host}${redirectUrl}`;
+					} else if (!/^https?:\/\//i.test(redirectUrl)) {
+						redirectUrl = new URL(redirectUrl, url).toString();
 					}
-					fetchUrl(redirectUrl, maxRedirects - 1).then(resolve, reject);
+					fetchUrlRaw(redirectUrl, maxSize, maxRedirects - 1).then(
+						resolve,
+						reject,
+					);
 					return;
 				}
 
@@ -123,27 +134,24 @@ function fetchUrl(
 					(res.statusCode < 200 || res.statusCode >= 400)
 				) {
 					res.resume();
-					reject(
-						new Error(`HTTP error: ${res.statusCode.toString()}`),
-					);
+					reject(new Error(`HTTP error: ${res.statusCode.toString()}`));
 					return;
 				}
 
-				const contentType =
-					res.headers["content-type"] ?? "text/html";
+				const contentType = res.headers["content-type"] ?? "text/html";
 				const chunks: Buffer[] = [];
 				let totalSize = 0;
 
 				res.on("data", (chunk: Buffer) => {
 					totalSize += chunk.length;
-					if (totalSize <= MAX_RESPONSE_SIZE) {
+					if (totalSize <= maxSize) {
 						chunks.push(chunk);
 					}
 				});
 
 				res.on("end", () => {
 					resolve({
-						body: Buffer.concat(chunks).toString("utf-8"),
+						body: Buffer.concat(chunks),
 						contentType,
 					});
 				});
@@ -177,55 +185,187 @@ function decodeHtmlEntities(str: string): string {
 		);
 }
 
-export const getUrlPreview = (): Handler => async (req) => {
-	const url = req.query.get("url");
-	if (!url) throw missingParam("Missing required 'url' parameter");
-
-	// Validate URL scheme
-	let parsedUrl: URL;
-	try {
-		parsedUrl = new URL(url);
-	} catch {
-		throw invalidParam("Invalid URL");
+/**
+ * Extract image dimensions from common image formats by inspecting the bytes.
+ * Supports PNG, GIF, and JPEG. Returns undefined if dimensions can't be read.
+ */
+function getImageDimensions(
+	buf: Buffer,
+): { width: number; height: number } | undefined {
+	// PNG: signature 0x89 P N G, IHDR width/height are big-endian uint32 at offset 16/20
+	if (
+		buf.length >= 24 &&
+		buf[0] === 0x89 &&
+		buf[1] === 0x50 &&
+		buf[2] === 0x4e &&
+		buf[3] === 0x47
+	) {
+		return {
+			width: buf.readUInt32BE(16),
+			height: buf.readUInt32BE(20),
+		};
 	}
 
-	if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
-		throw invalidParam("URL must use http or https scheme");
+	// GIF: "GIF8", width/height are little-endian uint16 at offset 6/8
+	if (
+		buf.length >= 10 &&
+		buf[0] === 0x47 &&
+		buf[1] === 0x49 &&
+		buf[2] === 0x46 &&
+		buf[3] === 0x38
+	) {
+		return {
+			width: buf.readUInt16LE(6),
+			height: buf.readUInt16LE(8),
+		};
 	}
 
-	// SSRF protection: resolve hostname and block private IPs
-	try {
-		const { address } = await lookup(parsedUrl.hostname);
-		if (isPrivateIp(address)) {
-			throw forbidden("URL resolves to a private IP address");
+	// JPEG: starts with 0xFFD8, scan for SOFn marker
+	if (buf.length >= 4 && buf[0] === 0xff && buf[1] === 0xd8) {
+		let offset = 2;
+		while (offset + 9 < buf.length) {
+			if (buf[offset] !== 0xff) {
+				offset++;
+				continue;
+			}
+			const marker = buf[offset + 1] ?? 0;
+			// SOF0..SOF15 (excluding non-SOF markers 0xC4,0xC8,0xCC)
+			if (
+				marker >= 0xc0 &&
+				marker <= 0xcf &&
+				marker !== 0xc4 &&
+				marker !== 0xc8 &&
+				marker !== 0xcc
+			) {
+				return {
+					height: buf.readUInt16BE(offset + 5),
+					width: buf.readUInt16BE(offset + 7),
+				};
+			}
+			const segLen = buf.readUInt16BE(offset + 2);
+			offset += 2 + segLen;
 		}
-	} catch (err) {
-		if (err instanceof Error && err.message.includes("private IP")) throw err;
-		throw invalidParam("Could not resolve URL hostname");
 	}
 
-	try {
-		const { body, contentType } = await fetchUrl(url);
+	return undefined;
+}
 
-		// Only parse HTML content
-		if (!contentType.includes("text/html") && !contentType.includes("application/xhtml")) {
-			return {
-				status: 200,
-				body: { "og:title": parsedUrl.hostname },
-			};
-		}
-
-		const ogTags = parseOpenGraphTags(body);
-
-		// Build response with decoded entities
-		const result: Record<string, string> = {};
-		for (const [key, value] of Object.entries(ogTags)) {
-			result[key] = decodeHtmlEntities(value);
-		}
-
-		return { status: 200, body: result };
-	} catch {
-		// If we can't fetch, return empty object
-		return { status: 200, body: {} };
+/**
+ * Resolve a possibly-private hostname for SSRF protection.
+ * Throws (forbidden) if the host resolves to a private IP.
+ */
+async function assertPublicHost(hostname: string): Promise<void> {
+	// Allow private targets when explicitly enabled (e.g. Complement, which serves
+	// the previewed page from a private Docker IP). Production keeps SSRF blocking.
+	if (process.env.URL_PREVIEW_ALLOW_PRIVATE_IPS === "1") return;
+	const { address } = await lookup(hostname);
+	if (isPrivateIp(address)) {
+		throw forbidden("URL resolves to a private IP address");
 	}
-};
+}
+
+export const getUrlPreview =
+	(storage?: Storage, serverName?: string): Handler =>
+	async (req) => {
+		const url = req.query.get("url");
+		if (!url) throw missingParam("Missing required 'url' parameter");
+
+		// Validate URL scheme
+		let parsedUrl: URL;
+		try {
+			parsedUrl = new URL(url);
+		} catch {
+			throw invalidParam("Invalid URL");
+		}
+
+		if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+			throw invalidParam("URL must use http or https scheme");
+		}
+
+		// SSRF protection: resolve hostname and block private IPs
+		try {
+			await assertPublicHost(parsedUrl.hostname);
+		} catch (err) {
+			if (err instanceof Error && err.message.includes("private IP")) throw err;
+			throw invalidParam("Could not resolve URL hostname");
+		}
+
+		try {
+			const { body, contentType } = await fetchUrlRaw(url, MAX_RESPONSE_SIZE);
+
+			// Only parse HTML content
+			if (
+				!contentType.includes("text/html") &&
+				!contentType.includes("application/xhtml")
+			) {
+				return {
+					status: 200,
+					body: { "og:title": parsedUrl.hostname },
+				};
+			}
+
+			const ogTags = parseOpenGraphTags(body.toString("utf-8"));
+
+			// Build response with decoded entities
+			const result: Record<string, string | number> = {};
+			for (const [key, value] of Object.entries(ogTags)) {
+				result[key] = decodeHtmlEntities(value);
+			}
+
+			// If there is an og:image, download it, store it as media, and
+			// rewrite og:image to the resulting mxc:// URI. Also populate
+			// matrix:image:size and og:image:width/height.
+			const ogImage = ogTags["og:image"];
+			if (ogImage && storage && serverName) {
+				try {
+					const imageUrl = new URL(
+						decodeHtmlEntities(ogImage),
+						url,
+					);
+					if (
+						imageUrl.protocol === "http:" ||
+						imageUrl.protocol === "https:"
+					) {
+						await assertPublicHost(imageUrl.hostname);
+						const img = await fetchUrlRaw(
+							imageUrl.toString(),
+							MAX_IMAGE_SIZE,
+						);
+
+						const mediaId = randomBytes(18).toString("base64url");
+						const hash = createHash("sha256")
+							.update(img.body)
+							.digest("base64");
+						const media: StoredMedia = {
+							media_id: mediaId,
+							origin: serverName as ServerName,
+							user_id: req.userId as string | undefined,
+							content_type: img.contentType,
+							upload_name: imageUrl.pathname.split("/").pop(),
+							file_size: img.body.length,
+							content_hash: hash,
+							created_at: Date.now(),
+							quarantined: false,
+						};
+						await storage.storeMedia(media, img.body);
+
+						result["og:image"] = `mxc://${serverName}/${mediaId}`;
+						result["matrix:image:size"] = img.body.length;
+
+						const dims = getImageDimensions(img.body);
+						if (dims) {
+							result["og:image:width"] = dims.width;
+							result["og:image:height"] = dims.height;
+						}
+					}
+				} catch {
+					// Image fetch/store failed: leave og:image as the raw value.
+				}
+			}
+
+			return { status: 200, body: result };
+		} catch {
+			// If we can't fetch, return empty object
+			return { status: 200, body: {} };
+		}
+	};

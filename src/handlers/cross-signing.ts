@@ -1,4 +1,6 @@
+import { canonicalJson } from "../events.ts";
 import { generateSessionId } from "../crypto.ts";
+import { verifyPassword } from "../crypto-utils.ts";
 import { badJson, forbidden } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
@@ -24,51 +26,79 @@ export const postDeviceSigningUpload =
 
 		const existing = await storage.getCrossSigningKeys(userId);
 
-		// UIAA is required if master key already exists and is changing
-		if (existing.master_key && body.master_key) {
-			const existingKeyId = Object.keys(existing.master_key.keys)[0];
-			const newKeyId = Object.keys(body.master_key.keys)[0];
-			const existingKeyVal =
-				existingKeyId !== undefined
-					? existing.master_key.keys[existingKeyId]
+		// MSC3967: UIA is only required when REPLACING an existing cross-signing
+		// key. First-time setup (no existing master key) is allowed without UIA,
+		// and re-uploading the exact same keys is idempotent (no UIA).
+		//
+		// Mirrors Synapse's SigningKeyUploadServlet.on_POST:
+		//   1. is_cross_signing_setup = a master key already exists.
+		//   2. keys_are_different = any provided key differs from what is stored
+		//      (a brand-new key counts as different). If nothing differs, return
+		//      200 without UIA (idempotent re-upload).
+		//   3. If keys differ AND cross-signing is already set up, require UIA.
+		const isCrossSigningSetup = existing.master_key !== undefined;
+
+		const keyPairs: [
+			"master_key" | "self_signing_key" | "user_signing_key",
+			CrossSigningKey | undefined,
+			CrossSigningKey | undefined,
+		][] = [
+			["master_key", body.master_key, existing.master_key],
+			["self_signing_key", body.self_signing_key, existing.self_signing_key],
+			["user_signing_key", body.user_signing_key, existing.user_signing_key],
+		];
+
+		let keysAreDifferent = false;
+		for (const [, provided, stored] of keyPairs) {
+			if (!provided) continue;
+			// A key being inserted for the first time, or whose stored value
+			// differs from the provided value, counts as a difference.
+			if (!stored || canonicalJson(stored) !== canonicalJson(provided)) {
+				keysAreDifferent = true;
+				break;
+			}
+		}
+
+		// Idempotent re-upload (or empty body): nothing to change, no UIA.
+		if (!keysAreDifferent) {
+			return { status: 200, body: {} };
+		}
+
+		// Keys differ and cross-signing is already set up: require UIA.
+		if (isCrossSigningSetup) {
+			if (!body.auth || !body.auth.type) {
+				const sessionId = generateSessionId();
+				await storage.createUIAASession(sessionId);
+				return {
+					status: 401,
+					body: {
+						flows: [{ stages: ["m.login.password"] }],
+						params: {},
+						session: sessionId,
+					},
+				};
+			}
+
+			// Validate UIAA auth
+			if (body.auth.type === "m.login.password") {
+				const session = body.auth.session
+					? await storage.getUIAASession(body.auth.session)
 					: undefined;
-			const newKeyVal =
-				newKeyId !== undefined ? body.master_key.keys[newKeyId] : undefined;
-			if (existingKeyVal !== newKeyVal) {
-				if (!body.auth || !body.auth.type) {
-					const sessionId = generateSessionId();
-					await storage.createUIAASession(sessionId);
-					return {
-						status: 401,
-						body: {
-							flows: [{ stages: ["m.login.password"] }],
-							params: {},
-							session: sessionId,
-						},
-					};
-				}
+				if (!session) throw forbidden("Unknown session");
 
-				// Validate UIAA auth
-				if (body.auth.type === "m.login.password") {
-					const session = body.auth.session
-						? await storage.getUIAASession(body.auth.session)
-						: undefined;
-					if (!session) throw forbidden("Unknown session");
+				const account = await storage.getUserById(userId);
+				if (!account) throw forbidden("User not found");
 
-					const account = await storage.getUserById(userId);
-					if (!account) throw forbidden("User not found");
+				const passwordValid = await verifyPassword(
+					body.auth.password ?? "",
+					account.password_hash,
+				);
+				if (!passwordValid) throw forbidden("Invalid password");
 
-					if (body.auth.password !== account.password_hash)
-						throw forbidden("Invalid password");
-
-					await storage.addUIAACompleted(
-						body.auth.session!,
-						"m.login.password",
-					);
-					await storage.deleteUIAASession(body.auth.session!);
-				} else {
-					throw forbidden(`Unsupported auth type: ${body.auth.type}`);
-				}
+				await storage.addUIAACompleted(body.auth.session!, "m.login.password");
+				await storage.deleteUIAASession(body.auth.session!);
+			} else {
+				throw forbidden(`Unsupported auth type: ${body.auth.type}`);
 			}
 		}
 

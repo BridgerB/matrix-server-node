@@ -9,6 +9,7 @@ RUN npm ci
 
 COPY tsconfig.json ./
 COPY src/ ./src/
+COPY scripts/ ./scripts/
 
 # Complement mounts CA cert/key here for federation TLS
 # Our server needs to serve federation on 8448 with TLS using these certs

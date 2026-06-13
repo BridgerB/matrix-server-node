@@ -41,7 +41,6 @@ export const postKeyQuery =
 export const getKeyQuery =
 	(_storage: Storage): Handler =>
 	async (_req) => {
-		// const serverName = req.params.serverName as ServerName;
 		const serverKeys: ServerKeys[] = [];
 
 		// We don't have a way to enumerate all keys for a server,

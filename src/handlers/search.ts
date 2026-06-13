@@ -23,7 +23,7 @@ export const postSearch =
 		const searchTerm = roomEvents.search_term;
 		const keys = roomEvents.keys ?? ["content.body"];
 		const orderBy = roomEvents.order_by ?? "recent";
-		const limit = 10;
+		const limit = roomEvents.filter?.limit ?? 10;
 		const from = req.query.get("next_batch") ?? undefined;
 
 		const joinedRooms = await storage.getRoomsForUser(userId);
@@ -53,6 +53,9 @@ export const postSearch =
 		const highlights = extractHighlights(searchTerm);
 
 		for (const { event, eventId, streamPos } of searchResult.events) {
+			// Redacted events must not appear in search results
+			if (event.unsigned?.redacted_because) continue;
+
 			const clientEvent = pduToClientEvent(event, eventId);
 
 			const searchResultEntry: SearchResult = {
@@ -156,7 +159,7 @@ export const postSearch =
 			body: {
 				search_categories: {
 					room_events: {
-						count: results.length,
+						count: searchResult.count,
 						highlights,
 						results,
 						state:

@@ -71,6 +71,7 @@ export const postLogin =
 			localpart =
 				colonIdx > 0 ? localpart.slice(1, colonIdx) : localpart.slice(1);
 		}
+		localpart = localpart.toLowerCase();
 
 		const account = await storage.getUserByLocalpart(localpart);
 		if (!account) throw forbidden("Invalid username or password");
