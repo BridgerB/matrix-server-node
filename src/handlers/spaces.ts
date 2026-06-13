@@ -20,25 +20,24 @@ interface HierarchyRoom extends SpaceHierarchyRoom {
 const contentField = (event: PDU | undefined, field: string): unknown =>
 	event ? (event.content as Record<string, unknown>)[field] : undefined;
 
-const extractChildren = (
-	stateEvents: Map<string, PDU>,
-): { childrenState: StrippedStateEvent[]; childRoomIds: RoomId[] } => {
-	const childrenState: StrippedStateEvent[] = [];
-	const childRoomIds: RoomId[] = [];
-	for (const [key, event] of stateEvents) {
-		if (!key.startsWith("m.space.child\x1f")) continue;
-		const content = event.content as Record<string, unknown>;
-		if (!content.via || !Array.isArray(content.via)) continue;
-		childrenState.push({
-			content: event.content,
-			sender: event.sender,
-			state_key: event.state_key ?? "",
-			type: event.type,
-		});
-		childRoomIds.push((event.state_key ?? "") as RoomId);
-	}
-	return { childrenState, childRoomIds };
-};
+type Child = { state: StrippedStateEvent; roomId: RoomId };
+
+const extractChildren = (stateEvents: Map<string, PDU>): Child[] =>
+	[...stateEvents]
+		.filter(
+			([key, event]) =>
+				key.startsWith("m.space.child\x1f") &&
+				Array.isArray((event.content as Record<string, unknown>).via),
+		)
+		.map(([, event]) => ({
+			state: {
+				content: event.content,
+				sender: event.sender,
+				state_key: event.state_key ?? "",
+				type: event.type,
+			},
+			roomId: (event.state_key ?? "") as RoomId,
+		}));
 
 const buildHierarchyRoom = (
 	room: RoomState,
@@ -261,26 +260,19 @@ export const getSpaceHierarchy =
 				) {
 					continue;
 				}
-				const all = extractChildren(localRoom.state_events);
-				const children: {
-					childrenState: StrippedStateEvent[];
-					childRoomIds: RoomId[];
-				} = suggestedOnly
-					? { childrenState: [], childRoomIds: [] }
-					: all;
-				if (suggestedOnly) {
-					for (let i = 0; i < all.childrenState.length; i++) {
-						const cs = all.childrenState[i]!;
-						const content = cs.content as Record<string, unknown>;
-						if (!content.suggested) continue;
-						children.childrenState.push(cs);
-						children.childRoomIds.push(all.childRoomIds[i]!);
-					}
-				}
-				entry = buildHierarchyRoom(localRoom, roomId, children.childrenState);
-				childItems = children.childRoomIds.map((cid) => ({
-					roomId: cid,
-					via: extractViaForChild(localRoom.state_events, cid),
+				const children = suggestedOnly
+					? extractChildren(localRoom.state_events).filter(
+							(c) => (c.state.content as Record<string, unknown>).suggested,
+						)
+					: extractChildren(localRoom.state_events);
+				entry = buildHierarchyRoom(
+					localRoom,
+					roomId,
+					children.map((c) => c.state),
+				);
+				childItems = children.map((c) => ({
+					roomId: c.roomId,
+					via: extractViaForChild(localRoom.state_events, c.roomId),
 				}));
 			} else if (!isLocal && (federationClient || remoteCache.has(roomId))) {
 				let remoteRoom = remoteCache.get(roomId);
