@@ -1129,6 +1129,26 @@ const processPdu = async (
 					break;
 				}
 			}
+			// If we resolved this event's state-before (it had missing prev_events
+			// we filled via /state_ids + /state), that snapshot already contains the
+			// sender's membership — learn it from there rather than making a separate
+			// /event_auth round-trip. This is what lets a half-missing-grandparent
+			// event be accepted without an (unexpected) /event_auth request: the
+			// state we fetched for the missing grandparent carries the sender's
+			// membership. (CanReceiveEventsWithHalfMissingGrandparents...)
+			if (!learned && resolvedStateBefore) {
+				const m = resolvedStateBefore.state_events.get(
+					`m.room.member\x1f${pdu.sender}`,
+				);
+				if (m) {
+					await storage.setStateEventHistorical(
+						pdu.room_id,
+						m,
+						computeEventId(m, room.room_version),
+					);
+					learned = true;
+				}
+			}
 			// The sender's membership was omitted by the partial join and isn't
 			// among the auth_events we hold. Fetch the event's auth chain from the
 			// origin via /event_auth and learn the membership from there, so
