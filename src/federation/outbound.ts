@@ -37,6 +37,54 @@ const newTxnId = (): string => randomBytes(16).toString("base64url");
  */
 const MAX_EDUS_PER_TXN = 100;
 
+/** PUT a freshly-stamped `/send` transaction carrying the given PDUs/EDUs. */
+const sendTransaction = (
+	federationClient: FederationClient,
+	serverName: string,
+	destination: ServerName,
+	contents: { pdus?: PDU[]; edus?: EDU[] },
+): Promise<{ status: number; body: unknown }> =>
+	federationClient.request(
+		destination,
+		"PUT",
+		`/_matrix/federation/v1/send/${encodeURIComponent(newTxnId())}`,
+		{
+			origin: serverName,
+			origin_server_ts: Date.now(),
+			pdus: contents.pdus ?? [],
+			edus: contents.edus ?? [],
+		},
+	);
+
+/**
+ * Fire-and-forget one transaction to a destination: launched without awaiting,
+ * never letting a per-destination failure escape. `describe` prefixes the log
+ * line on a rejection (non-2xx) or transport error. A failed delivery just means
+ * that server misses this event/EDU.
+ */
+const deliverFireAndForget = (
+	federationClient: FederationClient,
+	serverName: string,
+	destination: ServerName,
+	contents: { pdus?: PDU[]; edus?: EDU[] },
+	describe: string,
+): void => {
+	void sendTransaction(federationClient, serverName, destination, contents)
+		.then((resp) => {
+			if (resp.status >= 400) {
+				console.error(
+					`${describe} to ${destination} rejected (status ${resp.status})`,
+				);
+			}
+		})
+		.catch((err) => {
+			console.error(
+				`${describe} to ${destination} failed:`,
+				(err as Error).message,
+			);
+		});
+};
+
 /**
  * Deliver an EDU to a single destination with a durable retry queue, mirroring
  * Synapse's PerDestinationQueue:
@@ -90,26 +138,16 @@ export const deliverEduToDestination = async (
 		}
 	}
 
-	const batch: { id?: number; edu: EDU }[] = [...pending];
-	if (newEntryId !== undefined) batch.push({ id: newEntryId, edu });
-	else batch.push({ edu });
-
-	const txnId = newTxnId();
-	const body = {
-		origin: serverName,
-		origin_server_ts: Date.now(),
-		pdus: [],
-		edus: batch.map((b) => b.edu),
-	};
+	const batch: { id?: number; edu: EDU }[] = [
+		...pending,
+		newEntryId !== undefined ? { id: newEntryId, edu } : { edu },
+	];
 
 	let delivered = false;
 	try {
-		const resp = await federationClient.request(
-			destination,
-			"PUT",
-			`/_matrix/federation/v1/send/${encodeURIComponent(txnId)}`,
-			body,
-		);
+		const resp = await sendTransaction(federationClient, serverName, destination, {
+			edus: batch.map((b) => b.edu),
+		});
 		delivered = resp.status < 400;
 		if (!delivered) {
 			console.error(
@@ -172,22 +210,11 @@ export const flushPendingEdusForDestination = async (
 		}
 		if (pending.length === 0) return;
 
-		const txnId = newTxnId();
-		const body = {
-			origin: serverName,
-			origin_server_ts: Date.now(),
-			pdus: [],
-			edus: pending.map((p) => p.edu),
-		};
-
 		let delivered = false;
 		try {
-			const resp = await federationClient.request(
-				destination,
-				"PUT",
-				`/_matrix/federation/v1/send/${encodeURIComponent(txnId)}`,
-				body,
-			);
+			const resp = await sendTransaction(federationClient, serverName, destination, {
+				edus: pending.map((p) => p.edu),
+			});
 			delivered = resp.status < 400;
 		} catch {
 			delivered = false;
@@ -312,36 +339,13 @@ export const fanoutEdu = async (
 			continue;
 		}
 
-		const txnId = newTxnId();
-		const body = {
-			origin: serverName,
-			origin_server_ts: Date.now(),
-			pdus: [],
-			edus: [edu],
-		};
-
-		// Fire-and-forget: do not await, and never let a per-destination failure
-		// escape. A failed delivery just means that server misses this EDU.
-		void federationClient
-			.request(
-				destination,
-				"PUT",
-				`/_matrix/federation/v1/send/${encodeURIComponent(txnId)}`,
-				body,
-			)
-			.then((resp) => {
-				if (resp.status >= 400) {
-					console.error(
-						`fanoutEdu: ${destination} rejected ${edu.edu_type} EDU (status ${resp.status})`,
-					);
-				}
-			})
-			.catch((err) => {
-				console.error(
-					`fanoutEdu: delivery of ${edu.edu_type} EDU to ${destination} failed:`,
-					(err as Error).message,
-				);
-			});
+		deliverFireAndForget(
+			federationClient,
+			serverName,
+			destination,
+			{ edus: [edu] },
+			`fanoutEdu: ${edu.edu_type} EDU`,
+		);
 	}
 };
 
@@ -376,38 +380,14 @@ export const fanoutEvent = async (
 
 	const excludeSet = new Set([serverName, ...(exclude ?? [])]);
 	const destinations = servers.filter((s) => s && !excludeSet.has(s));
-	if (destinations.length === 0) return;
 
 	for (const destination of destinations) {
-		const txnId = newTxnId();
-		const body = {
-			origin: serverName,
-			origin_server_ts: Date.now(),
-			pdus: [event],
-			edus: [],
-		};
-
-		// Fire-and-forget: do not await, and never let a per-destination failure
-		// escape. A failed delivery just means that server misses this event.
-		void federationClient
-			.request(
-				destination,
-				"PUT",
-				`/_matrix/federation/v1/send/${encodeURIComponent(txnId)}`,
-				body,
-			)
-			.then((resp) => {
-				if (resp.status >= 400) {
-					console.error(
-						`fanoutEvent: ${destination} rejected ${eventId} (status ${resp.status})`,
-					);
-				}
-			})
-			.catch((err) => {
-				console.error(
-					`fanoutEvent: delivery of ${eventId} to ${destination} failed:`,
-					(err as Error).message,
-				);
-			});
+		deliverFireAndForget(
+			federationClient,
+			serverName,
+			destination,
+			{ pdus: [event] },
+			`fanoutEvent: ${eventId}`,
+		);
 	}
 };
