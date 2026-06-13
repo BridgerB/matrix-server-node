@@ -2324,6 +2324,25 @@ export const postKick =
 		const body = req.body as { user_id?: string; reason?: string } | undefined;
 		if (!body?.user_id) throw missingParam("Missing 'user_id'");
 
+		// The client /kick endpoint may only kick a user who is currently in the
+		// room — join (a normal kick), invite (rescinding an invite) or knock
+		// (rejecting a knock). Kicking a user who has already left or was never
+		// present is a 403 (Users cannot kick users who have already left /
+		// are not in the room). This endpoint-level guard is stricter than the
+		// federation event-auth rules (which authorise a kick purely by power
+		// level per the spec); synapse/dendrite enforce the same at the C-S API.
+		const targetRoom = await storage.getRoom(roomId as RoomId);
+		const targetMembership = targetRoom
+			? getMembership(targetRoom, body.user_id as UserId)
+			: undefined;
+		if (
+			targetMembership !== "join" &&
+			targetMembership !== "invite" &&
+			targetMembership !== "knock"
+		) {
+			throw forbidden("Cannot kick a user who is not in the room");
+		}
+
 		// Capture the kicked user's server BEFORE their membership flips to `leave`.
 		// When the target is a remote user who was only *invited* (an invite
 		// rescission, see TestFederationRoomsInvite "Inviter user can rescind invite
