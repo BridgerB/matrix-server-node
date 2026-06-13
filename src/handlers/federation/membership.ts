@@ -10,6 +10,7 @@ import {
 	findAuthorisingLocalUser,
 	getMembership,
 	selectAuthEvents,
+	serverHasMember,
 	stripV12CreateRoomId,
 } from "../../events.ts";
 import { isServerAllowedByAcl } from "../../federation/acl.ts";
@@ -113,21 +114,6 @@ const toStrippedState = (value: unknown): StrippedStateEvent[] => {
  * i.e. they are joined to one of the rooms listed under
  * m.room.join_rules content.allow with type "m.room_membership".
  */
-/** True if `serverName` has at least one currently-joined member in `room`. */
-const serverHasJoinedMember = (
-	room: RoomState,
-	serverName: string,
-): boolean => {
-	for (const [key, event] of room.state_events) {
-		if (!key.startsWith("m.room.member\x1f")) continue;
-		if ((event.content as Record<string, unknown>).membership !== "join")
-			continue;
-		const memberId = key.slice("m.room.member\x1f".length);
-		if (domainOf(memberId) === serverName) return true;
-	}
-	return false;
-};
-
 const userSatisfiesRestrictedAllow = async (
 	storage: Storage,
 	room: RoomState,
@@ -153,7 +139,8 @@ const userSatisfiesRestrictedAllow = async (
 		// unreliable. MSC3083 / TestRestrictedRoomsRemoteJoinFailOver: once this
 		// server's last member leaves the allow room, it must stop authorising
 		// restricted joins and let the requester fail over to a server that can.
-		if (!serverHasJoinedMember(allowedRoom, localServerName)) continue;
+		if (!serverHasMember(allowedRoom.state_events, localServerName, "join"))
+			continue;
 		if (getMembership(allowedRoom, userId) === "join") return true;
 	}
 	return false;

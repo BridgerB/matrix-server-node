@@ -1,5 +1,5 @@
 import { forbidden, notFound } from "../../errors.ts";
-import { computeEventId, redactEvent } from "../../events.ts";
+import { computeEventId, iterMembers, redactEvent } from "../../events.ts";
 import { isServerAllowedByAcl } from "../../federation/acl.ts";
 import { domainOf } from "../../ids.ts";
 import type { Handler } from "../../router.ts";
@@ -94,11 +94,8 @@ const eventVisibleToServer = async (
 		return true;
 	}
 
-	for (const [key, stateEvent] of state) {
-		if (!key.startsWith("m.room.member\x1f")) continue;
-		const stateKey = key.slice("m.room.member\x1f".length);
-		if (domainOf(stateKey) !== server) continue;
-		const membership = stateEvent.content.membership as string | undefined;
+	for (const { userId, membership } of iterMembers(state)) {
+		if (domainOf(userId) !== server) continue;
 		if (membership === "join") return true;
 		if (membership === "invite" && visibility === "invited") return true;
 	}

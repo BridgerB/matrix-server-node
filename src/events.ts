@@ -6,7 +6,12 @@ import { domainOf } from "./ids.ts";
 import type { SigningKey } from "./signing.ts";
 import { signEvent } from "./signing.ts";
 import type { Storage } from "./storage/interface.ts";
-import type { ClientEvent, PDU, UnsignedData } from "./types/events.ts";
+import type {
+	ClientEvent,
+	PDU,
+	StrippedStateEvent,
+	UnsignedData,
+} from "./types/events.ts";
 import type { EventId, RoomId, ServerName, UserId } from "./types/index.ts";
 import type { RoomState } from "./types/internal.ts";
 import type { JsonObject } from "./types/json.ts";
@@ -606,14 +611,10 @@ export const findAuthorisingLocalUser = (
 	let best: UserId | undefined;
 	let bestPl = -Infinity;
 
-	for (const [key, event] of room.state_events) {
-		if (!key.startsWith("m.room.member\x1f")) continue;
-		const membership = (event.content as Record<string, unknown>).membership as
-			| string
-			| undefined;
+	for (const { userId: memberId, membership } of iterMembers(
+		room.state_events,
+	)) {
 		if (membership !== "join") continue;
-
-		const memberId = key.slice("m.room.member\x1f".length) as UserId;
 		if (domainOf(memberId) !== localServerName) continue;
 
 		const memberPl = getUserPowerLevel(memberId, room);
@@ -1136,6 +1137,56 @@ export const KEY_SEP = "\x1f";
 
 export const makeStateKey = (type: string, stateKey = ""): string =>
 	`${type}${KEY_SEP}${stateKey}`;
+
+const MEMBER_KEY_PREFIX = `m.room.member${KEY_SEP}`;
+
+/** Iterate the m.room.member entries of a room's state. */
+export function* iterMembers(
+	state: Map<string, PDU>,
+): Generator<{ userId: UserId; membership: string | undefined; event: PDU }> {
+	for (const [key, event] of state) {
+		if (!key.startsWith(MEMBER_KEY_PREFIX)) continue;
+		yield {
+			userId: key.slice(MEMBER_KEY_PREFIX.length) as UserId,
+			membership: membershipOf(event),
+			event,
+		};
+	}
+}
+
+/** Whether `server` has at least one member of the given membership in `state`. */
+export const serverHasMember = (
+	state: Map<string, PDU>,
+	server: string,
+	membership: string,
+): boolean => {
+	for (const m of iterMembers(state)) {
+		if (m.membership === membership && domainOf(m.userId) === server) {
+			return true;
+		}
+	}
+	return false;
+};
+
+/** A room's join rule, defaulting to "invite" when no join_rules event exists. */
+export const getJoinRule = (room: RoomState): string => {
+	const event = room.state_events.get(makeStateKey("m.room.join_rules"));
+	return event
+		? (((event.content as Record<string, unknown>).join_rule as string) ??
+				"invite")
+		: "invite";
+};
+
+/** Project an event down to the stripped-state shape used in invites/summaries. */
+export const toStripped = (
+	event: { content: unknown; sender: string; state_key?: string; type: string },
+	fallbackStateKey = "",
+): StrippedStateEvent => ({
+	content: event.content as StrippedStateEvent["content"],
+	sender: event.sender as StrippedStateEvent["sender"],
+	state_key: event.state_key ?? fallbackStateKey,
+	type: event.type,
+});
 
 export interface EventContext {
 	roomState: RoomState;

@@ -1,5 +1,5 @@
 import { forbidden, notFound } from "../../errors.ts";
-import { contentField, countJoinedMembers } from "../../events.ts";
+import { contentField, countJoinedMembers, iterMembers } from "../../events.ts";
 import { isServerAllowedByAcl } from "../../federation/acl.ts";
 import { domainOf } from "../../ids.ts";
 import type { Handler } from "../../router.ts";
@@ -52,13 +52,9 @@ export const getAllowedRoomIds = (room: RoomState): string[] => {
 
 /** True if any user from `origin` is joined to `room`. */
 const isHostInRoom = (room: RoomState, origin: ServerName): boolean => {
-	for (const [key, event] of room.state_events) {
-		if (!key.startsWith("m.room.member\x1f")) continue;
-		const membership = (event.content as Record<string, unknown>).membership;
+	for (const { userId, membership } of iterMembers(room.state_events)) {
 		if (membership !== "join" && membership !== "invite") continue;
-		const userId = event.state_key ?? "";
-		const userServer = domainOf(userId);
-		if (userServer === origin) return true;
+		if (domainOf(userId) === origin) return true;
 	}
 	return false;
 };

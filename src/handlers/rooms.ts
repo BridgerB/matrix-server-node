@@ -19,9 +19,11 @@ import {
 	getPowerLevels,
 	getUserPowerLevel,
 	isRoomVersion12Plus,
+	iterMembers,
 	membershipOf,
 	selectAuthEvents,
 	sendStateEvent,
+	serverHasMember,
 	validateAdditionalCreators,
 } from "../events.ts";
 import type { FederationClient } from "../federation/client.ts";
@@ -84,17 +86,11 @@ const serversThatCanIssueInvite = (
 	const invitePl = pl.invite ?? 0;
 
 	const servers: ServerName[] = [];
-	for (const [key, event] of room.state_events) {
-		if (!key.startsWith("m.room.member\x1f")) continue;
-		const membership = (event.content as Record<string, unknown>).membership as
-			| string
-			| undefined;
+	for (const { userId, membership } of iterMembers(room.state_events)) {
 		if (membership !== "join") continue;
+		if (getUserPowerLevel(userId, room) < invitePl) continue;
 
-		const memberId = key.slice("m.room.member\x1f".length) as UserId;
-		if (getUserPowerLevel(memberId, room) < invitePl) continue;
-
-		const memberServer = domainOf(memberId);
+		const memberServer = domainOf(userId);
 		if (!memberServer || memberServer === localServerName) continue;
 		if (!servers.includes(memberServer as ServerName)) {
 			servers.push(memberServer as ServerName);
@@ -122,17 +118,7 @@ const isServerResidentInRoom = (
 	// build valid events locally.
 	if (!room.state_events.has("m.room.create\x1f")) return false;
 
-	for (const [key, event] of room.state_events) {
-		if (!key.startsWith("m.room.member\x1f")) continue;
-		const membership = (event.content as Record<string, unknown>).membership as
-			| string
-			| undefined;
-		if (membership !== "join") continue;
-		const memberId = key.slice("m.room.member\x1f".length);
-		const memberServer = domainOf(memberId);
-		if (memberServer === localServerName) return true;
-	}
-	return false;
+	return serverHasMember(room.state_events, localServerName, "join");
 };
 
 /**
@@ -1719,10 +1705,9 @@ const resyncPartialStateRoom = async (
 			const reconciledRoom = await storage.getRoom(roomId);
 			const currentMembership = new Map<string, string | undefined>();
 			if (reconciledRoom) {
-				for (const [k, ev] of reconciledRoom.state_events) {
-					if (!k.startsWith("m.room.member\x1f")) continue;
-					const sk = ev.state_key ?? "";
-					const membership = membershipOf(ev);
+				for (const { userId: sk, membership } of iterMembers(
+					reconciledRoom.state_events,
+				)) {
 					currentMembership.set(sk, membership);
 					if (membership === "join") addMemberServer(sk);
 				}
