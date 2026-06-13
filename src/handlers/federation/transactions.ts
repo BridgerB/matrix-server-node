@@ -1232,7 +1232,8 @@ const processEdu = async (
 			//
 			// Spec content: { user_id, device_id, stream_id, prev_id?,
 			//   deleted?, device_display_name?, keys? }
-			const { user_id, device_id, deleted, keys } = content as {
+			const { user_id, device_id, deleted, keys, device_display_name } =
+				content as {
 				user_id?: UserId;
 				device_id?: DeviceId;
 				stream_id?: number;
@@ -1265,12 +1266,28 @@ const processEdu = async (
 				}
 				if (tracked) {
 					// Normalise the embedded user_id/device_id to the EDU's
-					// authoritative values.
+					// authoritative values, and fold the EDU's top-level
+					// device_display_name into unsigned.device_display_name so a
+					// later /keys/query served from this cache carries it (Synapse
+					// returns it under unsigned; TestFederationKeyUploadQuery).
+					const existingUnsigned = (
+						keys as DeviceKeys & { unsigned?: Record<string, unknown> }
+					).unsigned;
 					await storage.setDeviceKeys(user_id, device_id, {
 						...keys,
 						user_id,
 						device_id,
-					});
+						...(device_display_name || existingUnsigned
+							? {
+									unsigned: {
+										...existingUnsigned,
+										...(device_display_name
+											? { device_display_name }
+											: {}),
+									},
+								}
+							: {}),
+					} as DeviceKeys);
 				}
 			}
 
