@@ -37,7 +37,7 @@ import type { Pusher } from "../types/push.ts";
 import type { RoomVersion } from "../types/room-versions.ts";
 import type { Device, UserProfile } from "../types/user.ts";
 import {
-	EphemeralMixin,
+	createEphemeralStore,
 	eventToStrippedState,
 	INVITE_STATE_TYPES,
 } from "./ephemeral.ts";
@@ -48,36 +48,26 @@ import {
 } from "./interface.ts";
 import { rowToSession, rowToUser } from "./sql-helpers.ts";
 
-export class MysqlStorage extends EphemeralMixin implements Storage {
-	private pool: mariadb.Pool;
+export const createMysqlStorage = async (
+	connectionString: string,
+): Promise<Storage> => {
+	const eph = createEphemeralStore();
+	let pool: mariadb.Pool;
 
-	private constructor(pool: mariadb.Pool) {
-		super();
-		this.pool = pool;
-	}
-
-	static async create(connectionString: string): Promise<MysqlStorage> {
-		const uri = connectionString.replace(/^mysql:\/\//, "mariadb://");
-		const pool = mariadb.createPool(`${uri}?connectionLimit=20`);
-		const storage = new MysqlStorage(pool);
-		await storage.init();
-		return storage;
-	}
-
-	private async query(sql: string, params?: unknown[]): Promise<unknown[]> {
-		const rows = await this.pool.query(sql, params);
+	const query = async (sql: string, params?: unknown[]): Promise<unknown[]> => {
+		const rows = await pool.query(sql, params);
 		return rows;
-	}
+	};
 
-	private async exec(
+	const exec = async (
 		sql: string,
 		params?: unknown[],
-	): Promise<mariadb.UpsertResult> {
-		return await this.pool.query(sql, params);
-	}
+	): Promise<mariadb.UpsertResult> => {
+		return await pool.query(sql, params);
+	};
 
-	private async init(): Promise<void> {
-		const conn = await this.pool.getConnection();
+	const init = async (): Promise<void> => {
+		const conn = await pool.getConnection();
 		try {
 			await conn.query(`
 				CREATE TABLE IF NOT EXISTS users (
@@ -396,7 +386,7 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			conn.release();
 		}
 
-		const [maxPos] = (await this.query(
+		const [maxPos] = (await query(
 			`SELECT MAX(m) AS m FROM (
 				SELECT MAX(stream_pos) AS m FROM events
 				UNION ALL SELECT MAX(stream_pos) FROM global_account_data
@@ -404,25 +394,25 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 				UNION ALL SELECT MAX(stream_pos) FROM device_list_stream
 			) sub`,
 		)) as { m: number | null }[];
-		this.streamCounter = maxPos?.m ?? 0;
+		eph.streamCounter = maxPos?.m ?? 0;
 
-		const [maxFilter] = (await this.query(
+		const [maxFilter] = (await query(
 			"SELECT MAX(filter_id) AS m FROM filters",
 		)) as { m: number | null }[];
-		this.filterCounter = maxFilter?.m ?? 0;
-	}
+		eph.filterCounter = maxFilter?.m ?? 0;
+	};
 
-	private json(val: unknown): string {
+	const json = (val: unknown): string => {
 		return JSON.stringify(val);
-	}
+	};
 
-	private parseJson(val: unknown): unknown {
+	const parseJson = (val: unknown): unknown => {
 		if (typeof val === "string") return JSON.parse(val);
 		return val;
-	}
+	};
 
-	async createUser(account: UserAccount): Promise<void> {
-		await this.exec(
+	const createUser = async (account: UserAccount): Promise<void> => {
+		await exec(
 			`INSERT INTO users (user_id, localpart, server_name, password_hash, account_type, is_deactivated, created_at, displayname, avatar_url)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON DUPLICATE KEY UPDATE
@@ -441,26 +431,28 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 				account.avatar_url ?? null,
 			],
 		);
-	}
+	};
 
-	async getUserByLocalpart(
+	const getUserByLocalpart = async (
 		localpart: string,
-	): Promise<UserAccount | undefined> {
-		const rows = (await this.query("SELECT * FROM users WHERE localpart = ?", [
+	): Promise<UserAccount | undefined> => {
+		const rows = (await query("SELECT * FROM users WHERE localpart = ?", [
 			localpart,
 		])) as Record<string, unknown>[];
 		return rows[0] ? rowToUser(rows[0]) : undefined;
-	}
+	};
 
-	async getUserById(userId: UserId): Promise<UserAccount | undefined> {
-		const rows = (await this.query("SELECT * FROM users WHERE user_id = ?", [
+	const getUserById = async (
+		userId: UserId,
+	): Promise<UserAccount | undefined> => {
+		const rows = (await query("SELECT * FROM users WHERE user_id = ?", [
 			userId,
 		])) as Record<string, unknown>[];
 		return rows[0] ? rowToUser(rows[0]) : undefined;
-	}
+	};
 
-	async createSession(session: StoredSession): Promise<void> {
-		await this.exec(
+	const createSession = async (session: StoredSession): Promise<void> => {
+		await exec(
 			`INSERT INTO sessions (access_token, refresh_token, device_id, user_id, access_token_hash, expires_at, display_name, last_seen_ip, last_seen_ts, user_agent)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON DUPLICATE KEY UPDATE
@@ -480,106 +472,108 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 				session.user_agent ?? null,
 			],
 		);
-	}
+	};
 
-	async getSessionByAccessToken(
+	const getSessionByAccessToken = async (
 		token: AccessToken,
-	): Promise<StoredSession | undefined> {
-		const rows = (await this.query(
-			"SELECT * FROM sessions WHERE access_token = ?",
-			[token],
-		)) as Record<string, unknown>[];
+	): Promise<StoredSession | undefined> => {
+		const rows = (await query("SELECT * FROM sessions WHERE access_token = ?", [
+			token,
+		])) as Record<string, unknown>[];
 		return rows[0] ? rowToSession(rows[0]) : undefined;
-	}
+	};
 
-	async getSessionByRefreshToken(
+	const getSessionByRefreshToken = async (
 		token: RefreshToken,
-	): Promise<StoredSession | undefined> {
-		const rows = (await this.query(
+	): Promise<StoredSession | undefined> => {
+		const rows = (await query(
 			"SELECT * FROM sessions WHERE refresh_token = ?",
 			[token],
 		)) as Record<string, unknown>[];
 		return rows[0] ? rowToSession(rows[0]) : undefined;
-	}
+	};
 
-	async getSessionsByUser(userId: UserId): Promise<StoredSession[]> {
-		const rows = (await this.query("SELECT * FROM sessions WHERE user_id = ?", [
+	const getSessionsByUser = async (
+		userId: UserId,
+	): Promise<StoredSession[]> => {
+		const rows = (await query("SELECT * FROM sessions WHERE user_id = ?", [
 			userId,
 		])) as Record<string, unknown>[];
 		return rows.map((r) => rowToSession(r));
-	}
+	};
 
-	async deleteSession(token: AccessToken): Promise<void> {
-		await this.exec("DELETE FROM sessions WHERE access_token = ?", [token]);
-	}
+	const deleteSession = async (token: AccessToken): Promise<void> => {
+		await exec("DELETE FROM sessions WHERE access_token = ?", [token]);
+	};
 
-	async deleteAllSessions(userId: UserId): Promise<void> {
-		await this.exec("DELETE FROM sessions WHERE user_id = ?", [userId]);
-	}
+	const deleteAllSessions = async (userId: UserId): Promise<void> => {
+		await exec("DELETE FROM sessions WHERE user_id = ?", [userId]);
+	};
 
-	async rotateToken(
+	const rotateToken = async (
 		oldAccessToken: AccessToken,
 		newAccessToken: AccessToken,
 		newRefreshToken?: RefreshToken,
 		expiresAt?: Timestamp,
-	): Promise<StoredSession | undefined> {
-		const session = await this.getSessionByAccessToken(oldAccessToken);
+	): Promise<StoredSession | undefined> => {
+		const session = await getSessionByAccessToken(oldAccessToken);
 		if (!session) return undefined;
-		await this.deleteSession(oldAccessToken);
+		await deleteSession(oldAccessToken);
 		const updated: StoredSession = {
 			...session,
 			access_token: newAccessToken,
 			refresh_token: newRefreshToken,
 			expires_at: expiresAt,
 		};
-		await this.createSession(updated);
+		await createSession(updated);
 		return updated;
-	}
+	};
 
-	async touchSession(
+	const touchSession = async (
 		token: AccessToken,
 		ip: string,
 		userAgent: string,
-	): Promise<void> {
-		await this.exec(
+	): Promise<void> => {
+		await exec(
 			"UPDATE sessions SET last_seen_ip = ?, last_seen_ts = ?, user_agent = ? WHERE access_token = ?",
 			[ip, Date.now(), userAgent, token],
 		);
-	}
+	};
 
-	async createUIAASession(sessionId: string): Promise<void> {
-		await this.exec(
+	const createUIAASession = async (sessionId: string): Promise<void> => {
+		await exec(
 			"INSERT INTO uiaa_sessions (session_id, completed) VALUES (?, '[]') ON DUPLICATE KEY UPDATE completed = '[]'",
 			[sessionId],
 		);
-	}
+	};
 
-	async getUIAASession(
+	const getUIAASession = async (
 		sessionId: string,
-	): Promise<{ completed: string[] } | undefined> {
-		const rows = (await this.query(
+	): Promise<{ completed: string[] } | undefined> => {
+		const rows = (await query(
 			"SELECT completed FROM uiaa_sessions WHERE session_id = ?",
 			[sessionId],
 		)) as Record<string, unknown>[];
 		if (!rows[0]) return undefined;
-		return { completed: this.parseJson(rows[0].completed) as string[] };
-	}
+		return { completed: parseJson(rows[0].completed) as string[] };
+	};
 
-	async addUIAACompleted(sessionId: string, stageType: string): Promise<void> {
-		await this.exec(
+	const addUIAACompleted = async (
+		sessionId: string,
+		stageType: string,
+	): Promise<void> => {
+		await exec(
 			"UPDATE uiaa_sessions SET completed = JSON_ARRAY_APPEND(completed, '$', ?) WHERE session_id = ?",
 			[stageType, sessionId],
 		);
-	}
+	};
 
-	async deleteUIAASession(sessionId: string): Promise<void> {
-		await this.exec("DELETE FROM uiaa_sessions WHERE session_id = ?", [
-			sessionId,
-		]);
-	}
+	const deleteUIAASession = async (sessionId: string): Promise<void> => {
+		await exec("DELETE FROM uiaa_sessions WHERE session_id = ?", [sessionId]);
+	};
 
-	async createRoom(state: RoomState): Promise<void> {
-		const conn = await this.pool.getConnection();
+	const createRoom = async (state: RoomState): Promise<void> => {
+		const conn = await pool.getConnection();
 		try {
 			await conn.beginTransaction();
 			await conn.query(
@@ -589,7 +583,7 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 					state.room_id,
 					state.room_version,
 					state.depth,
-					this.json(state.forward_extremities),
+					json(state.forward_extremities),
 				],
 			);
 			for (const [key, event] of state.state_events) {
@@ -598,7 +592,7 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 				await conn.query(
 					`INSERT INTO state_events (room_id, event_type, state_key, event_id, event_json) VALUES (?, ?, ?, ?, ?)
 					 ON DUPLICATE KEY UPDATE event_id = VALUES(event_id), event_json = VALUES(event_json)`,
-					[state.room_id, eventType, stateKey, eventId, this.json(event)],
+					[state.room_id, eventType, stateKey, eventId, json(event)],
 				);
 			}
 			await conn.commit();
@@ -608,20 +602,20 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 		} finally {
 			conn.release();
 		}
-		this.roomCache.set(state.room_id, state);
-	}
+		eph.roomCache.set(state.room_id, state);
+	};
 
-	async getRoom(roomId: RoomId): Promise<RoomState | undefined> {
-		const cached = this.roomCache.get(roomId);
+	const getRoom = async (roomId: RoomId): Promise<RoomState | undefined> => {
+		const cached = eph.roomCache.get(roomId);
 		if (cached) return cached;
 
-		const rows = (await this.query("SELECT * FROM rooms WHERE room_id = ?", [
+		const rows = (await query("SELECT * FROM rooms WHERE room_id = ?", [
 			roomId,
 		])) as Record<string, unknown>[];
 		if (!rows[0]) return undefined;
 		const row = rows[0];
 
-		const stateRows = (await this.query(
+		const stateRows = (await query(
 			"SELECT event_type, state_key, event_json FROM state_events WHERE room_id = ?",
 			[roomId],
 		)) as Record<string, unknown>[];
@@ -629,7 +623,7 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 		for (const sr of stateRows) {
 			stateMap.set(
 				`${sr.event_type}\x1f${sr.state_key}`,
-				this.parseJson(sr.event_json) as PDU,
+				parseJson(sr.event_json) as PDU,
 			);
 		}
 
@@ -638,175 +632,175 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			room_version: row.room_version as RoomVersion,
 			state_events: stateMap,
 			depth: Number(row.depth),
-			forward_extremities: this.parseJson(row.forward_extremities) as EventId[],
+			forward_extremities: parseJson(row.forward_extremities) as EventId[],
 		};
-		this.roomCache.set(roomId, room);
+		eph.roomCache.set(roomId, room);
 		return room;
-	}
+	};
 
-	async getRoomsForUser(userId: UserId): Promise<RoomId[]> {
-		const rows = (await this.query(
+	const getRoomsForUser = async (userId: UserId): Promise<RoomId[]> => {
+		const rows = (await query(
 			"SELECT room_id FROM state_events WHERE event_type = 'm.room.member' AND state_key = ? AND JSON_UNQUOTE(JSON_EXTRACT(event_json, '$.content.membership')) = 'join'",
 			[userId],
 		)) as Record<string, unknown>[];
 		return rows.map((r) => r.room_id as RoomId);
-	}
+	};
 
-	async storeEvent(event: PDU, eventId: EventId): Promise<void> {
-		this.streamCounter++;
-		await this.exec(
+	const storeEvent = async (event: PDU, eventId: EventId): Promise<void> => {
+		eph.streamCounter++;
+		await exec(
 			`INSERT INTO events (event_id, room_id, stream_pos, event_json) VALUES (?, ?, ?, ?)
 			 ON DUPLICATE KEY UPDATE room_id = VALUES(room_id), stream_pos = VALUES(stream_pos), event_json = VALUES(event_json)`,
-			[eventId, event.room_id, this.streamCounter, this.json(event)],
+			[eventId, event.room_id, eph.streamCounter, json(event)],
 		);
-		this.wakeWaiters();
-	}
+		eph.wakeWaiters();
+	};
 
-	async updateEvent(eventId: EventId, event: PDU): Promise<void> {
-		await this.exec("UPDATE events SET event_json = ? WHERE event_id = ?", [
-			this.json(event),
+	const updateEvent = async (eventId: EventId, event: PDU): Promise<void> => {
+		await exec("UPDATE events SET event_json = ? WHERE event_id = ?", [
+			json(event),
 			eventId,
 		]);
-	}
+	};
 
-	async getEvent(
+	const getEvent = async (
 		eventId: EventId,
-	): Promise<{ event: PDU; eventId: EventId } | undefined> {
-		const rows = (await this.query(
+	): Promise<{ event: PDU; eventId: EventId } | undefined> => {
+		const rows = (await query(
 			"SELECT event_id, event_json FROM events WHERE event_id = ?",
 			[eventId],
 		)) as Record<string, unknown>[];
 		if (!rows[0]) return undefined;
 		return {
-			event: this.parseJson(rows[0].event_json) as PDU,
+			event: parseJson(rows[0].event_json) as PDU,
 			eventId: rows[0].event_id as EventId,
 		};
-	}
+	};
 
-	async getEventsByRoom(
+	const getEventsByRoom = async (
 		roomId: RoomId,
 		limit: number,
 		from?: number,
 		direction: "b" | "f" = "f",
-	): Promise<{ events: { event: PDU; eventId: EventId }[]; end?: number }> {
-		const fromPos = from ?? (direction === "f" ? 0 : this.streamCounter + 1);
+	): Promise<{ events: { event: PDU; eventId: EventId }[]; end?: number }> => {
+		const fromPos = from ?? (direction === "f" ? 0 : eph.streamCounter + 1);
 		let rows: Record<string, unknown>[];
 
 		if (direction === "f") {
-			rows = (await this.query(
+			rows = (await query(
 				"SELECT event_id, event_json, stream_pos FROM events WHERE room_id = ? AND stream_pos > ? ORDER BY stream_pos ASC LIMIT ?",
 				[roomId, fromPos, limit],
 			)) as Record<string, unknown>[];
 		} else {
-			rows = (await this.query(
+			rows = (await query(
 				"SELECT event_id, event_json, stream_pos FROM events WHERE room_id = ? AND stream_pos < ? ORDER BY stream_pos DESC LIMIT ?",
 				[roomId, fromPos, limit],
 			)) as Record<string, unknown>[];
 		}
 
 		const events = rows.map((r) => ({
-			event: this.parseJson(r.event_json) as PDU,
+			event: parseJson(r.event_json) as PDU,
 			eventId: r.event_id as EventId,
 		}));
 		const lastRow = rows[rows.length - 1];
 		const end = lastRow ? Number(lastRow.stream_pos) : undefined;
 		return { events, end };
-	}
+	};
 
-	async getStreamPosition(): Promise<number> {
-		return this.streamCounter;
-	}
+	const getStreamPosition = async (): Promise<number> => {
+		return eph.streamCounter;
+	};
 
-	async getStateEvent(
+	const getStateEvent = async (
 		roomId: RoomId,
 		eventType: string,
 		stateKey: string,
-	): Promise<{ event: PDU; eventId: EventId } | undefined> {
-		const rows = (await this.query(
+	): Promise<{ event: PDU; eventId: EventId } | undefined> => {
+		const rows = (await query(
 			"SELECT event_id, event_json FROM state_events WHERE room_id = ? AND event_type = ? AND state_key = ?",
 			[roomId, eventType, stateKey],
 		)) as Record<string, unknown>[];
 		if (!rows[0]) return undefined;
 		return {
-			event: this.parseJson(rows[0].event_json) as PDU,
+			event: parseJson(rows[0].event_json) as PDU,
 			eventId: rows[0].event_id as EventId,
 		};
-	}
+	};
 
-	async getAllState(
+	const getAllState = async (
 		roomId: RoomId,
-	): Promise<{ event: PDU; eventId: EventId }[]> {
-		const rows = (await this.query(
+	): Promise<{ event: PDU; eventId: EventId }[]> => {
+		const rows = (await query(
 			"SELECT event_id, event_json FROM state_events WHERE room_id = ?",
 			[roomId],
 		)) as Record<string, unknown>[];
 		return rows.map((r) => ({
-			event: this.parseJson(r.event_json) as PDU,
+			event: parseJson(r.event_json) as PDU,
 			eventId: r.event_id as EventId,
 		}));
-	}
+	};
 
-	async setStateEvent(
+	const setStateEvent = async (
 		roomId: RoomId,
 		event: PDU,
 		eventId: EventId,
-	): Promise<void> {
-		await this.exec(
+	): Promise<void> => {
+		await exec(
 			`INSERT INTO state_events (room_id, event_type, state_key, event_id, event_json) VALUES (?, ?, ?, ?, ?)
 			 ON DUPLICATE KEY UPDATE event_id = VALUES(event_id), event_json = VALUES(event_json)`,
-			[roomId, event.type, event.state_key ?? "", eventId, this.json(event)],
+			[roomId, event.type, event.state_key ?? "", eventId, json(event)],
 		);
 
-		const cached = this.roomCache.get(roomId);
+		const cached = eph.roomCache.get(roomId);
 		if (cached) {
 			const key = `${event.type}\x1f${event.state_key ?? ""}`;
 			cached.state_events.set(key, event);
 		}
 
-		await this.storeEvent(event, eventId);
-	}
+		await storeEvent(event, eventId);
+	};
 
-	async getMemberEvents(
+	const getMemberEvents = async (
 		roomId: RoomId,
-	): Promise<{ event: PDU; eventId: EventId }[]> {
-		const rows = (await this.query(
+	): Promise<{ event: PDU; eventId: EventId }[]> => {
+		const rows = (await query(
 			"SELECT event_id, event_json FROM state_events WHERE room_id = ? AND event_type = 'm.room.member'",
 			[roomId],
 		)) as Record<string, unknown>[];
 		return rows.map((r) => ({
-			event: this.parseJson(r.event_json) as PDU,
+			event: parseJson(r.event_json) as PDU,
 			eventId: r.event_id as EventId,
 		}));
-	}
+	};
 
-	async getTxnEventId(
+	const getTxnEventId = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		txnId: string,
-	): Promise<EventId | undefined> {
-		const rows = (await this.query(
+	): Promise<EventId | undefined> => {
+		const rows = (await query(
 			"SELECT event_id FROM txn_map WHERE user_id = ? AND device_id = ? AND txn_id = ?",
 			[userId, deviceId, txnId],
 		)) as Record<string, unknown>[];
 		return rows[0] ? (rows[0].event_id as EventId) : undefined;
-	}
+	};
 
-	async setTxnEventId(
+	const setTxnEventId = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		txnId: string,
 		eventId: EventId,
-	): Promise<void> {
-		await this.exec(
+	): Promise<void> => {
+		await exec(
 			"INSERT INTO txn_map (user_id, device_id, txn_id, event_id) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE event_id = VALUES(event_id)",
 			[userId, deviceId, txnId, eventId],
 		);
-	}
+	};
 
-	async getRoomsForUserWithMembership(
+	const getRoomsForUserWithMembership = async (
 		userId: UserId,
-	): Promise<{ roomId: RoomId; membership: string }[]> {
-		const rows = (await this.query(
+	): Promise<{ roomId: RoomId; membership: string }[]> => {
+		const rows = (await query(
 			"SELECT room_id, JSON_UNQUOTE(JSON_EXTRACT(event_json, '$.content.membership')) AS membership FROM state_events WHERE event_type = 'm.room.member' AND state_key = ?",
 			[userId],
 		)) as Record<string, unknown>[];
@@ -816,17 +810,17 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 				roomId: r.room_id as RoomId,
 				membership: r.membership as string,
 			}));
-	}
+	};
 
-	async getEventsByRoomSince(
+	const getEventsByRoomSince = async (
 		roomId: RoomId,
 		since: number,
 		limit: number,
 	): Promise<{
 		events: { event: PDU; eventId: EventId; streamPos: number }[];
 		limited: boolean;
-	}> {
-		const [countRow] = (await this.query(
+	}> => {
+		const [countRow] = (await query(
 			"SELECT COUNT(*) AS cnt FROM events WHERE room_id = ? AND stream_pos > ?",
 			[roomId, since],
 		)) as Record<string, unknown>[];
@@ -835,40 +829,44 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 
 		let rows: Record<string, unknown>[];
 		if (limited) {
-			rows = (await this.query(
+			rows = (await query(
 				"SELECT event_id, event_json, stream_pos FROM events WHERE room_id = ? AND stream_pos > ? ORDER BY stream_pos DESC LIMIT ?",
 				[roomId, since, limit],
 			)) as Record<string, unknown>[];
 			rows.reverse();
 		} else {
-			rows = (await this.query(
+			rows = (await query(
 				"SELECT event_id, event_json, stream_pos FROM events WHERE room_id = ? AND stream_pos > ? ORDER BY stream_pos ASC",
 				[roomId, since],
 			)) as Record<string, unknown>[];
 		}
 
 		const events = rows.map((r) => ({
-			event: this.parseJson(r.event_json) as PDU,
+			event: parseJson(r.event_json) as PDU,
 			eventId: r.event_id as EventId,
 			streamPos: Number(r.stream_pos),
 		}));
 		return { events, limited };
-	}
+	};
 
-	async getStrippedState(roomId: RoomId): Promise<StrippedStateEvent[]> {
+	const getStrippedState = async (
+		roomId: RoomId,
+	): Promise<StrippedStateEvent[]> => {
 		const placeholders = INVITE_STATE_TYPES.map(() => "?").join(",");
-		const rows = (await this.query(
+		const rows = (await query(
 			`SELECT event_json FROM state_events WHERE room_id = ? AND event_type IN (${placeholders})`,
 			[roomId, ...INVITE_STATE_TYPES],
 		)) as Record<string, unknown>[];
 		return rows.map((r) => {
-			const event = this.parseJson(r.event_json) as PDU;
+			const event = parseJson(r.event_json) as PDU;
 			return eventToStrippedState(event);
 		});
-	}
+	};
 
-	async getProfile(userId: UserId): Promise<UserProfile | undefined> {
-		const rows = (await this.query(
+	const getProfile = async (
+		userId: UserId,
+	): Promise<UserProfile | undefined> => {
+		const rows = (await query(
 			"SELECT displayname, avatar_url FROM users WHERE user_id = ?",
 			[userId],
 		)) as Record<string, unknown>[];
@@ -878,30 +876,33 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			profile.displayname = rows[0].displayname as string;
 		if (rows[0].avatar_url) profile.avatar_url = rows[0].avatar_url as string;
 		return profile;
-	}
+	};
 
-	async setDisplayName(
+	const setDisplayName = async (
 		userId: UserId,
 		displayname: string | null,
-	): Promise<void> {
-		await this.exec("UPDATE users SET displayname = ? WHERE user_id = ?", [
+	): Promise<void> => {
+		await exec("UPDATE users SET displayname = ? WHERE user_id = ?", [
 			displayname,
 			userId,
 		]);
-	}
+	};
 
-	async setAvatarUrl(userId: UserId, avatarUrl: string | null): Promise<void> {
-		await this.exec("UPDATE users SET avatar_url = ? WHERE user_id = ?", [
+	const setAvatarUrl = async (
+		userId: UserId,
+		avatarUrl: string | null,
+	): Promise<void> => {
+		await exec("UPDATE users SET avatar_url = ? WHERE user_id = ?", [
 			avatarUrl,
 			userId,
 		]);
-	}
+	};
 
-	async getDevice(
+	const getDevice = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<Device | undefined> {
-		const rows = (await this.query(
+	): Promise<Device | undefined> => {
+		const rows = (await query(
 			"SELECT device_id, display_name, last_seen_ip, last_seen_ts FROM sessions WHERE user_id = ? AND device_id = ? LIMIT 1",
 			[userId, deviceId],
 		)) as Record<string, unknown>[];
@@ -914,10 +915,10 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 				? Number(rows[0].last_seen_ts)
 				: undefined,
 		};
-	}
+	};
 
-	async getAllDevices(userId: UserId): Promise<Device[]> {
-		const rows = (await this.query(
+	const getAllDevices = async (userId: UserId): Promise<Device[]> => {
+		const rows = (await query(
 			"SELECT device_id, display_name, last_seen_ip, last_seen_ts FROM sessions WHERE user_id = ? GROUP BY device_id, display_name, last_seen_ip, last_seen_ts",
 			[userId],
 		)) as Record<string, unknown>[];
@@ -927,237 +928,244 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			last_seen_ip: (r.last_seen_ip as string) ?? undefined,
 			last_seen_ts: r.last_seen_ts ? Number(r.last_seen_ts) : undefined,
 		}));
-	}
+	};
 
-	async updateDeviceDisplayName(
+	const updateDeviceDisplayName = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		displayName: string,
-	): Promise<void> {
-		await this.exec(
+	): Promise<void> => {
+		await exec(
 			"UPDATE sessions SET display_name = ? WHERE user_id = ? AND device_id = ?",
 			[displayName, userId, deviceId],
 		);
-	}
+	};
 
-	async deleteDeviceSession(userId: UserId, deviceId: DeviceId): Promise<void> {
-		await this.exec(
-			"DELETE FROM sessions WHERE user_id = ? AND device_id = ?",
-			[userId, deviceId],
-		);
-	}
+	const deleteDeviceSession = async (
+		userId: UserId,
+		deviceId: DeviceId,
+	): Promise<void> => {
+		await exec("DELETE FROM sessions WHERE user_id = ? AND device_id = ?", [
+			userId,
+			deviceId,
+		]);
+	};
 
-	async updatePassword(userId: UserId, newPasswordHash: string): Promise<void> {
-		await this.exec("UPDATE users SET password_hash = ? WHERE user_id = ?", [
+	const updatePassword = async (
+		userId: UserId,
+		newPasswordHash: string,
+	): Promise<void> => {
+		await exec("UPDATE users SET password_hash = ? WHERE user_id = ?", [
 			newPasswordHash,
 			userId,
 		]);
-	}
+	};
 
-	async deactivateUser(userId: UserId): Promise<void> {
-		await this.exec(
-			"UPDATE users SET is_deactivated = TRUE WHERE user_id = ?",
-			[userId],
-		);
-		await this.deleteAllSessions(userId);
-	}
+	const deactivateUser = async (userId: UserId): Promise<void> => {
+		await exec("UPDATE users SET is_deactivated = TRUE WHERE user_id = ?", [
+			userId,
+		]);
+		await deleteAllSessions(userId);
+	};
 
-	async createRoomAlias(
+	const createRoomAlias = async (
 		roomAlias: RoomAlias,
 		roomId: RoomId,
 		servers: ServerName[],
 		creator: UserId,
-	): Promise<void> {
-		await this.exec(
+	): Promise<void> => {
+		await exec(
 			"INSERT INTO room_aliases (room_alias, room_id, servers, creator) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE room_id = VALUES(room_id), servers = VALUES(servers), creator = VALUES(creator)",
-			[roomAlias, roomId, this.json(servers), creator],
+			[roomAlias, roomId, json(servers), creator],
 		);
-	}
+	};
 
-	async deleteRoomAlias(roomAlias: RoomAlias): Promise<boolean> {
-		const result = await this.exec(
-			"DELETE FROM room_aliases WHERE room_alias = ?",
-			[roomAlias],
-		);
+	const deleteRoomAlias = async (roomAlias: RoomAlias): Promise<boolean> => {
+		const result = await exec("DELETE FROM room_aliases WHERE room_alias = ?", [
+			roomAlias,
+		]);
 		return (result.affectedRows ?? 0) > 0;
-	}
+	};
 
-	async getRoomByAlias(
+	const getRoomByAlias = async (
 		roomAlias: RoomAlias,
-	): Promise<{ room_id: RoomId; servers: ServerName[] } | undefined> {
-		const rows = (await this.query(
+	): Promise<{ room_id: RoomId; servers: ServerName[] } | undefined> => {
+		const rows = (await query(
 			"SELECT room_id, servers FROM room_aliases WHERE room_alias = ?",
 			[roomAlias],
 		)) as Record<string, unknown>[];
 		if (!rows[0]) return undefined;
 		return {
 			room_id: rows[0].room_id as RoomId,
-			servers: this.parseJson(rows[0].servers) as ServerName[],
+			servers: parseJson(rows[0].servers) as ServerName[],
 		};
-	}
+	};
 
-	async getAliasesForRoom(roomId: RoomId): Promise<RoomAlias[]> {
-		const rows = (await this.query(
+	const getAliasesForRoom = async (roomId: RoomId): Promise<RoomAlias[]> => {
+		const rows = (await query(
 			"SELECT room_alias FROM room_aliases WHERE room_id = ?",
 			[roomId],
 		)) as Record<string, unknown>[];
 		return rows.map((r) => r.room_alias as RoomAlias);
-	}
+	};
 
-	async getAliasCreator(roomAlias: RoomAlias): Promise<UserId | undefined> {
-		const rows = (await this.query(
+	const getAliasCreator = async (
+		roomAlias: RoomAlias,
+	): Promise<UserId | undefined> => {
+		const rows = (await query(
 			"SELECT creator FROM room_aliases WHERE room_alias = ?",
 			[roomAlias],
 		)) as Record<string, unknown>[];
 		return rows[0] ? (rows[0].creator as UserId) : undefined;
-	}
+	};
 
-	async setRoomVisibility(
+	const setRoomVisibility = async (
 		roomId: RoomId,
 		visibility: "public" | "private",
-	): Promise<void> {
-		await this.exec(
+	): Promise<void> => {
+		await exec(
 			"INSERT INTO room_directory (room_id, visibility) VALUES (?, ?) ON DUPLICATE KEY UPDATE visibility = VALUES(visibility)",
 			[roomId, visibility],
 		);
-	}
+	};
 
-	async getRoomVisibility(roomId: RoomId): Promise<"public" | "private"> {
-		const rows = (await this.query(
+	const getRoomVisibility = async (
+		roomId: RoomId,
+	): Promise<"public" | "private"> => {
+		const rows = (await query(
 			"SELECT visibility FROM room_directory WHERE room_id = ?",
 			[roomId],
 		)) as Record<string, unknown>[];
 		return (rows[0]?.visibility as "public" | "private") ?? "private";
-	}
+	};
 
-	async getPublicRoomIds(): Promise<RoomId[]> {
-		const rows = (await this.query(
+	const getPublicRoomIds = async (): Promise<RoomId[]> => {
+		const rows = (await query(
 			"SELECT room_id FROM room_directory WHERE visibility = 'public'",
 		)) as Record<string, unknown>[];
 		return rows.map((r) => r.room_id as RoomId);
-	}
+	};
 
-	async getGlobalAccountData(
+	const getGlobalAccountData = async (
 		userId: UserId,
 		type: string,
-	): Promise<JsonObject | undefined> {
-		const rows = (await this.query(
+	): Promise<JsonObject | undefined> => {
+		const rows = (await query(
 			"SELECT content FROM global_account_data WHERE user_id = ? AND type = ?",
 			[userId, type],
 		)) as Record<string, unknown>[];
-		return rows[0]
-			? (this.parseJson(rows[0].content) as JsonObject)
-			: undefined;
-	}
+		return rows[0] ? (parseJson(rows[0].content) as JsonObject) : undefined;
+	};
 
-	async setGlobalAccountData(
+	const setGlobalAccountData = async (
 		userId: UserId,
 		type: string,
 		content: JsonObject,
-	): Promise<void> {
-		await this.exec(
+	): Promise<void> => {
+		await exec(
 			"INSERT INTO global_account_data (user_id, type, content, stream_pos) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE content = VALUES(content), stream_pos = VALUES(stream_pos)",
-			[userId, type, this.json(content), ++this.streamCounter],
+			[userId, type, json(content), ++eph.streamCounter],
 		);
-		this.wakeWaiters();
-	}
+		eph.wakeWaiters();
+	};
 
-	async getAllGlobalAccountData(
+	const getAllGlobalAccountData = async (
 		userId: UserId,
-	): Promise<{ type: string; content: JsonObject }[]> {
-		const rows = (await this.query(
+	): Promise<{ type: string; content: JsonObject }[]> => {
+		const rows = (await query(
 			// Exclude MSC3391 deletion tombstones (empty object) from initial sync.
 			"SELECT type, content FROM global_account_data WHERE user_id = ? AND JSON_LENGTH(content) > 0",
 			[userId],
 		)) as Record<string, unknown>[];
 		return rows.map((r) => ({
 			type: r.type as string,
-			content: this.parseJson(r.content) as JsonObject,
+			content: parseJson(r.content) as JsonObject,
 		}));
-	}
+	};
 
-	async getGlobalAccountDataSince(
+	const getGlobalAccountDataSince = async (
 		userId: UserId,
 		since: number,
-	): Promise<{ type: string; content: JsonObject }[]> {
-		const rows = (await this.query(
+	): Promise<{ type: string; content: JsonObject }[]> => {
+		const rows = (await query(
 			// Include tombstones so incremental sync surfaces deletions.
 			"SELECT type, content FROM global_account_data WHERE user_id = ? AND stream_pos > ?",
 			[userId, since],
 		)) as Record<string, unknown>[];
 		return rows.map((r) => ({
 			type: r.type as string,
-			content: this.parseJson(r.content) as JsonObject,
+			content: parseJson(r.content) as JsonObject,
 		}));
-	}
+	};
 
-	async getRoomAccountData(
+	const getRoomAccountData = async (
 		userId: UserId,
 		roomId: RoomId,
 		type: string,
-	): Promise<JsonObject | undefined> {
-		const rows = (await this.query(
+	): Promise<JsonObject | undefined> => {
+		const rows = (await query(
 			"SELECT content FROM room_account_data WHERE user_id = ? AND room_id = ? AND type = ?",
 			[userId, roomId, type],
 		)) as Record<string, unknown>[];
-		return rows[0]
-			? (this.parseJson(rows[0].content) as JsonObject)
-			: undefined;
-	}
+		return rows[0] ? (parseJson(rows[0].content) as JsonObject) : undefined;
+	};
 
-	async setRoomAccountData(
+	const setRoomAccountData = async (
 		userId: UserId,
 		roomId: RoomId,
 		type: string,
 		content: JsonObject,
-	): Promise<void> {
-		await this.exec(
+	): Promise<void> => {
+		await exec(
 			"INSERT INTO room_account_data (user_id, room_id, type, content, stream_pos) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE content = VALUES(content), stream_pos = VALUES(stream_pos)",
-			[userId, roomId, type, this.json(content), ++this.streamCounter],
+			[userId, roomId, type, json(content), ++eph.streamCounter],
 		);
-		this.wakeWaiters();
-	}
-	async deleteGlobalAccountData(userId: UserId, type: string): Promise<void> {
+		eph.wakeWaiters();
+	};
+	const deleteGlobalAccountData = async (
+		userId: UserId,
+		type: string,
+	): Promise<void> => {
 		// MSC3391: leave a tombstone (empty object) with a fresh stream position
 		// rather than removing the row, so incremental sync can surface it.
-		await this.exec(
+		await exec(
 			"INSERT INTO global_account_data (user_id, type, content, stream_pos) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE content = VALUES(content), stream_pos = VALUES(stream_pos)",
-			[userId, type, this.json({}), ++this.streamCounter],
+			[userId, type, json({}), ++eph.streamCounter],
 		);
-		this.wakeWaiters();
-	}
-	async deleteRoomAccountData(
+		eph.wakeWaiters();
+	};
+	const deleteRoomAccountData = async (
 		userId: UserId,
 		roomId: RoomId,
 		type: string,
-	): Promise<void> {
-		await this.exec(
+	): Promise<void> => {
+		await exec(
 			"INSERT INTO room_account_data (user_id, room_id, type, content, stream_pos) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE content = VALUES(content), stream_pos = VALUES(stream_pos)",
-			[userId, roomId, type, this.json({}), ++this.streamCounter],
+			[userId, roomId, type, json({}), ++eph.streamCounter],
 		);
-		this.wakeWaiters();
-	}
+		eph.wakeWaiters();
+	};
 
-	async getAllRoomAccountData(
+	const getAllRoomAccountData = async (
 		userId: UserId,
 		roomId: RoomId,
-	): Promise<{ type: string; content: JsonObject }[]> {
-		const rows = (await this.query(
+	): Promise<{ type: string; content: JsonObject }[]> => {
+		const rows = (await query(
 			// Exclude MSC3391 deletion tombstones from initial sync.
 			"SELECT type, content FROM room_account_data WHERE user_id = ? AND room_id = ? AND JSON_LENGTH(content) > 0",
 			[userId, roomId],
 		)) as Record<string, unknown>[];
 		return rows.map((r) => ({
 			type: r.type as string,
-			content: this.parseJson(r.content) as JsonObject,
+			content: parseJson(r.content) as JsonObject,
 		}));
-	}
+	};
 
-	async getRoomAccountDataSince(
+	const getRoomAccountDataSince = async (
 		userId: UserId,
 		since: number,
-	): Promise<{ roomId: RoomId; type: string; content: JsonObject }[]> {
-		const rows = (await this.query(
+	): Promise<{ roomId: RoomId; type: string; content: JsonObject }[]> => {
+		const rows = (await query(
 			// Include tombstones so incremental sync surfaces deletions.
 			"SELECT room_id, type, content FROM room_account_data WHERE user_id = ? AND stream_pos > ?",
 			[userId, since],
@@ -1165,26 +1173,28 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 		return rows.map((r) => ({
 			roomId: r.room_id as RoomId,
 			type: r.type as string,
-			content: this.parseJson(r.content) as JsonObject,
+			content: parseJson(r.content) as JsonObject,
 		}));
-	}
+	};
 
-	async setReceipt(
+	const setReceipt = async (
 		roomId: RoomId,
 		userId: UserId,
 		eventId: EventId,
 		receiptType: string,
 		ts: Timestamp,
 		threadId?: string,
-	): Promise<void> {
-		await this.exec(
+	): Promise<void> => {
+		await exec(
 			"INSERT INTO receipts (room_id, user_id, event_id, receipt_type, ts, thread_id) VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE event_id = VALUES(event_id), ts = VALUES(ts)",
 			[roomId, userId, eventId, receiptType, ts, threadId ?? ""],
 		);
-		this.wakeWaiters();
-	}
+		eph.wakeWaiters();
+	};
 
-	async getReceipts(roomId: RoomId): Promise<
+	const getReceipts = async (
+		roomId: RoomId,
+	): Promise<
 		{
 			eventId: EventId;
 			receiptType: string;
@@ -1192,8 +1202,8 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			ts: Timestamp;
 			threadId?: string;
 		}[]
-	> {
-		const rows = (await this.query(
+	> => {
+		const rows = (await query(
 			"SELECT event_id, receipt_type, user_id, ts, thread_id FROM receipts WHERE room_id = ?",
 			[roomId],
 		)) as Record<string, unknown>[];
@@ -1209,10 +1219,13 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 						: (r.thread_id as string),
 			})),
 		);
-	}
+	};
 
-	async storeMedia(media: StoredMedia, data: Buffer): Promise<void> {
-		await this.exec(
+	const storeMedia = async (
+		media: StoredMedia,
+		data: Buffer,
+	): Promise<void> => {
+		await exec(
 			`INSERT INTO media (origin, media_id, user_id, content_type, upload_name, file_size, content_hash, created_at, quarantined, data)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON DUPLICATE KEY UPDATE user_id = VALUES(user_id), content_type = VALUES(content_type), upload_name = VALUES(upload_name),
@@ -1230,13 +1243,13 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 				data,
 			],
 		);
-	}
+	};
 
-	async getMedia(
+	const getMedia = async (
 		serverName: ServerName,
 		mediaId: string,
-	): Promise<{ metadata: StoredMedia; data: Buffer } | undefined> {
-		const rows = (await this.query(
+	): Promise<{ metadata: StoredMedia; data: Buffer } | undefined> => {
+		const rows = (await query(
 			"SELECT * FROM media WHERE origin = ? AND media_id = ?",
 			[serverName, mediaId],
 		)) as Record<string, unknown>[];
@@ -1256,24 +1269,24 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			},
 			data: row.data as Buffer,
 		};
-	}
+	};
 
-	async reserveMedia(media: StoredMedia): Promise<void> {
-		await this.storeMedia(media, Buffer.alloc(0));
-	}
+	const reserveMedia = async (media: StoredMedia): Promise<void> => {
+		await storeMedia(media, Buffer.alloc(0));
+	};
 
-	async updateMediaContent(
+	const updateMediaContent = async (
 		serverName: ServerName,
 		mediaId: string,
 		contentType: string,
 		fileName: string | undefined,
 		data: Buffer,
-	): Promise<boolean> {
-		const existing = await this.getMedia(serverName, mediaId);
+	): Promise<boolean> => {
+		const existing = await getMedia(serverName, mediaId);
 		if (!existing) return false;
 		const { createHash } = await import("node:crypto");
 		const hash = createHash("sha256").update(data).digest("base64");
-		await this.exec(
+		await exec(
 			"UPDATE media SET content_type = ?, upload_name = ?, file_size = ?, content_hash = ?, data = ? WHERE origin = ? AND media_id = ?",
 			[
 				contentType,
@@ -1286,103 +1299,103 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			],
 		);
 		return true;
-	}
+	};
 
-	async createFilter(userId: UserId, filter: JsonObject): Promise<string> {
-		const filterId = String(++this.filterCounter);
-		await this.exec(
+	const createFilter = async (
+		userId: UserId,
+		filter: JsonObject,
+	): Promise<string> => {
+		const filterId = String(++eph.filterCounter);
+		await exec(
 			"INSERT INTO filters (user_id, filter_id, filter_json) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE filter_json = VALUES(filter_json)",
-			[userId, filterId, this.json(filter)],
+			[userId, filterId, json(filter)],
 		);
 		return filterId;
-	}
+	};
 
-	async getFilter(
+	const getFilter = async (
 		userId: UserId,
 		filterId: string,
-	): Promise<JsonObject | undefined> {
-		const rows = (await this.query(
+	): Promise<JsonObject | undefined> => {
+		const rows = (await query(
 			"SELECT filter_json FROM filters WHERE user_id = ? AND filter_id = ?",
 			[userId, filterId],
 		)) as Record<string, unknown>[];
-		return rows[0]
-			? (this.parseJson(rows[0].filter_json) as JsonObject)
-			: undefined;
-	}
+		return rows[0] ? (parseJson(rows[0].filter_json) as JsonObject) : undefined;
+	};
 
-	async setDeviceKeys(
+	const setDeviceKeys = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		keys: DeviceKeys,
-	): Promise<void> {
-		await this.exec(
+	): Promise<void> => {
+		await exec(
 			"INSERT INTO device_keys (user_id, device_id, keys_json) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE keys_json = VALUES(keys_json)",
-			[userId, deviceId, this.json(keys)],
+			[userId, deviceId, json(keys)],
 		);
-		await this.recordDeviceKeyChange(userId);
-	}
+		await recordDeviceKeyChange(userId);
+	};
 
-	async recordDeviceKeyChange(userId: UserId): Promise<void> {
-		await this.exec(
+	const recordDeviceKeyChange = async (userId: UserId): Promise<void> => {
+		await exec(
 			"INSERT INTO device_list_stream (user_id, stream_pos) VALUES (?, ?)",
-			[userId, ++this.streamCounter],
+			[userId, ++eph.streamCounter],
 		);
-		this.wakeWaiters();
-	}
+		eph.wakeWaiters();
+	};
 
-	async getChangedDeviceUsers(since: number, until: number): Promise<UserId[]> {
-		const rows = (await this.query(
+	const getChangedDeviceUsers = async (
+		since: number,
+		until: number,
+	): Promise<UserId[]> => {
+		const rows = (await query(
 			"SELECT DISTINCT user_id FROM device_list_stream WHERE stream_pos > ? AND stream_pos <= ?",
 			[since, until],
 		)) as Record<string, unknown>[];
 		return rows.map((r) => r.user_id as UserId);
-	}
+	};
 
-	async getDeviceKeys(
+	const getDeviceKeys = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<DeviceKeys | undefined> {
-		const rows = (await this.query(
+	): Promise<DeviceKeys | undefined> => {
+		const rows = (await query(
 			"SELECT keys_json FROM device_keys WHERE user_id = ? AND device_id = ?",
 			[userId, deviceId],
 		)) as Record<string, unknown>[];
-		return rows[0]
-			? (this.parseJson(rows[0].keys_json) as DeviceKeys)
-			: undefined;
-	}
+		return rows[0] ? (parseJson(rows[0].keys_json) as DeviceKeys) : undefined;
+	};
 
-	async getAllDeviceKeys(
+	const getAllDeviceKeys = async (
 		userId: UserId,
-	): Promise<Record<DeviceId, DeviceKeys>> {
-		const rows = (await this.query(
+	): Promise<Record<DeviceId, DeviceKeys>> => {
+		const rows = (await query(
 			"SELECT device_id, keys_json FROM device_keys WHERE user_id = ?",
 			[userId],
 		)) as Record<string, unknown>[];
 		const result: Record<DeviceId, DeviceKeys> = {};
 		for (const r of rows)
-			result[r.device_id as DeviceId] = this.parseJson(
-				r.keys_json,
-			) as DeviceKeys;
+			result[r.device_id as DeviceId] = parseJson(r.keys_json) as DeviceKeys;
 		return result;
-	}
+	};
 
-	async deleteDeviceKeys(userId: UserId): Promise<void> {
-		await this.query("DELETE FROM device_keys WHERE user_id = ?", [userId]);
-	}
+	const deleteDeviceKeys = async (userId: UserId): Promise<void> => {
+		await query("DELETE FROM device_keys WHERE user_id = ?", [userId]);
+	};
 
-	async addOneTimeKeys(
+	const addOneTimeKeys = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		keys: Record<KeyId, string | OneTimeKey>,
-	): Promise<void> {
-		const conn = await this.pool.getConnection();
+	): Promise<void> => {
+		const conn = await pool.getConnection();
 		try {
 			await conn.beginTransaction();
 			for (const [keyId, key] of Object.entries(keys)) {
 				const algorithm = keyId.split(":")[0] as string;
 				await conn.query(
 					"INSERT INTO one_time_keys (user_id, device_id, key_id, algorithm, key_json) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE key_json = VALUES(key_json)",
-					[userId, deviceId, keyId, algorithm, this.json(key)],
+					[userId, deviceId, keyId, algorithm, json(key)],
 				);
 			}
 			await conn.commit();
@@ -1392,14 +1405,14 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 		} finally {
 			conn.release();
 		}
-	}
+	};
 
-	async claimOneTimeKey(
+	const claimOneTimeKey = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		algorithm: string,
-	): Promise<{ keyId: KeyId; key: string | OneTimeKey } | undefined> {
-		const conn = await this.pool.getConnection();
+	): Promise<{ keyId: KeyId; key: string | OneTimeKey } | undefined> => {
+		const conn = await pool.getConnection();
 		try {
 			await conn.beginTransaction();
 			const rows = (await conn.query(
@@ -1414,7 +1427,7 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 				await conn.commit();
 				return {
 					keyId: rows[0].key_id as KeyId,
-					key: this.parseJson(rows[0].key_json) as string | OneTimeKey,
+					key: parseJson(rows[0].key_json) as string | OneTimeKey,
 				};
 			}
 			await conn.commit();
@@ -1425,37 +1438,37 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			conn.release();
 		}
 
-		const fallbackRows = (await this.query(
+		const fallbackRows = (await query(
 			"SELECT key_id, key_json FROM fallback_keys WHERE user_id = ? AND device_id = ? AND key_id LIKE ? LIMIT 1",
 			[userId, deviceId, `${algorithm}:%`],
 		)) as Record<string, unknown>[];
 		if (fallbackRows[0])
 			return {
 				keyId: fallbackRows[0].key_id as KeyId,
-				key: this.parseJson(fallbackRows[0].key_json) as string | OneTimeKey,
+				key: parseJson(fallbackRows[0].key_json) as string | OneTimeKey,
 			};
 		return undefined;
-	}
+	};
 
-	async getOneTimeKeyCounts(
+	const getOneTimeKeyCounts = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<Record<string, number>> {
-		const rows = (await this.query(
+	): Promise<Record<string, number>> => {
+		const rows = (await query(
 			"SELECT algorithm, COUNT(*) AS cnt FROM one_time_keys WHERE user_id = ? AND device_id = ? GROUP BY algorithm",
 			[userId, deviceId],
 		)) as Record<string, unknown>[];
 		const counts: Record<string, number> = {};
 		for (const r of rows) counts[r.algorithm as string] = Number(r.cnt);
 		return counts;
-	}
+	};
 
-	async setFallbackKeys(
+	const setFallbackKeys = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		keys: Record<KeyId, string | OneTimeKey>,
-	): Promise<void> {
-		const conn = await this.pool.getConnection();
+	): Promise<void> => {
+		const conn = await pool.getConnection();
 		try {
 			await conn.beginTransaction();
 			await conn.query(
@@ -1465,7 +1478,7 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			for (const [keyId, key] of Object.entries(keys)) {
 				await conn.query(
 					"INSERT INTO fallback_keys (user_id, device_id, key_id, key_json) VALUES (?, ?, ?, ?)",
-					[userId, deviceId, keyId, this.json(key)],
+					[userId, deviceId, keyId, json(key)],
 				);
 			}
 			await conn.commit();
@@ -1475,13 +1488,13 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 		} finally {
 			conn.release();
 		}
-	}
+	};
 
-	async getFallbackKeyTypes(
+	const getFallbackKeyTypes = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<string[]> {
-		const rows = (await this.query(
+	): Promise<string[]> => {
+		const rows = (await query(
 			"SELECT DISTINCT key_id FROM fallback_keys WHERE user_id = ? AND device_id = ?",
 			[userId, deviceId],
 		)) as Record<string, unknown>[];
@@ -1489,16 +1502,16 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 		for (const r of rows)
 			types.add((r.key_id as string).split(":")[0] as string);
 		return [...types];
-	}
+	};
 
-	async setCrossSigningKeys(
+	const setCrossSigningKeys = async (
 		userId: UserId,
 		keys: {
 			master_key?: CrossSigningKey;
 			self_signing_key?: CrossSigningKey;
 			user_signing_key?: CrossSigningKey;
 		},
-	): Promise<void> {
+	): Promise<void> => {
 		const entries: [string, CrossSigningKey][] = [];
 		if (keys.master_key) entries.push(["master_key", keys.master_key]);
 		if (keys.self_signing_key)
@@ -1506,19 +1519,21 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 		if (keys.user_signing_key)
 			entries.push(["user_signing_key", keys.user_signing_key]);
 		for (const [keyType, key] of entries) {
-			await this.exec(
+			await exec(
 				"INSERT INTO cross_signing_keys (user_id, key_type, key_json) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE key_json = VALUES(key_json)",
-				[userId, keyType, this.json(key)],
+				[userId, keyType, json(key)],
 			);
 		}
-	}
+	};
 
-	async getCrossSigningKeys(userId: UserId): Promise<{
+	const getCrossSigningKeys = async (
+		userId: UserId,
+	): Promise<{
 		master_key?: CrossSigningKey;
 		self_signing_key?: CrossSigningKey;
 		user_signing_key?: CrossSigningKey;
-	}> {
-		const rows = (await this.query(
+	}> => {
+		const rows = (await query(
 			"SELECT key_type, key_json FROM cross_signing_keys WHERE user_id = ?",
 			[userId],
 		)) as Record<string, unknown>[];
@@ -1529,20 +1544,20 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 		} = {};
 		for (const r of rows) {
 			const keyType = r.key_type as string;
-			const key = this.parseJson(r.key_json) as CrossSigningKey;
+			const key = parseJson(r.key_json) as CrossSigningKey;
 			if (keyType === "master_key") result.master_key = key;
 			else if (keyType === "self_signing_key") result.self_signing_key = key;
 			else if (keyType === "user_signing_key") result.user_signing_key = key;
 		}
 		return result;
-	}
+	};
 
-	async storeCrossSigningSignatures(
+	const storeCrossSigningSignatures = async (
 		_userId: UserId,
 		signatures: Record<string, Record<string, JsonObject>>,
 	): Promise<
 		Record<string, Record<string, { errcode: string; error: string }>>
-	> {
+	> => {
 		const failures: Record<
 			string,
 			Record<string, { errcode: string; error: string }>
@@ -1566,7 +1581,7 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 				}
 
 				// Try updating device keys
-				const deviceKeys = await this.getDeviceKeys(
+				const deviceKeys = await getDeviceKeys(
 					targetUserId as UserId,
 					keyId as DeviceId,
 				);
@@ -1579,7 +1594,7 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 							sigs,
 						);
 					}
-					await this.setDeviceKeys(
+					await setDeviceKeys(
 						targetUserId as UserId,
 						keyId as DeviceId,
 						deviceKeys,
@@ -1588,9 +1603,7 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 				}
 
 				// Try updating cross-signing keys
-				const crossKeys = await this.getCrossSigningKeys(
-					targetUserId as UserId,
-				);
+				const crossKeys = await getCrossSigningKeys(targetUserId as UserId);
 				let matched = false;
 				for (const [crossKeyType, key] of [
 					["master_key", crossKeys.master_key],
@@ -1611,9 +1624,9 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 								sigs,
 							);
 						}
-						await this.exec(
+						await exec(
 							"UPDATE cross_signing_keys SET key_json = ? WHERE user_id = ? AND key_type = ?",
-							[this.json(key), targetUserId, crossKeyType],
+							[json(key), targetUserId, crossKeyType],
 						);
 						matched = true;
 						break;
@@ -1634,26 +1647,26 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			}
 		}
 		return failures;
-	}
+	};
 
-	async createKeyBackupVersion(
+	const createKeyBackupVersion = async (
 		userId: UserId,
 		algorithm: string,
 		authData: JsonObject,
-	): Promise<string> {
-		const [maxRow] = (await this.query(
+	): Promise<string> => {
+		const [maxRow] = (await query(
 			"SELECT MAX(CAST(version AS UNSIGNED)) AS m FROM key_backup_versions WHERE user_id = ?",
 			[userId],
 		)) as Record<string, unknown>[];
 		const version = String((Number(maxRow?.m) || 0) + 1);
-		await this.exec(
+		await exec(
 			"INSERT INTO key_backup_versions (user_id, version, algorithm, auth_data) VALUES (?, ?, ?, ?)",
-			[userId, version, algorithm, this.json(authData)],
+			[userId, version, algorithm, json(authData)],
 		);
 		return version;
-	}
+	};
 
-	async getKeyBackupVersion(
+	const getKeyBackupVersion = async (
 		userId: UserId,
 		version?: string,
 	): Promise<
@@ -1665,15 +1678,15 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 				etag: string;
 		  }
 		| undefined
-	> {
+	> => {
 		let rows: Record<string, unknown>[];
 		if (version) {
-			rows = (await this.query(
+			rows = (await query(
 				"SELECT version, algorithm, auth_data FROM key_backup_versions WHERE user_id = ? AND version = ?",
 				[userId, version],
 			)) as Record<string, unknown>[];
 		} else {
-			rows = (await this.query(
+			rows = (await query(
 				"SELECT version, algorithm, auth_data FROM key_backup_versions WHERE user_id = ? ORDER BY CAST(version AS UNSIGNED) DESC LIMIT 1",
 				[userId],
 			)) as Record<string, unknown>[];
@@ -1682,7 +1695,7 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 		const v = rows[0];
 		const ver = v.version as string;
 
-		const [countRow] = (await this.query(
+		const [countRow] = (await query(
 			"SELECT COUNT(*) AS cnt FROM key_backup_data WHERE user_id = ? AND version = ?",
 			[userId, ver],
 		)) as Record<string, unknown>[];
@@ -1691,17 +1704,17 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 		return {
 			version: ver,
 			algorithm: v.algorithm as string,
-			auth_data: this.parseJson(v.auth_data) as JsonObject,
+			auth_data: parseJson(v.auth_data) as JsonObject,
 			count,
-			etag: await this.computeMysqlBackupEtag(userId, ver),
+			etag: await computeMysqlBackupEtag(userId, ver),
 		};
-	}
+	};
 
-	private async computeMysqlBackupEtag(
+	const computeMysqlBackupEtag = async (
 		userId: UserId,
 		version: string,
-	): Promise<string> {
-		const rows = (await this.query(
+	): Promise<string> => {
+		const rows = (await query(
 			"SELECT room_id, session_id FROM key_backup_data WHERE user_id = ? AND version = ?",
 			[userId, version],
 		)) as Record<string, unknown>[];
@@ -1713,36 +1726,36 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			}
 		}
 		return String(Math.abs(hash));
-	}
+	};
 
-	async updateKeyBackupVersion(
+	const updateKeyBackupVersion = async (
 		userId: UserId,
 		version: string,
 		authData: JsonObject,
-	): Promise<boolean> {
-		const result = await this.exec(
+	): Promise<boolean> => {
+		const result = await exec(
 			"UPDATE key_backup_versions SET auth_data = ? WHERE user_id = ? AND version = ?",
-			[this.json(authData), userId, version],
+			[json(authData), userId, version],
 		);
 		return (result as unknown as { affectedRows: number }).affectedRows > 0;
-	}
+	};
 
-	async deleteKeyBackupVersion(
+	const deleteKeyBackupVersion = async (
 		userId: UserId,
 		version: string,
-	): Promise<boolean> {
-		await this.exec(
+	): Promise<boolean> => {
+		await exec(
 			"DELETE FROM key_backup_data WHERE user_id = ? AND version = ?",
 			[userId, version],
 		);
-		const result = await this.exec(
+		const result = await exec(
 			"DELETE FROM key_backup_versions WHERE user_id = ? AND version = ?",
 			[userId, version],
 		);
 		return (result as unknown as { affectedRows: number }).affectedRows > 0;
-	}
+	};
 
-	async putKeyBackupKeys(
+	const putKeyBackupKeys = async (
 		userId: UserId,
 		version: string,
 		roomId: RoomId | undefined,
@@ -1753,9 +1766,9 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			| {
 					rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
 			  },
-	): Promise<{ count: number; etag: string } | undefined> {
+	): Promise<{ count: number; etag: string } | undefined> => {
 		// Verify version exists and is the latest
-		const [latestRow] = (await this.query(
+		const [latestRow] = (await query(
 			"SELECT version FROM key_backup_versions WHERE user_id = ? ORDER BY CAST(version AS UNSIGNED) DESC LIMIT 1",
 			[userId],
 		)) as Record<string, unknown>[];
@@ -1783,14 +1796,12 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 
 		for (const [rid, sid, data] of entries) {
 			// Check existing for merge priority
-			const existingRows = (await this.query(
+			const existingRows = (await query(
 				"SELECT key_json FROM key_backup_data WHERE user_id = ? AND version = ? AND room_id = ? AND session_id = ?",
 				[userId, version, rid, sid],
 			)) as Record<string, unknown>[];
 			if (existingRows[0]) {
-				const existing = this.parseJson(
-					existingRows[0].key_json,
-				) as KeyBackupData;
+				const existing = parseJson(existingRows[0].key_json) as KeyBackupData;
 				if (
 					!(data.is_verified && !existing.is_verified) &&
 					!(
@@ -1806,21 +1817,21 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 					continue;
 				}
 			}
-			await this.exec(
+			await exec(
 				"INSERT INTO key_backup_data (user_id, version, room_id, session_id, key_json) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE key_json = VALUES(key_json)",
-				[userId, version, rid, sid, this.json(data)],
+				[userId, version, rid, sid, json(data)],
 			);
 		}
 
-		const [countRow] = (await this.query(
+		const [countRow] = (await query(
 			"SELECT COUNT(*) AS cnt FROM key_backup_data WHERE user_id = ? AND version = ?",
 			[userId, version],
 		)) as Record<string, unknown>[];
 		const count = Number(countRow?.cnt ?? 0);
-		return { count, etag: await this.computeMysqlBackupEtag(userId, version) };
-	}
+		return { count, etag: await computeMysqlBackupEtag(userId, version) };
+	};
 
-	async getKeyBackupKeys(
+	const getKeyBackupKeys = async (
 		userId: UserId,
 		version: string,
 		roomId?: RoomId,
@@ -1832,29 +1843,29 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 				rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
 		  }
 		| undefined
-	> {
+	> => {
 		if (roomId && sessionId) {
-			const rows = (await this.query(
+			const rows = (await query(
 				"SELECT key_json FROM key_backup_data WHERE user_id = ? AND version = ? AND room_id = ? AND session_id = ?",
 				[userId, version, roomId, sessionId],
 			)) as Record<string, unknown>[];
 			return rows[0]
-				? (this.parseJson(rows[0].key_json) as KeyBackupData)
+				? (parseJson(rows[0].key_json) as KeyBackupData)
 				: undefined;
 		} else if (roomId) {
-			const rows = (await this.query(
+			const rows = (await query(
 				"SELECT session_id, key_json FROM key_backup_data WHERE user_id = ? AND version = ? AND room_id = ?",
 				[userId, version, roomId],
 			)) as Record<string, unknown>[];
 			const sessions: Record<string, KeyBackupData> = {};
 			for (const r of rows) {
-				sessions[r.session_id as string] = this.parseJson(
+				sessions[r.session_id as string] = parseJson(
 					r.key_json,
 				) as KeyBackupData;
 			}
 			return { sessions };
 		} else {
-			const rows = (await this.query(
+			const rows = (await query(
 				"SELECT room_id, session_id, key_json FROM key_backup_data WHERE user_id = ? AND version = ?",
 				[userId, version],
 			)) as Record<string, unknown>[];
@@ -1865,131 +1876,134 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 				if (!rooms[rid]) rooms[rid] = { sessions: {} };
 				(rooms[rid] as { sessions: Record<string, KeyBackupData> }).sessions[
 					r.session_id as string
-				] = this.parseJson(r.key_json) as KeyBackupData;
+				] = parseJson(r.key_json) as KeyBackupData;
 			}
 			return { rooms };
 		}
-	}
+	};
 
-	async deleteKeyBackupKeys(
+	const deleteKeyBackupKeys = async (
 		userId: UserId,
 		version: string,
 		roomId?: RoomId,
 		sessionId?: string,
-	): Promise<{ count: number; etag: string } | undefined> {
+	): Promise<{ count: number; etag: string } | undefined> => {
 		// Verify version exists
-		const [versionRow] = (await this.query(
+		const [versionRow] = (await query(
 			"SELECT version FROM key_backup_versions WHERE user_id = ? AND version = ?",
 			[userId, version],
 		)) as Record<string, unknown>[];
 		if (!versionRow) return undefined;
 
 		if (roomId && sessionId) {
-			await this.exec(
+			await exec(
 				"DELETE FROM key_backup_data WHERE user_id = ? AND version = ? AND room_id = ? AND session_id = ?",
 				[userId, version, roomId, sessionId],
 			);
 		} else if (roomId) {
-			await this.exec(
+			await exec(
 				"DELETE FROM key_backup_data WHERE user_id = ? AND version = ? AND room_id = ?",
 				[userId, version, roomId],
 			);
 		} else {
-			await this.exec(
+			await exec(
 				"DELETE FROM key_backup_data WHERE user_id = ? AND version = ?",
 				[userId, version],
 			);
 		}
 
-		const [countRow] = (await this.query(
+		const [countRow] = (await query(
 			"SELECT COUNT(*) AS cnt FROM key_backup_data WHERE user_id = ? AND version = ?",
 			[userId, version],
 		)) as Record<string, unknown>[];
 		const count = Number(countRow?.cnt ?? 0);
-		return { count, etag: await this.computeMysqlBackupEtag(userId, version) };
-	}
+		return { count, etag: await computeMysqlBackupEtag(userId, version) };
+	};
 
-	async sendToDevice(
+	const sendToDevice = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		event: ToDeviceEvent,
-	): Promise<void> {
-		await this.exec(
+	): Promise<void> => {
+		await exec(
 			"INSERT INTO to_device (user_id, device_id, event_json) VALUES (?, ?, ?)",
-			[userId, deviceId, this.json(event)],
+			[userId, deviceId, json(event)],
 		);
-		this.wakeWaiters();
-	}
+		eph.wakeWaiters();
+	};
 
-	async getToDeviceMessages(
+	const getToDeviceMessages = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<ToDeviceEvent[]> {
-		const rows = (await this.query(
+	): Promise<ToDeviceEvent[]> => {
+		const rows = (await query(
 			"SELECT event_json FROM to_device WHERE user_id = ? AND device_id = ? ORDER BY id",
 			[userId, deviceId],
 		)) as Record<string, unknown>[];
-		return rows.map((r) => this.parseJson(r.event_json) as ToDeviceEvent);
-	}
+		return rows.map((r) => parseJson(r.event_json) as ToDeviceEvent);
+	};
 
-	async clearToDeviceMessages(
+	const clearToDeviceMessages = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<void> {
-		await this.exec(
-			"DELETE FROM to_device WHERE user_id = ? AND device_id = ?",
-			[userId, deviceId],
-		);
-	}
+	): Promise<void> => {
+		await exec("DELETE FROM to_device WHERE user_id = ? AND device_id = ?", [
+			userId,
+			deviceId,
+		]);
+	};
 
-	async getPushers(userId: UserId): Promise<Pusher[]> {
-		const rows = (await this.query(
+	const getPushers = async (userId: UserId): Promise<Pusher[]> => {
+		const rows = (await query(
 			"SELECT pusher_json FROM pushers WHERE user_id = ?",
 			[userId],
 		)) as Record<string, unknown>[];
-		return rows.map((r) => this.parseJson(r.pusher_json) as Pusher);
-	}
+		return rows.map((r) => parseJson(r.pusher_json) as Pusher);
+	};
 
-	async setPusher(userId: UserId, pusher: Pusher): Promise<void> {
-		await this.exec(
+	const setPusher = async (userId: UserId, pusher: Pusher): Promise<void> => {
+		await exec(
 			"INSERT INTO pushers (user_id, app_id, pushkey, pusher_json) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE pusher_json = VALUES(pusher_json)",
-			[userId, pusher.app_id, pusher.pushkey, this.json(pusher)],
+			[userId, pusher.app_id, pusher.pushkey, json(pusher)],
 		);
-	}
+	};
 
-	async deletePusher(
+	const deletePusher = async (
 		userId: UserId,
 		appId: string,
 		pushkey: string,
-	): Promise<void> {
-		await this.exec(
+	): Promise<void> => {
+		await exec(
 			"DELETE FROM pushers WHERE user_id = ? AND app_id = ? AND pushkey = ?",
 			[userId, appId, pushkey],
 		);
-	}
+	};
 
-	async deletePusherByKey(appId: string, pushkey: string): Promise<void> {
-		await this.exec("DELETE FROM pushers WHERE app_id = ? AND pushkey = ?", [
+	const deletePusherByKey = async (
+		appId: string,
+		pushkey: string,
+	): Promise<void> => {
+		await exec("DELETE FROM pushers WHERE app_id = ? AND pushkey = ?", [
 			appId,
 			pushkey,
 		]);
-	}
+	};
 
-	async storeRelation(
+	const storeRelation = async (
 		eventId: EventId,
 		roomId: RoomId,
 		relType: string,
 		targetEventId: EventId,
 		key?: string,
-	): Promise<void> {
-		const rows = (await this.query(
+	): Promise<void> => {
+		const rows = (await query(
 			"SELECT event_json, stream_pos FROM events WHERE event_id = ?",
 			[eventId],
 		)) as Record<string, unknown>[];
 		if (!rows[0]) return;
-		const event = this.parseJson(rows[0].event_json) as PDU;
+		const event = parseJson(rows[0].event_json) as PDU;
 		const streamPos = Number(rows[0].stream_pos);
-		await this.exec(
+		await exec(
 			"INSERT INTO relations (event_id, room_id, rel_type, target_event_id, `key`, sender, event_type, stream_pos) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 			[
 				eventId,
@@ -2002,9 +2016,9 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 				streamPos,
 			],
 		);
-	}
+	};
 
-	async getRelatedEvents(
+	const getRelatedEvents = async (
 		roomId: RoomId,
 		eventId: EventId,
 		relType?: string,
@@ -2015,7 +2029,7 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 	): Promise<{
 		events: { event: PDU; eventId: EventId }[];
 		nextBatch?: string;
-	}> {
+	}> => {
 		let sql =
 			"SELECT r.event_id, r.stream_pos, e.event_json FROM relations r JOIN events e ON r.event_id = e.event_id WHERE r.target_event_id = ? AND r.room_id = ?";
 		const params: unknown[] = [eventId, roomId];
@@ -2042,9 +2056,9 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 				: " ORDER BY r.stream_pos DESC LIMIT ?";
 		params.push(limit);
 
-		const rows = (await this.query(sql, params)) as Record<string, unknown>[];
+		const rows = (await query(sql, params)) as Record<string, unknown>[];
 		const events = rows.map((r) => ({
-			event: this.parseJson(r.event_json) as PDU,
+			event: parseJson(r.event_json) as PDU,
 			eventId: r.event_id as EventId,
 		}));
 		const nextBatch =
@@ -2052,12 +2066,12 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 				? String(rows[rows.length - 1]?.stream_pos)
 				: undefined;
 		return { events, nextBatch };
-	}
+	};
 
-	async getAnnotationCounts(
+	const getAnnotationCounts = async (
 		eventId: EventId,
-	): Promise<{ type: string; key: string; count: number }[]> {
-		const rows = (await this.query(
+	): Promise<{ type: string; key: string; count: number }[]> => {
+		const rows = (await query(
 			"SELECT event_type, `key`, COUNT(*) AS cnt FROM relations WHERE target_event_id = ? AND rel_type = 'm.annotation' AND `key` IS NOT NULL GROUP BY event_type, `key`",
 			[eventId],
 		)) as Record<string, unknown>[];
@@ -2066,24 +2080,24 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			key: r.key as string,
 			count: Number(r.cnt),
 		}));
-	}
+	};
 
-	async getLatestEdit(
+	const getLatestEdit = async (
 		eventId: EventId,
 		sender: UserId,
-	): Promise<{ event: PDU; eventId: EventId } | undefined> {
-		const rows = (await this.query(
+	): Promise<{ event: PDU; eventId: EventId } | undefined> => {
+		const rows = (await query(
 			"SELECT r.event_id, e.event_json FROM relations r JOIN events e ON r.event_id = e.event_id WHERE r.target_event_id = ? AND r.rel_type = 'm.replace' AND r.sender = ? ORDER BY r.stream_pos DESC LIMIT 1",
 			[eventId, sender],
 		)) as Record<string, unknown>[];
 		if (!rows[0]) return undefined;
 		return {
-			event: this.parseJson(rows[0].event_json) as PDU,
+			event: parseJson(rows[0].event_json) as PDU,
 			eventId: rows[0].event_id as EventId,
 		};
-	}
+	};
 
-	async getThreadSummary(
+	const getThreadSummary = async (
 		eventId: EventId,
 		userId: UserId,
 	): Promise<
@@ -2093,62 +2107,62 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 				currentUserParticipated: boolean;
 		  }
 		| undefined
-	> {
-		const [countRow] = (await this.query(
+	> => {
+		const [countRow] = (await query(
 			"SELECT COUNT(*) AS cnt FROM relations WHERE target_event_id = ? AND rel_type = 'm.thread'",
 			[eventId],
 		)) as Record<string, unknown>[];
 		if (Number(countRow?.cnt) === 0) return undefined;
 
-		const [latestRow] = (await this.query(
+		const [latestRow] = (await query(
 			"SELECT r.event_id, e.event_json FROM relations r JOIN events e ON r.event_id = e.event_id WHERE r.target_event_id = ? AND r.rel_type = 'm.thread' ORDER BY r.stream_pos DESC LIMIT 1",
 			[eventId],
 		)) as Record<string, unknown>[];
 		if (!latestRow) return undefined;
 
-		const participated = (await this.query(
+		const participated = (await query(
 			"SELECT 1 FROM relations WHERE target_event_id = ? AND rel_type = 'm.thread' AND sender = ? LIMIT 1",
 			[eventId, userId],
 		)) as Record<string, unknown>[];
 
 		return {
 			latestEvent: {
-				event: this.parseJson(latestRow.event_json) as PDU,
+				event: parseJson(latestRow.event_json) as PDU,
 				eventId: latestRow.event_id as EventId,
 			},
 			count: Number(countRow?.cnt),
 			currentUserParticipated: participated.length > 0,
 		};
-	}
+	};
 
-	async storeReport(
+	const storeReport = async (
 		userId: UserId,
 		roomId: RoomId,
 		eventId: EventId,
 		score?: number,
 		reason?: string,
-	): Promise<void> {
-		await this.exec(
+	): Promise<void> => {
+		await exec(
 			"INSERT INTO reports (user_id, room_id, event_id, score, reason, ts) VALUES (?, ?, ?, ?, ?, ?)",
 			[userId, roomId, eventId, score ?? null, reason ?? null, Date.now()],
 		);
-	}
+	};
 
-	async storeOpenIdToken(
+	const storeOpenIdToken = async (
 		token: string,
 		userId: UserId,
 		expiresAt: Timestamp,
-	): Promise<void> {
-		await this.exec(
+	): Promise<void> => {
+		await exec(
 			"INSERT INTO openid_tokens (token, user_id, expires_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE user_id = VALUES(user_id), expires_at = VALUES(expires_at)",
 			[token, userId, expiresAt],
 		);
-	}
+	};
 
-	async getOpenIdToken(
+	const getOpenIdToken = async (
 		token: string,
-	): Promise<{ userId: UserId; expiresAt: Timestamp } | undefined> {
-		const rows = (await this.query(
+	): Promise<{ userId: UserId; expiresAt: Timestamp } | undefined> => {
+		const rows = (await query(
 			"SELECT user_id, expires_at FROM openid_tokens WHERE token = ?",
 			[token],
 		)) as Record<string, unknown>[];
@@ -2157,12 +2171,12 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			userId: rows[0].user_id as UserId,
 			expiresAt: Number(rows[0].expires_at),
 		};
-	}
+	};
 
-	async getThreePids(
+	const getThreePids = async (
 		userId: UserId,
-	): Promise<{ medium: string; address: string; added_at: Timestamp }[]> {
-		const rows = (await this.query(
+	): Promise<{ medium: string; address: string; added_at: Timestamp }[]> => {
+		const rows = (await query(
 			"SELECT medium, address, added_at FROM threepids WHERE user_id = ?",
 			[userId],
 		)) as Record<string, unknown>[];
@@ -2171,38 +2185,38 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			address: r.address as string,
 			added_at: Number(r.added_at),
 		}));
-	}
+	};
 
-	async addThreePid(
+	const addThreePid = async (
 		userId: UserId,
 		medium: string,
 		address: string,
-	): Promise<void> {
-		await this.exec(
+	): Promise<void> => {
+		await exec(
 			"INSERT IGNORE INTO threepids (user_id, medium, address, added_at) VALUES (?, ?, ?, ?)",
 			[userId, medium, address, Date.now()],
 		);
-	}
+	};
 
-	async deleteThreePid(
+	const deleteThreePid = async (
 		userId: UserId,
 		medium: string,
 		address: string,
-	): Promise<void> {
-		await this.exec(
+	): Promise<void> => {
+		await exec(
 			"DELETE FROM threepids WHERE user_id = ? AND medium = ? AND address = ?",
 			[userId, medium, address],
 		);
-	}
+	};
 
-	async searchUserDirectory(
+	const searchUserDirectory = async (
 		searchTerm: string,
 		limit: number,
 	): Promise<
 		{ user_id: UserId; display_name?: string; avatar_url?: string }[]
-	> {
+	> => {
 		const term = `%${searchTerm}%`;
-		const rows = (await this.query(
+		const rows = (await query(
 			"SELECT user_id, displayname, avatar_url FROM users WHERE is_deactivated = FALSE AND (user_id LIKE ? OR displayname LIKE ?) LIMIT ?",
 			[term, term, limit],
 		)) as Record<string, unknown>[];
@@ -2211,9 +2225,9 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			display_name: (r.displayname as string) ?? undefined,
 			avatar_url: (r.avatar_url as string) ?? undefined,
 		}));
-	}
+	};
 
-	async getThreadRoots(
+	const getThreadRoots = async (
 		roomId: RoomId,
 		userId: UserId,
 		include: "all" | "participated",
@@ -2222,7 +2236,7 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 	): Promise<{
 		events: { event: PDU; eventId: EventId }[];
 		nextBatch?: string;
-	}> {
+	}> => {
 		let sql = `
 			SELECT r.target_event_id, MAX(r.stream_pos) AS latest_pos, e.event_json
 			FROM relations r
@@ -2244,9 +2258,9 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			" GROUP BY r.target_event_id, e.event_json ORDER BY latest_pos DESC LIMIT ?";
 		params.push(limit);
 
-		const rows = (await this.query(sql, params)) as Record<string, unknown>[];
+		const rows = (await query(sql, params)) as Record<string, unknown>[];
 		const events = rows.map((r) => ({
-			event: this.parseJson(r.event_json) as PDU,
+			event: parseJson(r.event_json) as PDU,
 			eventId: r.target_event_id as EventId,
 		}));
 		const nextBatch =
@@ -2254,9 +2268,9 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 				? String(rows[rows.length - 1]?.latest_pos)
 				: undefined;
 		return { events, nextBatch };
-	}
+	};
 
-	async searchRoomEvents(
+	const searchRoomEvents = async (
 		roomIds: RoomId[],
 		searchTerm: string,
 		keys: string[],
@@ -2266,21 +2280,18 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 		events: { event: PDU; eventId: EventId; streamPos: number }[];
 		count: number;
 		nextBatch?: string;
-	}> {
+	}> => {
 		if (roomIds.length === 0) return { events: [], count: 0 };
 
 		const placeholders = roomIds.map(() => "?").join(",");
 		const sql = `SELECT event_id, event_json, stream_pos FROM events WHERE room_id IN (${placeholders}) ORDER BY stream_pos DESC`;
 
-		const rows = (await this.query(sql, [...roomIds])) as Record<
-			string,
-			unknown
-		>[];
+		const rows = (await query(sql, [...roomIds])) as Record<string, unknown>[];
 
 		const allMatches: { event: PDU; eventId: EventId; streamPos: number }[] =
 			[];
 		for (const row of rows) {
-			const event = this.parseJson(row.event_json) as PDU;
+			const event = parseJson(row.event_json) as PDU;
 			if (eventMatchesSearchTerm(event, keys, searchTerm)) {
 				allMatches.push({
 					event,
@@ -2291,13 +2302,13 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 		}
 
 		return paginateSearchMatches(allMatches, limit, from);
-	}
+	};
 
-	async storeServerKeys(
+	const storeServerKeys = async (
 		serverName: ServerName,
 		keys: ServerKeys,
-	): Promise<void> {
-		const conn = await this.pool.getConnection();
+	): Promise<void> => {
+		const conn = await pool.getConnection();
 		try {
 			await conn.beginTransaction();
 			for (const [keyId, val] of Object.entries(keys.verify_keys)) {
@@ -2313,13 +2324,13 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 		} finally {
 			conn.release();
 		}
-	}
+	};
 
-	async getServerKeys(
+	const getServerKeys = async (
 		serverName: ServerName,
 		keyId: KeyId,
-	): Promise<{ key: string; validUntil: number } | undefined> {
-		const rows = (await this.query(
+	): Promise<{ key: string; validUntil: number } | undefined> => {
+		const rows = (await query(
 			"SELECT `key`, valid_until FROM server_keys WHERE server_name = ? AND key_id = ?",
 			[serverName, keyId],
 		)) as Record<string, unknown>[];
@@ -2328,9 +2339,9 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			key: rows[0].key as string,
 			validUntil: Number(rows[0].valid_until),
 		};
-	}
+	};
 
-	async getAuthChain(eventIds: EventId[]): Promise<PDU[]> {
+	const getAuthChain = async (eventIds: EventId[]): Promise<PDU[]> => {
 		const visited = new Set<EventId>();
 		const result: PDU[] = [];
 		const queue = [...eventIds];
@@ -2339,22 +2350,22 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			const id = queue.shift() as EventId;
 			if (visited.has(id)) continue;
 			visited.add(id);
-			const rows = (await this.query(
+			const rows = (await query(
 				"SELECT event_json FROM events WHERE event_id = ?",
 				[id],
 			)) as Record<string, unknown>[];
 			if (!rows[0]) continue;
-			const event = this.parseJson(rows[0].event_json) as PDU;
+			const event = parseJson(rows[0].event_json) as PDU;
 			result.push(event);
 			for (const authId of event.auth_events) {
 				if (!visited.has(authId)) queue.push(authId);
 			}
 		}
 		return result;
-	}
+	};
 
-	async getServersInRoom(roomId: RoomId): Promise<ServerName[]> {
-		const rows = (await this.query(
+	const getServersInRoom = async (roomId: RoomId): Promise<ServerName[]> => {
+		const rows = (await query(
 			"SELECT state_key FROM state_events WHERE room_id = ? AND event_type = 'm.room.member' AND JSON_UNQUOTE(JSON_EXTRACT(event_json, '$.content.membership')) = 'join'",
 			[roomId],
 		)) as Record<string, unknown>[];
@@ -2366,105 +2377,107 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 				.join(":") as ServerName;
 			servers.add(serverName);
 		}
-		const ps = this.partialStateRooms.get(roomId);
+		const ps = partialStateRooms.get(roomId);
 		if (ps) for (const s of ps.servers) servers.add(s);
 		return [...servers];
-	}
+	};
 
-	private partialStateRooms = new Map<
+	const partialStateRooms = new Map<
 		string,
 		{ servers: ServerName[]; joinEventId: EventId }
 	>();
-	private partialStateWaiters = new Map<string, Set<() => void>>();
-	private unPartialStatedAt = new Map<string, number>();
+	const partialStateWaiters = new Map<string, Set<() => void>>();
+	const unPartialStatedAt = new Map<string, number>();
 
-	async getRoomUnPartialStatedAt(roomId: RoomId): Promise<number | undefined> {
-		return this.unPartialStatedAt.get(roomId);
-	}
+	const getRoomUnPartialStatedAt = async (
+		roomId: RoomId,
+	): Promise<number | undefined> => {
+		return unPartialStatedAt.get(roomId);
+	};
 
-	async setStateEventHistorical(
+	const setStateEventHistorical = async (
 		roomId: RoomId,
 		event: PDU,
 		eventId: EventId,
-	): Promise<void> {
-		await this.setStateEvent(roomId, event, eventId);
-	}
+	): Promise<void> => {
+		await setStateEvent(roomId, event, eventId);
+	};
 
-	async markRoomPartialState(
+	const markRoomPartialState = async (
 		roomId: RoomId,
 		servers: ServerName[],
 		joinEventId: EventId,
-	): Promise<void> {
-		this.partialStateRooms.set(roomId, { servers, joinEventId });
-	}
+	): Promise<void> => {
+		partialStateRooms.set(roomId, { servers, joinEventId });
+	};
 
-	async clearRoomPartialState(roomId: RoomId): Promise<void> {
-		this.partialStateRooms.delete(roomId);
-		this.streamCounter++;
-		this.unPartialStatedAt.set(roomId, this.streamCounter);
-		const waiters = this.partialStateWaiters.get(roomId);
+	const clearRoomPartialState = async (roomId: RoomId): Promise<void> => {
+		partialStateRooms.delete(roomId);
+		eph.streamCounter++;
+		unPartialStatedAt.set(roomId, eph.streamCounter);
+		const waiters = partialStateWaiters.get(roomId);
 		if (waiters) {
-			this.partialStateWaiters.delete(roomId);
+			partialStateWaiters.delete(roomId);
 			for (const w of waiters) w();
 		}
-		this.wakeWaiters();
-	}
+		eph.wakeWaiters();
+	};
 
-	async getRoomPartialState(
+	const getRoomPartialState = async (
 		roomId: RoomId,
-	): Promise<{ servers: ServerName[]; joinEventId: EventId } | undefined> {
-		return this.partialStateRooms.get(roomId);
-	}
+	): Promise<{ servers: ServerName[]; joinEventId: EventId } | undefined> => {
+		return partialStateRooms.get(roomId);
+	};
 
-	async getAllPartialStateRooms(): Promise<
+	const getAllPartialStateRooms = async (): Promise<
 		{ roomId: RoomId; servers: ServerName[]; joinEventId: EventId }[]
-	> {
-		return [...this.partialStateRooms.entries()].map(([roomId, v]) => ({
+	> => {
+		return [...partialStateRooms.entries()].map(([roomId, v]) => ({
 			roomId: roomId as RoomId,
 			servers: v.servers,
 			joinEventId: v.joinEventId,
 		}));
-	}
+	};
 
-	private partialStateEvents = new Map<string, Set<EventId>>();
+	const partialStateEvents = new Map<string, Set<EventId>>();
 
-	async recordPartialStateEvent(
+	const recordPartialStateEvent = async (
 		roomId: RoomId,
 		eventId: EventId,
-	): Promise<void> {
-		let set = this.partialStateEvents.get(roomId);
+	): Promise<void> => {
+		let set = partialStateEvents.get(roomId);
 		if (!set) {
 			set = new Set();
-			this.partialStateEvents.set(roomId, set);
+			partialStateEvents.set(roomId, set);
 		}
 		set.add(eventId);
-	}
+	};
 
-	async takePartialStateEvents(roomId: RoomId): Promise<EventId[]> {
-		const set = this.partialStateEvents.get(roomId);
-		this.partialStateEvents.delete(roomId);
+	const takePartialStateEvents = async (roomId: RoomId): Promise<EventId[]> => {
+		const set = partialStateEvents.get(roomId);
+		partialStateEvents.delete(roomId);
 		return set ? [...set] : [];
-	}
-	private partialStateDevicePokes = new Map<string, Set<string>>();
+	};
+	const partialStateDevicePokes = new Map<string, Set<string>>();
 
-	async recordPartialStateDevicePoke(
+	const recordPartialStateDevicePoke = async (
 		roomId: RoomId,
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<void> {
-		let set = this.partialStateDevicePokes.get(roomId);
+	): Promise<void> => {
+		let set = partialStateDevicePokes.get(roomId);
 		if (!set) {
 			set = new Set();
-			this.partialStateDevicePokes.set(roomId, set);
+			partialStateDevicePokes.set(roomId, set);
 		}
 		set.add(`${userId}\x1f${deviceId}`);
-	}
+	};
 
-	async takePartialStateDevicePokes(
+	const takePartialStateDevicePokes = async (
 		roomId: RoomId,
-	): Promise<{ userId: UserId; deviceId: DeviceId }[]> {
-		const set = this.partialStateDevicePokes.get(roomId);
-		this.partialStateDevicePokes.delete(roomId);
+	): Promise<{ userId: UserId; deviceId: DeviceId }[]> => {
+		const set = partialStateDevicePokes.get(roomId);
+		partialStateDevicePokes.delete(roomId);
 		return set
 			? [...set].map((s) => {
 					const sep = s.indexOf("\x1f");
@@ -2474,30 +2487,28 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 					};
 				})
 			: [];
-	}
+	};
 
-	async deleteEvent(eventId: EventId): Promise<void> {
-		await this.pool.query("DELETE FROM events WHERE event_id = ?", [eventId]);
-		await this.pool.query("DELETE FROM state_events WHERE event_id = ?", [
-			eventId,
-		]);
-	}
+	const deleteEvent = async (eventId: EventId): Promise<void> => {
+		await pool.query("DELETE FROM events WHERE event_id = ?", [eventId]);
+		await pool.query("DELETE FROM state_events WHERE event_id = ?", [eventId]);
+	};
 
-	async unrejectEvent(_eventId: EventId): Promise<void> {
+	const unrejectEvent = async (_eventId: EventId): Promise<void> => {
 		// deleteEvent is destructive here (no rejected flag), so there is nothing
 		// to restore. No-op; partial-state resync re-evaluation targets sqlite.
-	}
+	};
 
-	async waitForPartialStateClear(
+	const waitForPartialStateClear = async (
 		roomId: RoomId,
 		timeoutMs: number,
-	): Promise<void> {
-		if (!this.partialStateRooms.has(roomId)) return;
+	): Promise<void> => {
+		if (!partialStateRooms.has(roomId)) return;
 		await new Promise<void>((resolve) => {
-			let set = this.partialStateWaiters.get(roomId);
+			let set = partialStateWaiters.get(roomId);
 			if (!set) {
 				set = new Set();
-				this.partialStateWaiters.set(roomId, set);
+				partialStateWaiters.set(roomId, set);
 			}
 			const done = () => {
 				set?.delete(done);
@@ -2507,50 +2518,56 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			const timer = setTimeout(done, timeoutMs);
 			set.add(done);
 		});
-	}
+	};
 
-	async getStateAtEvent(
+	const getStateAtEvent = async (
 		_roomId: RoomId,
 		_eventId: EventId,
-	): Promise<Map<string, PDU> | undefined> {
-		const room = await this.getRoom(_roomId);
+	): Promise<Map<string, PDU> | undefined> => {
+		const room = await getRoom(_roomId);
 		if (!room) return undefined;
 		return new Map(room.state_events);
-	}
+	};
 
-	async getFederationTxn(origin: ServerName, txnId: string): Promise<boolean> {
-		const rows = (await this.query(
+	const getFederationTxn = async (
+		origin: ServerName,
+		txnId: string,
+	): Promise<boolean> => {
+		const rows = (await query(
 			"SELECT 1 FROM federation_txns WHERE origin = ? AND txn_id = ?",
 			[origin, txnId],
 		)) as unknown[];
 		return rows.length > 0;
-	}
+	};
 
-	async setFederationTxn(origin: ServerName, txnId: string): Promise<void> {
-		await this.exec(
+	const setFederationTxn = async (
+		origin: ServerName,
+		txnId: string,
+	): Promise<void> => {
+		await exec(
 			"INSERT IGNORE INTO federation_txns (origin, txn_id) VALUES (?, ?)",
 			[origin, txnId],
 		);
-	}
+	};
 
-	async enqueueFederationEdu(
+	const enqueueFederationEdu = async (
 		destination: ServerName,
 		edu: EDU,
-	): Promise<number> {
-		const result = await this.exec(
+	): Promise<number> => {
+		const result = await exec(
 			"INSERT INTO pending_federation_edus (destination, edu_json) VALUES (?, ?)",
 			[destination, JSON.stringify(edu)],
 		);
 		const id = Number(result.insertId);
 		// Enforce the per-destination cap by deleting the oldest overflow rows.
-		const countRows = (await this.query(
+		const countRows = (await query(
 			"SELECT COUNT(*) AS c FROM pending_federation_edus WHERE destination = ?",
 			[destination],
 		)) as { c: number | bigint }[];
 		const count = Number(countRows[0]?.c ?? 0);
 		if (count > PENDING_FEDERATION_EDU_CAP) {
 			const overflow = count - PENDING_FEDERATION_EDU_CAP;
-			await this.exec(
+			await exec(
 				"DELETE FROM pending_federation_edus WHERE destination = ? ORDER BY id ASC LIMIT ?",
 				[destination, overflow],
 			);
@@ -2559,13 +2576,13 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			);
 		}
 		return id;
-	}
+	};
 
-	async getPendingFederationEdus(
+	const getPendingFederationEdus = async (
 		destination: ServerName,
 		limit: number,
-	): Promise<{ id: number; edu: EDU }[]> {
-		const rows = (await this.query(
+	): Promise<{ id: number; edu: EDU }[]> => {
+		const rows = (await query(
 			"SELECT id, edu_json FROM pending_federation_edus WHERE destination = ? ORDER BY id ASC LIMIT ?",
 			[destination, limit],
 		)) as { id: number | bigint; edu_json: string }[];
@@ -2573,21 +2590,21 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			id: Number(r.id),
 			edu: JSON.parse(r.edu_json) as EDU,
 		}));
-	}
+	};
 
-	async deleteFederationEdu(id: number): Promise<void> {
-		await this.exec("DELETE FROM pending_federation_edus WHERE id = ?", [id]);
-	}
+	const deleteFederationEdu = async (id: number): Promise<void> => {
+		await exec("DELETE FROM pending_federation_edus WHERE id = ?", [id]);
+	};
 
-	async getPendingFederationDestinations(): Promise<ServerName[]> {
-		const rows = (await this.query(
+	const getPendingFederationDestinations = async (): Promise<ServerName[]> => {
+		const rows = (await query(
 			"SELECT DISTINCT destination FROM pending_federation_edus",
 		)) as { destination: string }[];
 		return rows.map((r) => r.destination as ServerName);
-	}
+	};
 
 	// 3PID verification — in-memory for simplicity (not persisted across restarts)
-	private verificationSessions = new Map<
+	const verificationSessions = new Map<
 		string,
 		{
 			medium: string;
@@ -2599,12 +2616,9 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			userId?: string;
 		}
 	>();
-	private loginTokens = new Map<
-		string,
-		{ userId: UserId; expiresAt: number }
-	>();
+	const loginTokens = new Map<string, { userId: UserId; expiresAt: number }>();
 
-	async storeVerificationToken(
+	const storeVerificationToken = async (
 		sessionId: string,
 		data: {
 			medium: string;
@@ -2615,11 +2629,13 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			validated: boolean;
 			userId?: string;
 		},
-	): Promise<void> {
-		this.verificationSessions.set(sessionId, { ...data });
-	}
+	): Promise<void> => {
+		verificationSessions.set(sessionId, { ...data });
+	};
 
-	async getVerificationSession(sessionId: string): Promise<
+	const getVerificationSession = async (
+		sessionId: string,
+	): Promise<
 		| {
 				medium: string;
 				address: string;
@@ -2630,54 +2646,54 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 				userId?: string;
 		  }
 		| undefined
-	> {
-		return this.verificationSessions.get(sessionId);
-	}
+	> => {
+		return verificationSessions.get(sessionId);
+	};
 
-	async validateVerificationToken(
+	const validateVerificationToken = async (
 		sessionId: string,
 		token: string,
-	): Promise<boolean> {
-		const session = this.verificationSessions.get(sessionId);
+	): Promise<boolean> => {
+		const session = verificationSessions.get(sessionId);
 		if (!session) return false;
 		if (session.token !== token) return false;
 		session.validated = true;
 		return true;
-	}
+	};
 
-	async storeLoginToken(
+	const storeLoginToken = async (
 		token: string,
 		userId: UserId,
 		expiresAt: number,
-	): Promise<void> {
-		this.loginTokens.set(token, { userId, expiresAt });
-	}
+	): Promise<void> => {
+		loginTokens.set(token, { userId, expiresAt });
+	};
 
-	async getLoginToken(
+	const getLoginToken = async (
 		token: string,
-	): Promise<{ userId: UserId; expiresAt: number } | undefined> {
-		return this.loginTokens.get(token);
-	}
+	): Promise<{ userId: UserId; expiresAt: number } | undefined> => {
+		return loginTokens.get(token);
+	};
 
-	async deleteLoginToken(token: string): Promise<void> {
-		this.loginTokens.delete(token);
-	}
+	const deleteLoginToken = async (token: string): Promise<void> => {
+		loginTokens.delete(token);
+	};
 
-	async importRoomState(
+	const importRoomState = async (
 		roomId: RoomId,
 		roomVersion: RoomVersion,
 		stateEvents: PDU[],
 		authChain: PDU[],
-	): Promise<void> {
-		const conn = await this.pool.getConnection();
+	): Promise<void> => {
+		const conn = await pool.getConnection();
 		try {
 			await conn.beginTransaction();
 			for (const event of authChain) {
 				const eventId = computeEventId(event, roomVersion);
-				this.streamCounter++;
+				eph.streamCounter++;
 				await conn.query(
 					"INSERT IGNORE INTO events (event_id, room_id, stream_pos, event_json) VALUES (?, ?, ?, ?)",
-					[eventId, event.room_id, this.streamCounter, this.json(event)],
+					[eventId, event.room_id, eph.streamCounter, json(event)],
 				);
 			}
 
@@ -2685,21 +2701,15 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			const extremities: EventId[] = [];
 			for (const event of stateEvents) {
 				const eventId = computeEventId(event, roomVersion);
-				this.streamCounter++;
+				eph.streamCounter++;
 				await conn.query(
 					"INSERT IGNORE INTO events (event_id, room_id, stream_pos, event_json) VALUES (?, ?, ?, ?)",
-					[eventId, event.room_id, this.streamCounter, this.json(event)],
+					[eventId, event.room_id, eph.streamCounter, json(event)],
 				);
 				await conn.query(
 					`INSERT INTO state_events (room_id, event_type, state_key, event_id, event_json) VALUES (?, ?, ?, ?, ?)
 					 ON DUPLICATE KEY UPDATE event_id = VALUES(event_id), event_json = VALUES(event_json)`,
-					[
-						roomId,
-						event.type,
-						event.state_key ?? "",
-						eventId,
-						this.json(event),
-					],
+					[roomId, event.type, event.state_key ?? "", eventId, json(event)],
 				);
 				if (event.depth > maxDepth) maxDepth = event.depth;
 				extremities.length = 0;
@@ -2709,7 +2719,7 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 			await conn.query(
 				`INSERT INTO rooms (room_id, room_version, depth, forward_extremities) VALUES (?, ?, ?, ?)
 				 ON DUPLICATE KEY UPDATE room_version = VALUES(room_version), depth = VALUES(depth), forward_extremities = VALUES(forward_extremities)`,
-				[roomId, roomVersion, maxDepth + 1, this.json(extremities)],
+				[roomId, roomVersion, maxDepth + 1, json(extremities)],
 			);
 			await conn.commit();
 		} catch (e) {
@@ -2718,6 +2728,160 @@ export class MysqlStorage extends EphemeralMixin implements Storage {
 		} finally {
 			conn.release();
 		}
-		this.wakeWaiters();
-	}
-}
+		eph.wakeWaiters();
+	};
+
+	const uri = connectionString.replace(/^mysql:\/\//, "mariadb://");
+	pool = mariadb.createPool(`${uri}?connectionLimit=20`);
+	await init();
+
+	return {
+		addOneTimeKeys,
+		addThreePid,
+		addUIAACompleted,
+		claimOneTimeKey,
+		clearRoomPartialState,
+		clearToDeviceMessages,
+		createFilter,
+		createKeyBackupVersion,
+		createRoom,
+		createRoomAlias,
+		createSession,
+		createUIAASession,
+		createUser,
+		deactivateUser,
+		deleteAllSessions,
+		deleteDeviceKeys,
+		deleteDeviceSession,
+		deleteEvent,
+		deleteFederationEdu,
+		deleteGlobalAccountData,
+		deleteKeyBackupKeys,
+		deleteKeyBackupVersion,
+		deleteLoginToken,
+		deletePusher,
+		deletePusherByKey,
+		deleteRoomAccountData,
+		deleteRoomAlias,
+		deleteSession,
+		deleteThreePid,
+		deleteUIAASession,
+		enqueueFederationEdu,
+		getAliasCreator,
+		getAliasesForRoom,
+		getAllDeviceKeys,
+		getAllDevices,
+		getAllGlobalAccountData,
+		getAllPartialStateRooms,
+		getAllRoomAccountData,
+		getAllState,
+		getAnnotationCounts,
+		getAuthChain,
+		getChangedDeviceUsers,
+		getCrossSigningKeys,
+		getDevice,
+		getDeviceKeys,
+		getEvent,
+		getEventsByRoom,
+		getEventsByRoomSince,
+		getFallbackKeyTypes,
+		getFederationTxn,
+		getFilter,
+		getGlobalAccountData,
+		getGlobalAccountDataSince,
+		getKeyBackupKeys,
+		getKeyBackupVersion,
+		getLatestEdit,
+		getLoginToken,
+		getMedia,
+		getMemberEvents,
+		getOneTimeKeyCounts,
+		getOpenIdToken,
+		getPendingFederationDestinations,
+		getPendingFederationEdus,
+		getProfile,
+		getPublicRoomIds,
+		getPushers,
+		getReceipts,
+		getRelatedEvents,
+		getRoom,
+		getRoomAccountData,
+		getRoomAccountDataSince,
+		getRoomByAlias,
+		getRoomPartialState,
+		getRoomsForUser,
+		getRoomsForUserWithMembership,
+		getRoomUnPartialStatedAt,
+		getRoomVisibility,
+		getServerKeys,
+		getServersInRoom,
+		getSessionByAccessToken,
+		getSessionByRefreshToken,
+		getSessionsByUser,
+		getStateAtEvent,
+		getStateEvent,
+		getStreamPosition,
+		getStrippedState,
+		getThreadRoots,
+		getThreadSummary,
+		getThreePids,
+		getToDeviceMessages,
+		getTxnEventId,
+		getUIAASession,
+		getUserById,
+		getUserByLocalpart,
+		getVerificationSession,
+		importRoomState,
+		markRoomPartialState,
+		putKeyBackupKeys,
+		recordDeviceKeyChange,
+		recordPartialStateDevicePoke,
+		recordPartialStateEvent,
+		reserveMedia,
+		rotateToken,
+		searchRoomEvents,
+		searchUserDirectory,
+		sendToDevice,
+		setAvatarUrl,
+		setCrossSigningKeys,
+		setDeviceKeys,
+		setDisplayName,
+		setFallbackKeys,
+		setFederationTxn,
+		setGlobalAccountData,
+		setPusher,
+		setReceipt,
+		setRoomAccountData,
+		setRoomVisibility,
+		setStateEvent,
+		setStateEventHistorical,
+		setTxnEventId,
+		storeCrossSigningSignatures,
+		storeEvent,
+		storeLoginToken,
+		storeMedia,
+		storeOpenIdToken,
+		storeRelation,
+		storeReport,
+		storeServerKeys,
+		storeVerificationToken,
+		takePartialStateDevicePokes,
+		takePartialStateEvents,
+		touchSession,
+		unrejectEvent,
+		updateDeviceDisplayName,
+		updateEvent,
+		updateKeyBackupVersion,
+		updateMediaContent,
+		updatePassword,
+		validateVerificationToken,
+		waitForPartialStateClear,
+		waitForEvents: eph.waitForEvents,
+		setTyping: eph.setTyping,
+		getTypingUsers: eph.getTypingUsers,
+		getTypingChangedAt: eph.getTypingChangedAt,
+		setPresence: eph.setPresence,
+		getPresenceChangedAt: eph.getPresenceChangedAt,
+		getPresence: eph.getPresence,
+	};
+};

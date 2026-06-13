@@ -7,8 +7,8 @@ import { registerRoutes } from "./routes.ts";
 import { generateSigningKey, importSigningKey } from "./signing.ts";
 import type { Storage } from "./storage/interface.ts";
 import { createMemoryStorage } from "./storage/memory.ts";
-import { MysqlStorage } from "./storage/mysql.ts";
-import { PostgresStorage } from "./storage/postgres.ts";
+import { createMysqlStorage } from "./storage/mysql.ts";
+import { createPostgresStorage } from "./storage/postgres.ts";
 import { createSqliteStorage } from "./storage/sqlite.ts";
 
 const PORT = parseInt(process.env.PORT ?? "8008", 10);
@@ -41,10 +41,10 @@ if (STORAGE_TYPE === "memory") {
 	storage = createSqliteStorage(DATABASE_PATH);
 } else if (STORAGE_TYPE === "postgres") {
 	console.log(`Using PostgreSQL storage at ${DATABASE_URL}`);
-	storage = await PostgresStorage.create(DATABASE_URL);
+	storage = await createPostgresStorage(DATABASE_URL);
 } else if (STORAGE_TYPE === "mysql") {
 	console.log(`Using MySQL/MariaDB storage at ${DATABASE_URL}`);
-	storage = await MysqlStorage.create(DATABASE_URL);
+	storage = await createMysqlStorage(DATABASE_URL);
 } else {
 	console.log(`Unknown storage type: ${STORAGE_TYPE}, falling back to SQLite`);
 	storage = createSqliteStorage(DATABASE_PATH);

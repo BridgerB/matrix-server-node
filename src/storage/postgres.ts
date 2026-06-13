@@ -37,7 +37,7 @@ import type { Pusher } from "../types/push.ts";
 import type { RoomVersion } from "../types/room-versions.ts";
 import type { Device, UserProfile } from "../types/user.ts";
 import {
-	EphemeralMixin,
+	createEphemeralStore,
 	eventToStrippedState,
 	INVITE_STATE_TYPES,
 } from "./ephemeral.ts";
@@ -48,23 +48,14 @@ import {
 } from "./interface.ts";
 import { rowToSession, rowToUser } from "./sql-helpers.ts";
 
-export class PostgresStorage extends EphemeralMixin implements Storage {
-	private pool: pg.Pool;
+export const createPostgresStorage = async (
+	connectionString: string,
+): Promise<Storage> => {
+	const eph = createEphemeralStore();
+	let pool: pg.Pool;
 
-	private constructor(pool: pg.Pool) {
-		super();
-		this.pool = pool;
-	}
-
-	static async create(connectionString: string): Promise<PostgresStorage> {
-		const pool = new pg.Pool({ connectionString, max: 20 });
-		const storage = new PostgresStorage(pool);
-		await storage.init();
-		return storage;
-	}
-
-	private async init(): Promise<void> {
-		await this.pool.query(`
+	const init = async (): Promise<void> => {
+		await pool.query(`
 			CREATE TABLE IF NOT EXISTS users (
 				user_id TEXT PRIMARY KEY,
 				localpart TEXT UNIQUE NOT NULL,
@@ -323,7 +314,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 
 		const {
 			rows: [maxPos],
-		} = await this.pool.query<{ m: string | null }>(
+		} = await pool.query<{ m: string | null }>(
 			`SELECT MAX(m) AS m FROM (
 				SELECT MAX(stream_pos) AS m FROM events
 				UNION ALL SELECT MAX(stream_pos) FROM global_account_data
@@ -331,18 +322,18 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				UNION ALL SELECT MAX(stream_pos) FROM device_list_stream
 			) sub`,
 		);
-		this.streamCounter = maxPos?.m ? parseInt(maxPos.m, 10) : 0;
+		eph.streamCounter = maxPos?.m ? parseInt(maxPos.m, 10) : 0;
 
 		const {
 			rows: [maxFilter],
-		} = await this.pool.query<{ m: string | null }>(
+		} = await pool.query<{ m: string | null }>(
 			"SELECT MAX(filter_id) AS m FROM filters",
 		);
-		this.filterCounter = maxFilter?.m ? parseInt(maxFilter.m, 10) : 0;
-	}
+		eph.filterCounter = maxFilter?.m ? parseInt(maxFilter.m, 10) : 0;
+	};
 
-	async createUser(account: UserAccount): Promise<void> {
-		await this.pool.query(
+	const createUser = async (account: UserAccount): Promise<void> => {
+		await pool.query(
 			`INSERT INTO users (user_id, localpart, server_name, password_hash, account_type, is_deactivated, created_at, displayname, avatar_url)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			 ON CONFLICT (user_id) DO UPDATE SET
@@ -361,28 +352,30 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				account.avatar_url ?? null,
 			],
 		);
-	}
+	};
 
-	async getUserByLocalpart(
+	const getUserByLocalpart = async (
 		localpart: string,
-	): Promise<UserAccount | undefined> {
-		const { rows } = await this.pool.query(
+	): Promise<UserAccount | undefined> => {
+		const { rows } = await pool.query(
 			"SELECT * FROM users WHERE localpart = $1",
 			[localpart],
 		);
 		return rows[0] ? rowToUser(rows[0]) : undefined;
-	}
+	};
 
-	async getUserById(userId: UserId): Promise<UserAccount | undefined> {
-		const { rows } = await this.pool.query(
+	const getUserById = async (
+		userId: UserId,
+	): Promise<UserAccount | undefined> => {
+		const { rows } = await pool.query(
 			"SELECT * FROM users WHERE user_id = $1",
 			[userId],
 		);
 		return rows[0] ? rowToUser(rows[0]) : undefined;
-	}
+	};
 
-	async createSession(session: StoredSession): Promise<void> {
-		await this.pool.query(
+	const createSession = async (session: StoredSession): Promise<void> => {
+		await pool.query(
 			`INSERT INTO sessions (access_token, refresh_token, device_id, user_id, access_token_hash, expires_at, display_name, last_seen_ip, last_seen_ts, user_agent)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			 ON CONFLICT (access_token) DO UPDATE SET
@@ -402,109 +395,112 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				session.user_agent ?? null,
 			],
 		);
-	}
+	};
 
-	async getSessionByAccessToken(
+	const getSessionByAccessToken = async (
 		token: AccessToken,
-	): Promise<StoredSession | undefined> {
-		const { rows } = await this.pool.query(
+	): Promise<StoredSession | undefined> => {
+		const { rows } = await pool.query(
 			"SELECT * FROM sessions WHERE access_token = $1",
 			[token],
 		);
 		return rows[0] ? rowToSession(rows[0]) : undefined;
-	}
+	};
 
-	async getSessionByRefreshToken(
+	const getSessionByRefreshToken = async (
 		token: RefreshToken,
-	): Promise<StoredSession | undefined> {
-		const { rows } = await this.pool.query(
+	): Promise<StoredSession | undefined> => {
+		const { rows } = await pool.query(
 			"SELECT * FROM sessions WHERE refresh_token = $1",
 			[token],
 		);
 		return rows[0] ? rowToSession(rows[0]) : undefined;
-	}
+	};
 
-	async getSessionsByUser(userId: UserId): Promise<StoredSession[]> {
-		const { rows } = await this.pool.query(
+	const getSessionsByUser = async (
+		userId: UserId,
+	): Promise<StoredSession[]> => {
+		const { rows } = await pool.query(
 			"SELECT * FROM sessions WHERE user_id = $1",
 			[userId],
 		);
 		return rows.map((r) => rowToSession(r));
-	}
+	};
 
-	async deleteSession(token: AccessToken): Promise<void> {
-		await this.pool.query("DELETE FROM sessions WHERE access_token = $1", [
-			token,
-		]);
-	}
+	const deleteSession = async (token: AccessToken): Promise<void> => {
+		await pool.query("DELETE FROM sessions WHERE access_token = $1", [token]);
+	};
 
-	async deleteAllSessions(userId: UserId): Promise<void> {
-		await this.pool.query("DELETE FROM sessions WHERE user_id = $1", [userId]);
-	}
+	const deleteAllSessions = async (userId: UserId): Promise<void> => {
+		await pool.query("DELETE FROM sessions WHERE user_id = $1", [userId]);
+	};
 
-	async rotateToken(
+	const rotateToken = async (
 		oldAccessToken: AccessToken,
 		newAccessToken: AccessToken,
 		newRefreshToken?: RefreshToken,
 		expiresAt?: Timestamp,
-	): Promise<StoredSession | undefined> {
-		const session = await this.getSessionByAccessToken(oldAccessToken);
+	): Promise<StoredSession | undefined> => {
+		const session = await getSessionByAccessToken(oldAccessToken);
 		if (!session) return undefined;
-		await this.deleteSession(oldAccessToken);
+		await deleteSession(oldAccessToken);
 		const updated: StoredSession = {
 			...session,
 			access_token: newAccessToken,
 			refresh_token: newRefreshToken,
 			expires_at: expiresAt,
 		};
-		await this.createSession(updated);
+		await createSession(updated);
 		return updated;
-	}
+	};
 
-	async touchSession(
+	const touchSession = async (
 		token: AccessToken,
 		ip: string,
 		userAgent: string,
-	): Promise<void> {
-		await this.pool.query(
+	): Promise<void> => {
+		await pool.query(
 			"UPDATE sessions SET last_seen_ip = $1, last_seen_ts = $2, user_agent = $3 WHERE access_token = $4",
 			[ip, Date.now(), userAgent, token],
 		);
-	}
+	};
 
-	async createUIAASession(sessionId: string): Promise<void> {
-		await this.pool.query(
+	const createUIAASession = async (sessionId: string): Promise<void> => {
+		await pool.query(
 			"INSERT INTO uiaa_sessions (session_id, completed) VALUES ($1, '[]'::jsonb) ON CONFLICT (session_id) DO UPDATE SET completed = '[]'::jsonb",
 			[sessionId],
 		);
-	}
+	};
 
-	async getUIAASession(
+	const getUIAASession = async (
 		sessionId: string,
-	): Promise<{ completed: string[] } | undefined> {
-		const { rows } = await this.pool.query(
+	): Promise<{ completed: string[] } | undefined> => {
+		const { rows } = await pool.query(
 			"SELECT completed FROM uiaa_sessions WHERE session_id = $1",
 			[sessionId],
 		);
 		if (!rows[0]) return undefined;
 		return { completed: rows[0].completed };
-	}
+	};
 
-	async addUIAACompleted(sessionId: string, stageType: string): Promise<void> {
-		await this.pool.query(
+	const addUIAACompleted = async (
+		sessionId: string,
+		stageType: string,
+	): Promise<void> => {
+		await pool.query(
 			"UPDATE uiaa_sessions SET completed = completed || $1::jsonb WHERE session_id = $2",
 			[JSON.stringify([stageType]), sessionId],
 		);
-	}
+	};
 
-	async deleteUIAASession(sessionId: string): Promise<void> {
-		await this.pool.query("DELETE FROM uiaa_sessions WHERE session_id = $1", [
+	const deleteUIAASession = async (sessionId: string): Promise<void> => {
+		await pool.query("DELETE FROM uiaa_sessions WHERE session_id = $1", [
 			sessionId,
 		]);
-	}
+	};
 
-	async createRoom(state: RoomState): Promise<void> {
-		const client = await this.pool.connect();
+	const createRoom = async (state: RoomState): Promise<void> => {
+		const client = await pool.connect();
 		try {
 			await client.query("BEGIN");
 			await client.query(
@@ -533,21 +529,21 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		} finally {
 			client.release();
 		}
-		this.roomCache.set(state.room_id, state);
-	}
+		eph.roomCache.set(state.room_id, state);
+	};
 
-	async getRoom(roomId: RoomId): Promise<RoomState | undefined> {
-		const cached = this.roomCache.get(roomId);
+	const getRoom = async (roomId: RoomId): Promise<RoomState | undefined> => {
+		const cached = eph.roomCache.get(roomId);
 		if (cached) return cached;
 
-		const { rows } = await this.pool.query(
+		const { rows } = await pool.query(
 			"SELECT * FROM rooms WHERE room_id = $1",
 			[roomId],
 		);
 		if (!rows[0]) return undefined;
 		const row = rows[0];
 
-		const { rows: stateRows } = await this.pool.query(
+		const { rows: stateRows } = await pool.query(
 			"SELECT event_type, state_key, event_json FROM state_events WHERE room_id = $1",
 			[roomId],
 		);
@@ -563,62 +559,62 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			depth: row.depth,
 			forward_extremities: row.forward_extremities,
 		};
-		this.roomCache.set(roomId, room);
+		eph.roomCache.set(roomId, room);
 		return room;
-	}
+	};
 
-	async getRoomsForUser(userId: UserId): Promise<RoomId[]> {
-		const { rows } = await this.pool.query(
+	const getRoomsForUser = async (userId: UserId): Promise<RoomId[]> => {
+		const { rows } = await pool.query(
 			"SELECT room_id FROM state_events WHERE event_type = 'm.room.member' AND state_key = $1 AND event_json->'content'->>'membership' = 'join'",
 			[userId],
 		);
 		return rows.map((r) => r.room_id as RoomId);
-	}
+	};
 
-	async storeEvent(event: PDU, eventId: EventId): Promise<void> {
-		this.streamCounter++;
-		await this.pool.query(
+	const storeEvent = async (event: PDU, eventId: EventId): Promise<void> => {
+		eph.streamCounter++;
+		await pool.query(
 			`INSERT INTO events (event_id, room_id, stream_pos, event_json) VALUES ($1, $2, $3, $4)
 			 ON CONFLICT (event_id) DO UPDATE SET room_id = EXCLUDED.room_id, stream_pos = EXCLUDED.stream_pos, event_json = EXCLUDED.event_json`,
-			[eventId, event.room_id, this.streamCounter, JSON.stringify(event)],
+			[eventId, event.room_id, eph.streamCounter, JSON.stringify(event)],
 		);
-		this.wakeWaiters();
-	}
+		eph.wakeWaiters();
+	};
 
-	async updateEvent(eventId: EventId, event: PDU): Promise<void> {
-		await this.pool.query(
-			"UPDATE events SET event_json = $1 WHERE event_id = $2",
-			[JSON.stringify(event), eventId],
-		);
-	}
+	const updateEvent = async (eventId: EventId, event: PDU): Promise<void> => {
+		await pool.query("UPDATE events SET event_json = $1 WHERE event_id = $2", [
+			JSON.stringify(event),
+			eventId,
+		]);
+	};
 
-	async getEvent(
+	const getEvent = async (
 		eventId: EventId,
-	): Promise<{ event: PDU; eventId: EventId } | undefined> {
-		const { rows } = await this.pool.query(
+	): Promise<{ event: PDU; eventId: EventId } | undefined> => {
+		const { rows } = await pool.query(
 			"SELECT event_id, event_json FROM events WHERE event_id = $1",
 			[eventId],
 		);
 		if (!rows[0]) return undefined;
 		return { event: rows[0].event_json, eventId: rows[0].event_id as EventId };
-	}
+	};
 
-	async getEventsByRoom(
+	const getEventsByRoom = async (
 		roomId: RoomId,
 		limit: number,
 		from?: number,
 		direction: "b" | "f" = "f",
-	): Promise<{ events: { event: PDU; eventId: EventId }[]; end?: number }> {
-		const fromPos = from ?? (direction === "f" ? 0 : this.streamCounter + 1);
+	): Promise<{ events: { event: PDU; eventId: EventId }[]; end?: number }> => {
+		const fromPos = from ?? (direction === "f" ? 0 : eph.streamCounter + 1);
 		let rows: { event_id: string; event_json: PDU; stream_pos: string }[];
 
 		if (direction === "f") {
-			({ rows } = await this.pool.query(
+			({ rows } = await pool.query(
 				"SELECT event_id, event_json, stream_pos FROM events WHERE room_id = $1 AND stream_pos > $2 ORDER BY stream_pos ASC LIMIT $3",
 				[roomId, fromPos, limit],
 			));
 		} else {
-			({ rows } = await this.pool.query(
+			({ rows } = await pool.query(
 				"SELECT event_id, event_json, stream_pos FROM events WHERE room_id = $1 AND stream_pos < $2 ORDER BY stream_pos DESC LIMIT $3",
 				[roomId, fromPos, limit],
 			));
@@ -633,29 +629,29 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			? parseInt(lastRow.stream_pos as string, 10)
 			: undefined;
 		return { events, end };
-	}
+	};
 
-	async getStreamPosition(): Promise<number> {
-		return this.streamCounter;
-	}
+	const getStreamPosition = async (): Promise<number> => {
+		return eph.streamCounter;
+	};
 
-	async getStateEvent(
+	const getStateEvent = async (
 		roomId: RoomId,
 		eventType: string,
 		stateKey: string,
-	): Promise<{ event: PDU; eventId: EventId } | undefined> {
-		const { rows } = await this.pool.query(
+	): Promise<{ event: PDU; eventId: EventId } | undefined> => {
+		const { rows } = await pool.query(
 			"SELECT event_id, event_json FROM state_events WHERE room_id = $1 AND event_type = $2 AND state_key = $3",
 			[roomId, eventType, stateKey],
 		);
 		if (!rows[0]) return undefined;
 		return { event: rows[0].event_json, eventId: rows[0].event_id as EventId };
-	}
+	};
 
-	async getAllState(
+	const getAllState = async (
 		roomId: RoomId,
-	): Promise<{ event: PDU; eventId: EventId }[]> {
-		const { rows } = await this.pool.query(
+	): Promise<{ event: PDU; eventId: EventId }[]> => {
+		const { rows } = await pool.query(
 			"SELECT event_id, event_json FROM state_events WHERE room_id = $1",
 			[roomId],
 		);
@@ -663,14 +659,14 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			event: r.event_json,
 			eventId: r.event_id as EventId,
 		}));
-	}
+	};
 
-	async setStateEvent(
+	const setStateEvent = async (
 		roomId: RoomId,
 		event: PDU,
 		eventId: EventId,
-	): Promise<void> {
-		await this.pool.query(
+	): Promise<void> => {
+		await pool.query(
 			`INSERT INTO state_events (room_id, event_type, state_key, event_id, event_json) VALUES ($1, $2, $3, $4, $5)
 			 ON CONFLICT (room_id, event_type, state_key) DO UPDATE SET event_id = EXCLUDED.event_id, event_json = EXCLUDED.event_json`,
 			[
@@ -682,19 +678,19 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			],
 		);
 
-		const cached = this.roomCache.get(roomId);
+		const cached = eph.roomCache.get(roomId);
 		if (cached) {
 			const key = `${event.type}\x1f${event.state_key ?? ""}`;
 			cached.state_events.set(key, event);
 		}
 
-		await this.storeEvent(event, eventId);
-	}
+		await storeEvent(event, eventId);
+	};
 
-	async getMemberEvents(
+	const getMemberEvents = async (
 		roomId: RoomId,
-	): Promise<{ event: PDU; eventId: EventId }[]> {
-		const { rows } = await this.pool.query(
+	): Promise<{ event: PDU; eventId: EventId }[]> => {
+		const { rows } = await pool.query(
 			"SELECT event_id, event_json FROM state_events WHERE room_id = $1 AND event_type = 'm.room.member'",
 			[roomId],
 		);
@@ -702,55 +698,55 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			event: r.event_json,
 			eventId: r.event_id as EventId,
 		}));
-	}
+	};
 
-	async getTxnEventId(
+	const getTxnEventId = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		txnId: string,
-	): Promise<EventId | undefined> {
-		const { rows } = await this.pool.query(
+	): Promise<EventId | undefined> => {
+		const { rows } = await pool.query(
 			"SELECT event_id FROM txn_map WHERE user_id = $1 AND device_id = $2 AND txn_id = $3",
 			[userId, deviceId, txnId],
 		);
 		return rows[0] ? (rows[0].event_id as EventId) : undefined;
-	}
+	};
 
-	async setTxnEventId(
+	const setTxnEventId = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		txnId: string,
 		eventId: EventId,
-	): Promise<void> {
-		await this.pool.query(
+	): Promise<void> => {
+		await pool.query(
 			"INSERT INTO txn_map (user_id, device_id, txn_id, event_id) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, device_id, txn_id) DO UPDATE SET event_id = EXCLUDED.event_id",
 			[userId, deviceId, txnId, eventId],
 		);
-	}
+	};
 
-	async getRoomsForUserWithMembership(
+	const getRoomsForUserWithMembership = async (
 		userId: UserId,
-	): Promise<{ roomId: RoomId; membership: string }[]> {
-		const { rows } = await this.pool.query(
+	): Promise<{ roomId: RoomId; membership: string }[]> => {
+		const { rows } = await pool.query(
 			"SELECT room_id, event_json->'content'->>'membership' AS membership FROM state_events WHERE event_type = 'm.room.member' AND state_key = $1",
 			[userId],
 		);
 		return rows
 			.filter((r) => r.membership)
 			.map((r) => ({ roomId: r.room_id as RoomId, membership: r.membership }));
-	}
+	};
 
-	async getEventsByRoomSince(
+	const getEventsByRoomSince = async (
 		roomId: RoomId,
 		since: number,
 		limit: number,
 	): Promise<{
 		events: { event: PDU; eventId: EventId; streamPos: number }[];
 		limited: boolean;
-	}> {
+	}> => {
 		const {
 			rows: [countRow],
-		} = await this.pool.query(
+		} = await pool.query(
 			"SELECT COUNT(*) AS cnt FROM events WHERE room_id = $1 AND stream_pos > $2",
 			[roomId, since],
 		);
@@ -759,13 +755,13 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 
 		let rows: { event_id: string; event_json: PDU; stream_pos: string }[];
 		if (limited) {
-			({ rows } = await this.pool.query(
+			({ rows } = await pool.query(
 				"SELECT event_id, event_json, stream_pos FROM events WHERE room_id = $1 AND stream_pos > $2 ORDER BY stream_pos DESC LIMIT $3",
 				[roomId, since, limit],
 			));
 			rows.reverse();
 		} else {
-			({ rows } = await this.pool.query(
+			({ rows } = await pool.query(
 				"SELECT event_id, event_json, stream_pos FROM events WHERE room_id = $1 AND stream_pos > $2 ORDER BY stream_pos ASC",
 				[roomId, since],
 			));
@@ -777,10 +773,12 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			streamPos: parseInt(r.stream_pos as string, 10),
 		}));
 		return { events, limited };
-	}
+	};
 
-	async getStrippedState(roomId: RoomId): Promise<StrippedStateEvent[]> {
-		const { rows } = await this.pool.query(
+	const getStrippedState = async (
+		roomId: RoomId,
+	): Promise<StrippedStateEvent[]> => {
+		const { rows } = await pool.query(
 			"SELECT event_json FROM state_events WHERE room_id = $1 AND event_type = ANY($2)",
 			[roomId, INVITE_STATE_TYPES],
 		);
@@ -788,10 +786,12 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			const event = r.event_json as PDU;
 			return eventToStrippedState(event);
 		});
-	}
+	};
 
-	async getProfile(userId: UserId): Promise<UserProfile | undefined> {
-		const { rows } = await this.pool.query(
+	const getProfile = async (
+		userId: UserId,
+	): Promise<UserProfile | undefined> => {
+		const { rows } = await pool.query(
 			"SELECT displayname, avatar_url FROM users WHERE user_id = $1",
 			[userId],
 		);
@@ -800,30 +800,33 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		if (rows[0].displayname) profile.displayname = rows[0].displayname;
 		if (rows[0].avatar_url) profile.avatar_url = rows[0].avatar_url;
 		return profile;
-	}
+	};
 
-	async setDisplayName(
+	const setDisplayName = async (
 		userId: UserId,
 		displayname: string | null,
-	): Promise<void> {
-		await this.pool.query(
-			"UPDATE users SET displayname = $1 WHERE user_id = $2",
-			[displayname, userId],
-		);
-	}
+	): Promise<void> => {
+		await pool.query("UPDATE users SET displayname = $1 WHERE user_id = $2", [
+			displayname,
+			userId,
+		]);
+	};
 
-	async setAvatarUrl(userId: UserId, avatarUrl: string | null): Promise<void> {
-		await this.pool.query(
-			"UPDATE users SET avatar_url = $1 WHERE user_id = $2",
-			[avatarUrl, userId],
-		);
-	}
+	const setAvatarUrl = async (
+		userId: UserId,
+		avatarUrl: string | null,
+	): Promise<void> => {
+		await pool.query("UPDATE users SET avatar_url = $1 WHERE user_id = $2", [
+			avatarUrl,
+			userId,
+		]);
+	};
 
-	async getDevice(
+	const getDevice = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<Device | undefined> {
-		const { rows } = await this.pool.query(
+	): Promise<Device | undefined> => {
+		const { rows } = await pool.query(
 			"SELECT device_id, display_name, last_seen_ip, last_seen_ts FROM sessions WHERE user_id = $1 AND device_id = $2 LIMIT 1",
 			[userId, deviceId],
 		);
@@ -836,10 +839,10 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				? Number(rows[0].last_seen_ts)
 				: undefined,
 		};
-	}
+	};
 
-	async getAllDevices(userId: UserId): Promise<Device[]> {
-		const { rows } = await this.pool.query(
+	const getAllDevices = async (userId: UserId): Promise<Device[]> => {
+		const { rows } = await pool.query(
 			"SELECT DISTINCT ON (device_id) device_id, display_name, last_seen_ip, last_seen_ts FROM sessions WHERE user_id = $1",
 			[userId],
 		);
@@ -849,221 +852,234 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			last_seen_ip: r.last_seen_ip ?? undefined,
 			last_seen_ts: r.last_seen_ts ? Number(r.last_seen_ts) : undefined,
 		}));
-	}
+	};
 
-	async updateDeviceDisplayName(
+	const updateDeviceDisplayName = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		displayName: string,
-	): Promise<void> {
-		await this.pool.query(
+	): Promise<void> => {
+		await pool.query(
 			"UPDATE sessions SET display_name = $1 WHERE user_id = $2 AND device_id = $3",
 			[displayName, userId, deviceId],
 		);
-	}
+	};
 
-	async deleteDeviceSession(userId: UserId, deviceId: DeviceId): Promise<void> {
-		await this.pool.query(
+	const deleteDeviceSession = async (
+		userId: UserId,
+		deviceId: DeviceId,
+	): Promise<void> => {
+		await pool.query(
 			"DELETE FROM sessions WHERE user_id = $1 AND device_id = $2",
 			[userId, deviceId],
 		);
-	}
+	};
 
-	async updatePassword(userId: UserId, newPasswordHash: string): Promise<void> {
-		await this.pool.query(
-			"UPDATE users SET password_hash = $1 WHERE user_id = $2",
-			[newPasswordHash, userId],
-		);
-	}
+	const updatePassword = async (
+		userId: UserId,
+		newPasswordHash: string,
+	): Promise<void> => {
+		await pool.query("UPDATE users SET password_hash = $1 WHERE user_id = $2", [
+			newPasswordHash,
+			userId,
+		]);
+	};
 
-	async deactivateUser(userId: UserId): Promise<void> {
-		await this.pool.query(
+	const deactivateUser = async (userId: UserId): Promise<void> => {
+		await pool.query(
 			"UPDATE users SET is_deactivated = TRUE WHERE user_id = $1",
 			[userId],
 		);
-		await this.deleteAllSessions(userId);
-	}
+		await deleteAllSessions(userId);
+	};
 
-	async createRoomAlias(
+	const createRoomAlias = async (
 		roomAlias: RoomAlias,
 		roomId: RoomId,
 		servers: ServerName[],
 		creator: UserId,
-	): Promise<void> {
-		await this.pool.query(
+	): Promise<void> => {
+		await pool.query(
 			"INSERT INTO room_aliases (room_alias, room_id, servers, creator) VALUES ($1, $2, $3, $4) ON CONFLICT (room_alias) DO UPDATE SET room_id = EXCLUDED.room_id, servers = EXCLUDED.servers, creator = EXCLUDED.creator",
 			[roomAlias, roomId, JSON.stringify(servers), creator],
 		);
-	}
+	};
 
-	async deleteRoomAlias(roomAlias: RoomAlias): Promise<boolean> {
-		const result = await this.pool.query(
+	const deleteRoomAlias = async (roomAlias: RoomAlias): Promise<boolean> => {
+		const result = await pool.query(
 			"DELETE FROM room_aliases WHERE room_alias = $1",
 			[roomAlias],
 		);
 		return (result.rowCount ?? 0) > 0;
-	}
+	};
 
-	async getRoomByAlias(
+	const getRoomByAlias = async (
 		roomAlias: RoomAlias,
-	): Promise<{ room_id: RoomId; servers: ServerName[] } | undefined> {
-		const { rows } = await this.pool.query(
+	): Promise<{ room_id: RoomId; servers: ServerName[] } | undefined> => {
+		const { rows } = await pool.query(
 			"SELECT room_id, servers FROM room_aliases WHERE room_alias = $1",
 			[roomAlias],
 		);
 		if (!rows[0]) return undefined;
 		return { room_id: rows[0].room_id as RoomId, servers: rows[0].servers };
-	}
+	};
 
-	async getAliasesForRoom(roomId: RoomId): Promise<RoomAlias[]> {
-		const { rows } = await this.pool.query(
+	const getAliasesForRoom = async (roomId: RoomId): Promise<RoomAlias[]> => {
+		const { rows } = await pool.query(
 			"SELECT room_alias FROM room_aliases WHERE room_id = $1",
 			[roomId],
 		);
 		return rows.map((r) => r.room_alias as RoomAlias);
-	}
+	};
 
-	async getAliasCreator(roomAlias: RoomAlias): Promise<UserId | undefined> {
-		const { rows } = await this.pool.query(
+	const getAliasCreator = async (
+		roomAlias: RoomAlias,
+	): Promise<UserId | undefined> => {
+		const { rows } = await pool.query(
 			"SELECT creator FROM room_aliases WHERE room_alias = $1",
 			[roomAlias],
 		);
 		return rows[0] ? (rows[0].creator as UserId) : undefined;
-	}
+	};
 
-	async setRoomVisibility(
+	const setRoomVisibility = async (
 		roomId: RoomId,
 		visibility: "public" | "private",
-	): Promise<void> {
-		await this.pool.query(
+	): Promise<void> => {
+		await pool.query(
 			"INSERT INTO room_directory (room_id, visibility) VALUES ($1, $2) ON CONFLICT (room_id) DO UPDATE SET visibility = EXCLUDED.visibility",
 			[roomId, visibility],
 		);
-	}
+	};
 
-	async getRoomVisibility(roomId: RoomId): Promise<"public" | "private"> {
-		const { rows } = await this.pool.query(
+	const getRoomVisibility = async (
+		roomId: RoomId,
+	): Promise<"public" | "private"> => {
+		const { rows } = await pool.query(
 			"SELECT visibility FROM room_directory WHERE room_id = $1",
 			[roomId],
 		);
 		return (rows[0]?.visibility as "public" | "private") ?? "private";
-	}
+	};
 
-	async getPublicRoomIds(): Promise<RoomId[]> {
-		const { rows } = await this.pool.query(
+	const getPublicRoomIds = async (): Promise<RoomId[]> => {
+		const { rows } = await pool.query(
 			"SELECT room_id FROM room_directory WHERE visibility = 'public'",
 		);
 		return rows.map((r) => r.room_id as RoomId);
-	}
+	};
 
-	async getGlobalAccountData(
+	const getGlobalAccountData = async (
 		userId: UserId,
 		type: string,
-	): Promise<JsonObject | undefined> {
-		const { rows } = await this.pool.query(
+	): Promise<JsonObject | undefined> => {
+		const { rows } = await pool.query(
 			"SELECT content FROM global_account_data WHERE user_id = $1 AND type = $2",
 			[userId, type],
 		);
 		return rows[0]?.content ?? undefined;
-	}
+	};
 
-	async setGlobalAccountData(
+	const setGlobalAccountData = async (
 		userId: UserId,
 		type: string,
 		content: JsonObject,
-	): Promise<void> {
-		await this.pool.query(
+	): Promise<void> => {
+		await pool.query(
 			"INSERT INTO global_account_data (user_id, type, content, stream_pos) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, type) DO UPDATE SET content = EXCLUDED.content, stream_pos = EXCLUDED.stream_pos",
-			[userId, type, JSON.stringify(content), ++this.streamCounter],
+			[userId, type, JSON.stringify(content), ++eph.streamCounter],
 		);
-		this.wakeWaiters();
-	}
+		eph.wakeWaiters();
+	};
 
-	async getAllGlobalAccountData(
+	const getAllGlobalAccountData = async (
 		userId: UserId,
-	): Promise<{ type: string; content: JsonObject }[]> {
-		const { rows } = await this.pool.query(
+	): Promise<{ type: string; content: JsonObject }[]> => {
+		const { rows } = await pool.query(
 			// Exclude MSC3391 deletion tombstones (content '{}') from initial sync.
 			"SELECT type, content FROM global_account_data WHERE user_id = $1 AND content <> '{}'::jsonb",
 			[userId],
 		);
 		return rows.map((r) => ({ type: r.type, content: r.content }));
-	}
+	};
 
-	async getGlobalAccountDataSince(
+	const getGlobalAccountDataSince = async (
 		userId: UserId,
 		since: number,
-	): Promise<{ type: string; content: JsonObject }[]> {
-		const { rows } = await this.pool.query(
+	): Promise<{ type: string; content: JsonObject }[]> => {
+		const { rows } = await pool.query(
 			// Include tombstones so incremental sync surfaces deletions.
 			"SELECT type, content FROM global_account_data WHERE user_id = $1 AND stream_pos > $2",
 			[userId, since],
 		);
 		return rows.map((r) => ({ type: r.type, content: r.content }));
-	}
+	};
 
-	async getRoomAccountData(
+	const getRoomAccountData = async (
 		userId: UserId,
 		roomId: RoomId,
 		type: string,
-	): Promise<JsonObject | undefined> {
-		const { rows } = await this.pool.query(
+	): Promise<JsonObject | undefined> => {
+		const { rows } = await pool.query(
 			"SELECT content FROM room_account_data WHERE user_id = $1 AND room_id = $2 AND type = $3",
 			[userId, roomId, type],
 		);
 		return rows[0]?.content ?? undefined;
-	}
+	};
 
-	async setRoomAccountData(
+	const setRoomAccountData = async (
 		userId: UserId,
 		roomId: RoomId,
 		type: string,
 		content: JsonObject,
-	): Promise<void> {
-		await this.pool.query(
+	): Promise<void> => {
+		await pool.query(
 			"INSERT INTO room_account_data (user_id, room_id, type, content, stream_pos) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (user_id, room_id, type) DO UPDATE SET content = EXCLUDED.content, stream_pos = EXCLUDED.stream_pos",
-			[userId, roomId, type, JSON.stringify(content), ++this.streamCounter],
+			[userId, roomId, type, JSON.stringify(content), ++eph.streamCounter],
 		);
-		this.wakeWaiters();
-	}
-	async deleteGlobalAccountData(userId: UserId, type: string): Promise<void> {
+		eph.wakeWaiters();
+	};
+	const deleteGlobalAccountData = async (
+		userId: UserId,
+		type: string,
+	): Promise<void> => {
 		// MSC3391: leave a tombstone (content '{}') with a fresh stream position
 		// rather than removing the row, so incremental sync can surface it.
-		await this.pool.query(
+		await pool.query(
 			"INSERT INTO global_account_data (user_id, type, content, stream_pos) VALUES ($1, $2, '{}'::jsonb, $3) ON CONFLICT (user_id, type) DO UPDATE SET content = EXCLUDED.content, stream_pos = EXCLUDED.stream_pos",
-			[userId, type, ++this.streamCounter],
+			[userId, type, ++eph.streamCounter],
 		);
-		this.wakeWaiters();
-	}
-	async deleteRoomAccountData(
+		eph.wakeWaiters();
+	};
+	const deleteRoomAccountData = async (
 		userId: UserId,
 		roomId: RoomId,
 		type: string,
-	): Promise<void> {
-		await this.pool.query(
+	): Promise<void> => {
+		await pool.query(
 			"INSERT INTO room_account_data (user_id, room_id, type, content, stream_pos) VALUES ($1, $2, $3, '{}'::jsonb, $4) ON CONFLICT (user_id, room_id, type) DO UPDATE SET content = EXCLUDED.content, stream_pos = EXCLUDED.stream_pos",
-			[userId, roomId, type, ++this.streamCounter],
+			[userId, roomId, type, ++eph.streamCounter],
 		);
-		this.wakeWaiters();
-	}
+		eph.wakeWaiters();
+	};
 
-	async getAllRoomAccountData(
+	const getAllRoomAccountData = async (
 		userId: UserId,
 		roomId: RoomId,
-	): Promise<{ type: string; content: JsonObject }[]> {
-		const { rows } = await this.pool.query(
+	): Promise<{ type: string; content: JsonObject }[]> => {
+		const { rows } = await pool.query(
 			// Exclude MSC3391 deletion tombstones from initial sync.
 			"SELECT type, content FROM room_account_data WHERE user_id = $1 AND room_id = $2 AND content <> '{}'::jsonb",
 			[userId, roomId],
 		);
 		return rows.map((r) => ({ type: r.type, content: r.content }));
-	}
+	};
 
-	async getRoomAccountDataSince(
+	const getRoomAccountDataSince = async (
 		userId: UserId,
 		since: number,
-	): Promise<{ roomId: RoomId; type: string; content: JsonObject }[]> {
-		const { rows } = await this.pool.query(
+	): Promise<{ roomId: RoomId; type: string; content: JsonObject }[]> => {
+		const { rows } = await pool.query(
 			// Include tombstones so incremental sync surfaces deletions.
 			"SELECT room_id, type, content FROM room_account_data WHERE user_id = $1 AND stream_pos > $2",
 			[userId, since],
@@ -1073,24 +1089,26 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			type: r.type,
 			content: r.content,
 		}));
-	}
+	};
 
-	async setReceipt(
+	const setReceipt = async (
 		roomId: RoomId,
 		userId: UserId,
 		eventId: EventId,
 		receiptType: string,
 		ts: Timestamp,
 		threadId?: string,
-	): Promise<void> {
-		await this.pool.query(
+	): Promise<void> => {
+		await pool.query(
 			"INSERT INTO receipts (room_id, user_id, event_id, receipt_type, ts, thread_id) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (room_id, user_id, receipt_type, thread_id) DO UPDATE SET event_id = EXCLUDED.event_id, ts = EXCLUDED.ts",
 			[roomId, userId, eventId, receiptType, ts, threadId ?? ""],
 		);
-		this.wakeWaiters();
-	}
+		eph.wakeWaiters();
+	};
 
-	async getReceipts(roomId: RoomId): Promise<
+	const getReceipts = async (
+		roomId: RoomId,
+	): Promise<
 		{
 			eventId: EventId;
 			receiptType: string;
@@ -1098,8 +1116,8 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			ts: Timestamp;
 			threadId?: string;
 		}[]
-	> {
-		const { rows } = await this.pool.query(
+	> => {
+		const { rows } = await pool.query(
 			"SELECT event_id, receipt_type, user_id, ts, thread_id FROM receipts WHERE room_id = $1",
 			[roomId],
 		);
@@ -1115,10 +1133,13 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 						: (r.thread_id as string),
 			})),
 		);
-	}
+	};
 
-	async storeMedia(media: StoredMedia, data: Buffer): Promise<void> {
-		await this.pool.query(
+	const storeMedia = async (
+		media: StoredMedia,
+		data: Buffer,
+	): Promise<void> => {
+		await pool.query(
 			`INSERT INTO media (origin, media_id, user_id, content_type, upload_name, file_size, content_hash, created_at, quarantined, data)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			 ON CONFLICT (origin, media_id) DO UPDATE SET user_id = EXCLUDED.user_id, content_type = EXCLUDED.content_type, upload_name = EXCLUDED.upload_name,
@@ -1136,13 +1157,13 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				data,
 			],
 		);
-	}
+	};
 
-	async getMedia(
+	const getMedia = async (
 		serverName: ServerName,
 		mediaId: string,
-	): Promise<{ metadata: StoredMedia; data: Buffer } | undefined> {
-		const { rows } = await this.pool.query(
+	): Promise<{ metadata: StoredMedia; data: Buffer } | undefined> => {
+		const { rows } = await pool.query(
 			"SELECT * FROM media WHERE origin = $1 AND media_id = $2",
 			[serverName, mediaId],
 		);
@@ -1162,24 +1183,24 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			},
 			data: row.data,
 		};
-	}
+	};
 
-	async reserveMedia(media: StoredMedia): Promise<void> {
-		await this.storeMedia(media, Buffer.alloc(0));
-	}
+	const reserveMedia = async (media: StoredMedia): Promise<void> => {
+		await storeMedia(media, Buffer.alloc(0));
+	};
 
-	async updateMediaContent(
+	const updateMediaContent = async (
 		serverName: ServerName,
 		mediaId: string,
 		contentType: string,
 		fileName: string | undefined,
 		data: Buffer,
-	): Promise<boolean> {
-		const existing = await this.getMedia(serverName, mediaId);
+	): Promise<boolean> => {
+		const existing = await getMedia(serverName, mediaId);
 		if (!existing) return false;
 		const { createHash } = await import("node:crypto");
 		const hash = createHash("sha256").update(data).digest("base64");
-		await this.pool.query(
+		await pool.query(
 			"UPDATE media SET content_type = $1, upload_name = $2, file_size = $3, content_hash = $4, data = $5 WHERE origin = $6 AND media_id = $7",
 			[
 				contentType,
@@ -1192,91 +1213,95 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			],
 		);
 		return true;
-	}
+	};
 
-	async createFilter(userId: UserId, filter: JsonObject): Promise<string> {
-		const filterId = String(++this.filterCounter);
-		await this.pool.query(
+	const createFilter = async (
+		userId: UserId,
+		filter: JsonObject,
+	): Promise<string> => {
+		const filterId = String(++eph.filterCounter);
+		await pool.query(
 			"INSERT INTO filters (user_id, filter_id, filter_json) VALUES ($1, $2, $3) ON CONFLICT (user_id, filter_id) DO UPDATE SET filter_json = EXCLUDED.filter_json",
 			[userId, filterId, JSON.stringify(filter)],
 		);
 		return filterId;
-	}
+	};
 
-	async getFilter(
+	const getFilter = async (
 		userId: UserId,
 		filterId: string,
-	): Promise<JsonObject | undefined> {
-		const { rows } = await this.pool.query(
+	): Promise<JsonObject | undefined> => {
+		const { rows } = await pool.query(
 			"SELECT filter_json FROM filters WHERE user_id = $1 AND filter_id = $2",
 			[userId, filterId],
 		);
 		return rows[0]?.filter_json ?? undefined;
-	}
+	};
 
-	async setDeviceKeys(
+	const setDeviceKeys = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		keys: DeviceKeys,
-	): Promise<void> {
-		await this.pool.query(
+	): Promise<void> => {
+		await pool.query(
 			"INSERT INTO device_keys (user_id, device_id, keys_json) VALUES ($1, $2, $3) ON CONFLICT (user_id, device_id) DO UPDATE SET keys_json = EXCLUDED.keys_json",
 			[userId, deviceId, JSON.stringify(keys)],
 		);
-		await this.recordDeviceKeyChange(userId);
-	}
+		await recordDeviceKeyChange(userId);
+	};
 
-	async recordDeviceKeyChange(userId: UserId): Promise<void> {
-		await this.pool.query(
+	const recordDeviceKeyChange = async (userId: UserId): Promise<void> => {
+		await pool.query(
 			"INSERT INTO device_list_stream (user_id, stream_pos) VALUES ($1, $2)",
-			[userId, ++this.streamCounter],
+			[userId, ++eph.streamCounter],
 		);
-		this.wakeWaiters();
-	}
+		eph.wakeWaiters();
+	};
 
-	async getChangedDeviceUsers(since: number, until: number): Promise<UserId[]> {
-		const { rows } = await this.pool.query<{ user_id: string }>(
+	const getChangedDeviceUsers = async (
+		since: number,
+		until: number,
+	): Promise<UserId[]> => {
+		const { rows } = await pool.query<{ user_id: string }>(
 			"SELECT DISTINCT user_id FROM device_list_stream WHERE stream_pos > $1 AND stream_pos <= $2",
 			[since, until],
 		);
 		return rows.map((r) => r.user_id as UserId);
-	}
+	};
 
-	async getDeviceKeys(
+	const getDeviceKeys = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<DeviceKeys | undefined> {
-		const { rows } = await this.pool.query(
+	): Promise<DeviceKeys | undefined> => {
+		const { rows } = await pool.query(
 			"SELECT keys_json FROM device_keys WHERE user_id = $1 AND device_id = $2",
 			[userId, deviceId],
 		);
 		return rows[0]?.keys_json ?? undefined;
-	}
+	};
 
-	async getAllDeviceKeys(
+	const getAllDeviceKeys = async (
 		userId: UserId,
-	): Promise<Record<DeviceId, DeviceKeys>> {
-		const { rows } = await this.pool.query(
+	): Promise<Record<DeviceId, DeviceKeys>> => {
+		const { rows } = await pool.query(
 			"SELECT device_id, keys_json FROM device_keys WHERE user_id = $1",
 			[userId],
 		);
 		const result: Record<DeviceId, DeviceKeys> = {};
 		for (const r of rows) result[r.device_id as DeviceId] = r.keys_json;
 		return result;
-	}
+	};
 
-	async deleteDeviceKeys(userId: UserId): Promise<void> {
-		await this.pool.query("DELETE FROM device_keys WHERE user_id = $1", [
-			userId,
-		]);
-	}
+	const deleteDeviceKeys = async (userId: UserId): Promise<void> => {
+		await pool.query("DELETE FROM device_keys WHERE user_id = $1", [userId]);
+	};
 
-	async addOneTimeKeys(
+	const addOneTimeKeys = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		keys: Record<KeyId, string | OneTimeKey>,
-	): Promise<void> {
-		const client = await this.pool.connect();
+	): Promise<void> => {
+		const client = await pool.connect();
 		try {
 			await client.query("BEGIN");
 			for (const [keyId, key] of Object.entries(keys)) {
@@ -1293,21 +1318,21 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		} finally {
 			client.release();
 		}
-	}
+	};
 
-	async claimOneTimeKey(
+	const claimOneTimeKey = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		algorithm: string,
-	): Promise<{ keyId: KeyId; key: string | OneTimeKey } | undefined> {
-		const { rows } = await this.pool.query(
+	): Promise<{ keyId: KeyId; key: string | OneTimeKey } | undefined> => {
+		const { rows } = await pool.query(
 			"DELETE FROM one_time_keys WHERE ctid = (SELECT ctid FROM one_time_keys WHERE user_id = $1 AND device_id = $2 AND algorithm = $3 LIMIT 1) RETURNING key_id, key_json",
 			[userId, deviceId, algorithm],
 		);
 		if (rows[0])
 			return { keyId: rows[0].key_id as KeyId, key: rows[0].key_json };
 
-		const { rows: fallbackRows } = await this.pool.query(
+		const { rows: fallbackRows } = await pool.query(
 			"SELECT key_id, key_json FROM fallback_keys WHERE user_id = $1 AND device_id = $2 AND key_id LIKE $3 LIMIT 1",
 			[userId, deviceId, `${algorithm}:%`],
 		);
@@ -1317,27 +1342,27 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				key: fallbackRows[0].key_json,
 			};
 		return undefined;
-	}
+	};
 
-	async getOneTimeKeyCounts(
+	const getOneTimeKeyCounts = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<Record<string, number>> {
-		const { rows } = await this.pool.query(
+	): Promise<Record<string, number>> => {
+		const { rows } = await pool.query(
 			"SELECT algorithm, COUNT(*)::int AS cnt FROM one_time_keys WHERE user_id = $1 AND device_id = $2 GROUP BY algorithm",
 			[userId, deviceId],
 		);
 		const counts: Record<string, number> = {};
 		for (const r of rows) counts[r.algorithm] = r.cnt;
 		return counts;
-	}
+	};
 
-	async setFallbackKeys(
+	const setFallbackKeys = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		keys: Record<KeyId, string | OneTimeKey>,
-	): Promise<void> {
-		const client = await this.pool.connect();
+	): Promise<void> => {
+		const client = await pool.connect();
 		try {
 			await client.query("BEGIN");
 			await client.query(
@@ -1357,29 +1382,29 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		} finally {
 			client.release();
 		}
-	}
+	};
 
-	async getFallbackKeyTypes(
+	const getFallbackKeyTypes = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<string[]> {
-		const { rows } = await this.pool.query(
+	): Promise<string[]> => {
+		const { rows } = await pool.query(
 			"SELECT DISTINCT key_id FROM fallback_keys WHERE user_id = $1 AND device_id = $2",
 			[userId, deviceId],
 		);
 		const types = new Set<string>();
 		for (const r of rows) types.add(r.key_id.split(":")[0] as string);
 		return [...types];
-	}
+	};
 
-	async setCrossSigningKeys(
+	const setCrossSigningKeys = async (
 		userId: UserId,
 		keys: {
 			master_key?: CrossSigningKey;
 			self_signing_key?: CrossSigningKey;
 			user_signing_key?: CrossSigningKey;
 		},
-	): Promise<void> {
+	): Promise<void> => {
 		const entries: [string, CrossSigningKey][] = [];
 		if (keys.master_key) entries.push(["master_key", keys.master_key]);
 		if (keys.self_signing_key)
@@ -1388,19 +1413,21 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			entries.push(["user_signing_key", keys.user_signing_key]);
 
 		for (const [keyType, key] of entries) {
-			await this.pool.query(
+			await pool.query(
 				"INSERT INTO cross_signing_keys (user_id, key_type, key_json) VALUES ($1, $2, $3) ON CONFLICT (user_id, key_type) DO UPDATE SET key_json = EXCLUDED.key_json",
 				[userId, keyType, JSON.stringify(key)],
 			);
 		}
-	}
+	};
 
-	async getCrossSigningKeys(userId: UserId): Promise<{
+	const getCrossSigningKeys = async (
+		userId: UserId,
+	): Promise<{
 		master_key?: CrossSigningKey;
 		self_signing_key?: CrossSigningKey;
 		user_signing_key?: CrossSigningKey;
-	}> {
-		const { rows } = await this.pool.query(
+	}> => {
+		const { rows } = await pool.query(
 			"SELECT key_type, key_json FROM cross_signing_keys WHERE user_id = $1",
 			[userId],
 		);
@@ -1417,14 +1444,14 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			else if (r.key_type === "user_signing_key") result.user_signing_key = key;
 		}
 		return result;
-	}
+	};
 
-	async storeCrossSigningSignatures(
+	const storeCrossSigningSignatures = async (
 		_userId: UserId,
 		signatures: Record<string, Record<string, JsonObject>>,
 	): Promise<
 		Record<string, Record<string, { errcode: string; error: string }>>
-	> {
+	> => {
 		const failures: Record<
 			string,
 			Record<string, { errcode: string; error: string }>
@@ -1448,7 +1475,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				}
 
 				// Try updating device keys
-				const deviceKeys = await this.getDeviceKeys(
+				const deviceKeys = await getDeviceKeys(
 					targetUserId as UserId,
 					keyId as DeviceId,
 				);
@@ -1461,7 +1488,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 							sigs,
 						);
 					}
-					await this.setDeviceKeys(
+					await setDeviceKeys(
 						targetUserId as UserId,
 						keyId as DeviceId,
 						deviceKeys,
@@ -1470,9 +1497,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				}
 
 				// Try updating cross-signing keys
-				const crossKeys = await this.getCrossSigningKeys(
-					targetUserId as UserId,
-				);
+				const crossKeys = await getCrossSigningKeys(targetUserId as UserId);
 				let matched = false;
 				for (const [crossKeyType, key] of Object.entries(crossKeys) as [
 					string,
@@ -1492,7 +1517,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 								sigs,
 							);
 						}
-						await this.pool.query(
+						await pool.query(
 							"UPDATE cross_signing_keys SET key_json = $1 WHERE user_id = $2 AND key_type = $3",
 							[JSON.stringify(key), targetUserId, crossKeyType],
 						);
@@ -1515,26 +1540,26 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			}
 		}
 		return failures;
-	}
+	};
 
-	async createKeyBackupVersion(
+	const createKeyBackupVersion = async (
 		userId: UserId,
 		algorithm: string,
 		authData: JsonObject,
-	): Promise<string> {
-		const { rows } = await this.pool.query<{ m: string | null }>(
+	): Promise<string> => {
+		const { rows } = await pool.query<{ m: string | null }>(
 			"SELECT MAX(version::int) AS m FROM key_backup_versions WHERE user_id = $1",
 			[userId],
 		);
 		const nextVersion = String((rows[0]?.m ? parseInt(rows[0].m, 10) : 0) + 1);
-		await this.pool.query(
+		await pool.query(
 			"INSERT INTO key_backup_versions (user_id, version, algorithm, auth_data) VALUES ($1, $2, $3, $4)",
 			[userId, nextVersion, algorithm, JSON.stringify(authData)],
 		);
 		return nextVersion;
-	}
+	};
 
-	async getKeyBackupVersion(
+	const getKeyBackupVersion = async (
 		userId: UserId,
 		version?: string,
 	): Promise<
@@ -1546,15 +1571,15 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				etag: string;
 		  }
 		| undefined
-	> {
+	> => {
 		let rows: { version: string; algorithm: string; auth_data: string }[];
 		if (version) {
-			({ rows } = await this.pool.query(
+			({ rows } = await pool.query(
 				"SELECT version, algorithm, auth_data FROM key_backup_versions WHERE user_id = $1 AND version = $2",
 				[userId, version],
 			));
 		} else {
-			({ rows } = await this.pool.query(
+			({ rows } = await pool.query(
 				"SELECT version, algorithm, auth_data FROM key_backup_versions WHERE user_id = $1 ORDER BY version::int DESC LIMIT 1",
 				[userId],
 			));
@@ -1564,7 +1589,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 
 		const {
 			rows: [countRow],
-		} = await this.pool.query<{ cnt: string }>(
+		} = await pool.query<{ cnt: string }>(
 			"SELECT COUNT(*)::int AS cnt FROM key_backup_data WHERE user_id = $1 AND version = $2",
 			[userId, v.version],
 		);
@@ -1578,15 +1603,15 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			algorithm: v.algorithm,
 			auth_data: authData,
 			count,
-			etag: await this.computeBackupEtagPg(userId, v.version),
+			etag: await computeBackupEtagPg(userId, v.version),
 		};
-	}
+	};
 
-	private async computeBackupEtagPg(
+	const computeBackupEtagPg = async (
 		userId: string,
 		version: string,
-	): Promise<string> {
-		const { rows } = await this.pool.query(
+	): Promise<string> => {
+		const { rows } = await pool.query(
 			"SELECT room_id, session_id FROM key_backup_data WHERE user_id = $1 AND version = $2",
 			[userId, version],
 		);
@@ -1598,36 +1623,36 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			}
 		}
 		return String(Math.abs(hash));
-	}
+	};
 
-	async updateKeyBackupVersion(
+	const updateKeyBackupVersion = async (
 		userId: UserId,
 		version: string,
 		authData: JsonObject,
-	): Promise<boolean> {
-		const result = await this.pool.query(
+	): Promise<boolean> => {
+		const result = await pool.query(
 			"UPDATE key_backup_versions SET auth_data = $1 WHERE user_id = $2 AND version = $3",
 			[JSON.stringify(authData), userId, version],
 		);
 		return (result.rowCount ?? 0) > 0;
-	}
+	};
 
-	async deleteKeyBackupVersion(
+	const deleteKeyBackupVersion = async (
 		userId: UserId,
 		version: string,
-	): Promise<boolean> {
-		await this.pool.query(
+	): Promise<boolean> => {
+		await pool.query(
 			"DELETE FROM key_backup_data WHERE user_id = $1 AND version = $2",
 			[userId, version],
 		);
-		const result = await this.pool.query(
+		const result = await pool.query(
 			"DELETE FROM key_backup_versions WHERE user_id = $1 AND version = $2",
 			[userId, version],
 		);
 		return (result.rowCount ?? 0) > 0;
-	}
+	};
 
-	async putKeyBackupKeys(
+	const putKeyBackupKeys = async (
 		userId: UserId,
 		version: string,
 		roomId: RoomId | undefined,
@@ -1638,9 +1663,9 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			| {
 					rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
 			  },
-	): Promise<{ count: number; etag: string } | undefined> {
+	): Promise<{ count: number; etag: string } | undefined> => {
 		// Verify version exists and is latest
-		const { rows: versionRows } = await this.pool.query(
+		const { rows: versionRows } = await pool.query(
 			"SELECT version FROM key_backup_versions WHERE user_id = $1 ORDER BY version::int DESC LIMIT 1",
 			[userId],
 		);
@@ -1666,27 +1691,27 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		}
 
 		for (const [rid, sid, data] of entries) {
-			await this.mergeBackupKeyPg(userId, version, rid, sid, data);
+			await mergeBackupKeyPg(userId, version, rid, sid, data);
 		}
 
 		const {
 			rows: [countRow],
-		} = await this.pool.query<{ cnt: string }>(
+		} = await pool.query<{ cnt: string }>(
 			"SELECT COUNT(*)::int AS cnt FROM key_backup_data WHERE user_id = $1 AND version = $2",
 			[userId, version],
 		);
 		const count = parseInt(countRow!.cnt, 10);
-		return { count, etag: await this.computeBackupEtagPg(userId, version) };
-	}
+		return { count, etag: await computeBackupEtagPg(userId, version) };
+	};
 
-	private async mergeBackupKeyPg(
+	const mergeBackupKeyPg = async (
 		userId: string,
 		version: string,
 		roomId: RoomId,
 		sessionId: string,
 		newData: KeyBackupData,
-	): Promise<void> {
-		const { rows } = await this.pool.query(
+	): Promise<void> => {
+		const { rows } = await pool.query(
 			"SELECT key_json FROM key_backup_data WHERE user_id = $1 AND version = $2 AND room_id = $3 AND session_id = $4",
 			[userId, version, roomId, sessionId],
 		);
@@ -1704,13 +1729,13 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 					newData.forwarded_count < existing.forwarded_count);
 			if (!shouldReplace) return;
 		}
-		await this.pool.query(
+		await pool.query(
 			"INSERT INTO key_backup_data (user_id, version, room_id, session_id, key_json) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (user_id, version, room_id, session_id) DO UPDATE SET key_json = EXCLUDED.key_json",
 			[userId, version, roomId, sessionId, JSON.stringify(newData)],
 		);
-	}
+	};
 
-	async getKeyBackupKeys(
+	const getKeyBackupKeys = async (
 		userId: UserId,
 		version: string,
 		roomId?: RoomId,
@@ -1722,9 +1747,9 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
 		  }
 		| undefined
-	> {
+	> => {
 		if (roomId && sessionId) {
-			const { rows } = await this.pool.query(
+			const { rows } = await pool.query(
 				"SELECT key_json FROM key_backup_data WHERE user_id = $1 AND version = $2 AND room_id = $3 AND session_id = $4",
 				[userId, version, roomId, sessionId],
 			);
@@ -1733,7 +1758,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				? JSON.parse(rows[0].key_json)
 				: rows[0].key_json;
 		} else if (roomId) {
-			const { rows } = await this.pool.query(
+			const { rows } = await pool.query(
 				"SELECT session_id, key_json FROM key_backup_data WHERE user_id = $1 AND version = $2 AND room_id = $3",
 				[userId, version, roomId],
 			);
@@ -1744,7 +1769,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			}
 			return { sessions };
 		} else {
-			const { rows } = await this.pool.query(
+			const { rows } = await pool.query(
 				"SELECT room_id, session_id, key_json FROM key_backup_data WHERE user_id = $1 AND version = $2",
 				[userId, version],
 			);
@@ -1760,33 +1785,33 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			}
 			return { rooms: result };
 		}
-	}
+	};
 
-	async deleteKeyBackupKeys(
+	const deleteKeyBackupKeys = async (
 		userId: UserId,
 		version: string,
 		roomId?: RoomId,
 		sessionId?: string,
-	): Promise<{ count: number; etag: string } | undefined> {
+	): Promise<{ count: number; etag: string } | undefined> => {
 		// Verify version exists
-		const { rows: versionRows } = await this.pool.query(
+		const { rows: versionRows } = await pool.query(
 			"SELECT version FROM key_backup_versions WHERE user_id = $1 AND version = $2",
 			[userId, version],
 		);
 		if (!versionRows[0]) return undefined;
 
 		if (roomId && sessionId) {
-			await this.pool.query(
+			await pool.query(
 				"DELETE FROM key_backup_data WHERE user_id = $1 AND version = $2 AND room_id = $3 AND session_id = $4",
 				[userId, version, roomId, sessionId],
 			);
 		} else if (roomId) {
-			await this.pool.query(
+			await pool.query(
 				"DELETE FROM key_backup_data WHERE user_id = $1 AND version = $2 AND room_id = $3",
 				[userId, version, roomId],
 			);
 		} else {
-			await this.pool.query(
+			await pool.query(
 				"DELETE FROM key_backup_data WHERE user_id = $1 AND version = $2",
 				[userId, version],
 			);
@@ -1794,95 +1819,98 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 
 		const {
 			rows: [countRow],
-		} = await this.pool.query<{ cnt: string }>(
+		} = await pool.query<{ cnt: string }>(
 			"SELECT COUNT(*)::int AS cnt FROM key_backup_data WHERE user_id = $1 AND version = $2",
 			[userId, version],
 		);
 		const count = parseInt(countRow!.cnt, 10);
-		return { count, etag: await this.computeBackupEtagPg(userId, version) };
-	}
+		return { count, etag: await computeBackupEtagPg(userId, version) };
+	};
 
-	async sendToDevice(
+	const sendToDevice = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		event: ToDeviceEvent,
-	): Promise<void> {
-		await this.pool.query(
+	): Promise<void> => {
+		await pool.query(
 			"INSERT INTO to_device (user_id, device_id, event_json) VALUES ($1, $2, $3)",
 			[userId, deviceId, JSON.stringify(event)],
 		);
-		this.wakeWaiters();
-	}
+		eph.wakeWaiters();
+	};
 
-	async getToDeviceMessages(
+	const getToDeviceMessages = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<ToDeviceEvent[]> {
-		const { rows } = await this.pool.query(
+	): Promise<ToDeviceEvent[]> => {
+		const { rows } = await pool.query(
 			"SELECT event_json FROM to_device WHERE user_id = $1 AND device_id = $2 ORDER BY id",
 			[userId, deviceId],
 		);
 		return rows.map((r) => r.event_json);
-	}
+	};
 
-	async clearToDeviceMessages(
+	const clearToDeviceMessages = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<void> {
-		await this.pool.query(
+	): Promise<void> => {
+		await pool.query(
 			"DELETE FROM to_device WHERE user_id = $1 AND device_id = $2",
 			[userId, deviceId],
 		);
-	}
+	};
 
-	async getPushers(userId: UserId): Promise<Pusher[]> {
-		const { rows } = await this.pool.query(
+	const getPushers = async (userId: UserId): Promise<Pusher[]> => {
+		const { rows } = await pool.query(
 			"SELECT pusher_json FROM pushers WHERE user_id = $1",
 			[userId],
 		);
 		return rows.map((r) => r.pusher_json);
-	}
+	};
 
-	async setPusher(userId: UserId, pusher: Pusher): Promise<void> {
-		await this.pool.query(
+	const setPusher = async (userId: UserId, pusher: Pusher): Promise<void> => {
+		await pool.query(
 			"INSERT INTO pushers (user_id, app_id, pushkey, pusher_json) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, app_id, pushkey) DO UPDATE SET pusher_json = EXCLUDED.pusher_json",
 			[userId, pusher.app_id, pusher.pushkey, JSON.stringify(pusher)],
 		);
-	}
+	};
 
-	async deletePusher(
+	const deletePusher = async (
 		userId: UserId,
 		appId: string,
 		pushkey: string,
-	): Promise<void> {
-		await this.pool.query(
+	): Promise<void> => {
+		await pool.query(
 			"DELETE FROM pushers WHERE user_id = $1 AND app_id = $2 AND pushkey = $3",
 			[userId, appId, pushkey],
 		);
-	}
+	};
 
-	async deletePusherByKey(appId: string, pushkey: string): Promise<void> {
-		await this.pool.query(
-			"DELETE FROM pushers WHERE app_id = $1 AND pushkey = $2",
-			[appId, pushkey],
-		);
-	}
+	const deletePusherByKey = async (
+		appId: string,
+		pushkey: string,
+	): Promise<void> => {
+		await pool.query("DELETE FROM pushers WHERE app_id = $1 AND pushkey = $2", [
+			appId,
+			pushkey,
+		]);
+	};
 
-	async storeRelation(
+	const storeRelation = async (
 		eventId: EventId,
 		roomId: RoomId,
 		relType: string,
 		targetEventId: EventId,
 		key?: string,
-	): Promise<void> {
-		const { rows } = await this.pool.query(
+	): Promise<void> => {
+		const { rows } = await pool.query(
 			"SELECT event_json, stream_pos FROM events WHERE event_id = $1",
 			[eventId],
 		);
 		if (!rows[0]) return;
 		const event = rows[0].event_json as PDU;
 		const streamPos = parseInt(rows[0].stream_pos, 10);
-		await this.pool.query(
+		await pool.query(
 			"INSERT INTO relations (event_id, room_id, rel_type, target_event_id, key, sender, event_type, stream_pos) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
 			[
 				eventId,
@@ -1895,9 +1923,9 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				streamPos,
 			],
 		);
-	}
+	};
 
-	async getRelatedEvents(
+	const getRelatedEvents = async (
 		roomId: RoomId,
 		eventId: EventId,
 		relType?: string,
@@ -1908,7 +1936,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 	): Promise<{
 		events: { event: PDU; eventId: EventId }[];
 		nextBatch?: string;
-	}> {
+	}> => {
 		let sql =
 			"SELECT r.event_id, r.stream_pos, e.event_json FROM relations r JOIN events e ON r.event_id = e.event_id WHERE r.target_event_id = $1 AND r.room_id = $2";
 		const params: unknown[] = [eventId, roomId];
@@ -1938,7 +1966,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				: ` ORDER BY r.stream_pos DESC LIMIT $${paramIdx}`;
 		params.push(limit);
 
-		const { rows } = await this.pool.query(sql, params);
+		const { rows } = await pool.query(sql, params);
 		const events = rows.map((r: Record<string, unknown>) => ({
 			event: r.event_json as PDU,
 			eventId: r.event_id as EventId,
@@ -1948,31 +1976,31 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				? String((rows[rows.length - 1] as Record<string, unknown>).stream_pos)
 				: undefined;
 		return { events, nextBatch };
-	}
+	};
 
-	async getAnnotationCounts(
+	const getAnnotationCounts = async (
 		eventId: EventId,
-	): Promise<{ type: string; key: string; count: number }[]> {
-		const { rows } = await this.pool.query(
+	): Promise<{ type: string; key: string; count: number }[]> => {
+		const { rows } = await pool.query(
 			"SELECT event_type, key, COUNT(*)::int AS cnt FROM relations WHERE target_event_id = $1 AND rel_type = 'm.annotation' AND key IS NOT NULL GROUP BY event_type, key",
 			[eventId],
 		);
 		return rows.map((r) => ({ type: r.event_type, key: r.key, count: r.cnt }));
-	}
+	};
 
-	async getLatestEdit(
+	const getLatestEdit = async (
 		eventId: EventId,
 		sender: UserId,
-	): Promise<{ event: PDU; eventId: EventId } | undefined> {
-		const { rows } = await this.pool.query(
+	): Promise<{ event: PDU; eventId: EventId } | undefined> => {
+		const { rows } = await pool.query(
 			"SELECT r.event_id, e.event_json FROM relations r JOIN events e ON r.event_id = e.event_id WHERE r.target_event_id = $1 AND r.rel_type = 'm.replace' AND r.sender = $2 ORDER BY r.stream_pos DESC LIMIT 1",
 			[eventId, sender],
 		);
 		if (!rows[0]) return undefined;
 		return { event: rows[0].event_json, eventId: rows[0].event_id as EventId };
-	}
+	};
 
-	async getThreadSummary(
+	const getThreadSummary = async (
 		eventId: EventId,
 		userId: UserId,
 	): Promise<
@@ -1982,10 +2010,10 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				currentUserParticipated: boolean;
 		  }
 		| undefined
-	> {
+	> => {
 		const {
 			rows: [countRow],
-		} = await this.pool.query(
+		} = await pool.query(
 			"SELECT COUNT(*)::int AS cnt FROM relations WHERE target_event_id = $1 AND rel_type = 'm.thread'",
 			[eventId],
 		);
@@ -1993,7 +2021,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 
 		const {
 			rows: [latestRow],
-		} = await this.pool.query(
+		} = await pool.query(
 			"SELECT r.event_id, e.event_json FROM relations r JOIN events e ON r.event_id = e.event_id WHERE r.target_event_id = $1 AND r.rel_type = 'm.thread' ORDER BY r.stream_pos DESC LIMIT 1",
 			[eventId],
 		);
@@ -2001,7 +2029,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 
 		const {
 			rows: [participated],
-		} = await this.pool.query(
+		} = await pool.query(
 			"SELECT 1 FROM relations WHERE target_event_id = $1 AND rel_type = 'm.thread' AND sender = $2 LIMIT 1",
 			[eventId, userId],
 		);
@@ -2014,36 +2042,36 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			count: countRow.cnt,
 			currentUserParticipated: !!participated,
 		};
-	}
+	};
 
-	async storeReport(
+	const storeReport = async (
 		userId: UserId,
 		roomId: RoomId,
 		eventId: EventId,
 		score?: number,
 		reason?: string,
-	): Promise<void> {
-		await this.pool.query(
+	): Promise<void> => {
+		await pool.query(
 			"INSERT INTO reports (user_id, room_id, event_id, score, reason, ts) VALUES ($1, $2, $3, $4, $5, $6)",
 			[userId, roomId, eventId, score ?? null, reason ?? null, Date.now()],
 		);
-	}
+	};
 
-	async storeOpenIdToken(
+	const storeOpenIdToken = async (
 		token: string,
 		userId: UserId,
 		expiresAt: Timestamp,
-	): Promise<void> {
-		await this.pool.query(
+	): Promise<void> => {
+		await pool.query(
 			"INSERT INTO openid_tokens (token, user_id, expires_at) VALUES ($1, $2, $3) ON CONFLICT (token) DO UPDATE SET user_id = EXCLUDED.user_id, expires_at = EXCLUDED.expires_at",
 			[token, userId, expiresAt],
 		);
-	}
+	};
 
-	async getOpenIdToken(
+	const getOpenIdToken = async (
 		token: string,
-	): Promise<{ userId: UserId; expiresAt: Timestamp } | undefined> {
-		const { rows } = await this.pool.query(
+	): Promise<{ userId: UserId; expiresAt: Timestamp } | undefined> => {
+		const { rows } = await pool.query(
 			"SELECT user_id, expires_at FROM openid_tokens WHERE token = $1",
 			[token],
 		);
@@ -2052,12 +2080,12 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			userId: rows[0].user_id as UserId,
 			expiresAt: Number(rows[0].expires_at),
 		};
-	}
+	};
 
-	async getThreePids(
+	const getThreePids = async (
 		userId: UserId,
-	): Promise<{ medium: string; address: string; added_at: Timestamp }[]> {
-		const { rows } = await this.pool.query(
+	): Promise<{ medium: string; address: string; added_at: Timestamp }[]> => {
+		const { rows } = await pool.query(
 			"SELECT medium, address, added_at FROM threepids WHERE user_id = $1",
 			[userId],
 		);
@@ -2066,38 +2094,38 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			address: r.address,
 			added_at: Number(r.added_at),
 		}));
-	}
+	};
 
-	async addThreePid(
+	const addThreePid = async (
 		userId: UserId,
 		medium: string,
 		address: string,
-	): Promise<void> {
-		await this.pool.query(
+	): Promise<void> => {
+		await pool.query(
 			"INSERT INTO threepids (user_id, medium, address, added_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
 			[userId, medium, address, Date.now()],
 		);
-	}
+	};
 
-	async deleteThreePid(
+	const deleteThreePid = async (
 		userId: UserId,
 		medium: string,
 		address: string,
-	): Promise<void> {
-		await this.pool.query(
+	): Promise<void> => {
+		await pool.query(
 			"DELETE FROM threepids WHERE user_id = $1 AND medium = $2 AND address = $3",
 			[userId, medium, address],
 		);
-	}
+	};
 
-	async searchUserDirectory(
+	const searchUserDirectory = async (
 		searchTerm: string,
 		limit: number,
 	): Promise<
 		{ user_id: UserId; display_name?: string; avatar_url?: string }[]
-	> {
+	> => {
 		const term = `%${searchTerm}%`;
-		const { rows } = await this.pool.query(
+		const { rows } = await pool.query(
 			"SELECT user_id, displayname, avatar_url FROM users WHERE is_deactivated = FALSE AND (user_id ILIKE $1 OR displayname ILIKE $1) LIMIT $2",
 			[term, limit],
 		);
@@ -2106,9 +2134,9 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			display_name: r.displayname ?? undefined,
 			avatar_url: r.avatar_url ?? undefined,
 		}));
-	}
+	};
 
-	async getThreadRoots(
+	const getThreadRoots = async (
 		roomId: RoomId,
 		userId: UserId,
 		include: "all" | "participated",
@@ -2117,7 +2145,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 	): Promise<{
 		events: { event: PDU; eventId: EventId }[];
 		nextBatch?: string;
-	}> {
+	}> => {
 		let sql = `
 			SELECT r.target_event_id, MAX(r.stream_pos) AS latest_pos, e.event_json
 			FROM relations r
@@ -2138,7 +2166,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		sql += ` GROUP BY r.target_event_id, e.event_json ORDER BY latest_pos DESC LIMIT $${paramIdx}`;
 		params.push(limit);
 
-		const { rows } = await this.pool.query(sql, params);
+		const { rows } = await pool.query(sql, params);
 		const events = rows.map((r: Record<string, unknown>) => ({
 			event: r.event_json as PDU,
 			eventId: r.target_event_id as EventId,
@@ -2148,9 +2176,9 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				? String((rows[rows.length - 1] as Record<string, unknown>).latest_pos)
 				: undefined;
 		return { events, nextBatch };
-	}
+	};
 
-	async searchRoomEvents(
+	const searchRoomEvents = async (
 		roomIds: RoomId[],
 		searchTerm: string,
 		keys: string[],
@@ -2160,10 +2188,10 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		events: { event: PDU; eventId: EventId; streamPos: number }[];
 		count: number;
 		nextBatch?: string;
-	}> {
+	}> => {
 		if (roomIds.length === 0) return { events: [], count: 0 };
 
-		const { rows } = await this.pool.query(
+		const { rows } = await pool.query(
 			"SELECT event_id, event_json, stream_pos FROM events WHERE room_id = ANY($1) ORDER BY stream_pos DESC",
 			[roomIds],
 		);
@@ -2182,13 +2210,13 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		}
 
 		return paginateSearchMatches(allMatches, limit, from);
-	}
+	};
 
-	async storeServerKeys(
+	const storeServerKeys = async (
 		serverName: ServerName,
 		keys: ServerKeys,
-	): Promise<void> {
-		const client = await this.pool.connect();
+	): Promise<void> => {
+		const client = await pool.connect();
 		try {
 			await client.query("BEGIN");
 			for (const [keyId, val] of Object.entries(keys.verify_keys)) {
@@ -2204,21 +2232,21 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		} finally {
 			client.release();
 		}
-	}
+	};
 
-	async getServerKeys(
+	const getServerKeys = async (
 		serverName: ServerName,
 		keyId: KeyId,
-	): Promise<{ key: string; validUntil: number } | undefined> {
-		const { rows } = await this.pool.query(
+	): Promise<{ key: string; validUntil: number } | undefined> => {
+		const { rows } = await pool.query(
 			"SELECT key, valid_until FROM server_keys WHERE server_name = $1 AND key_id = $2",
 			[serverName, keyId],
 		);
 		if (!rows[0]) return undefined;
 		return { key: rows[0].key, validUntil: Number(rows[0].valid_until) };
-	}
+	};
 
-	async getAuthChain(eventIds: EventId[]): Promise<PDU[]> {
+	const getAuthChain = async (eventIds: EventId[]): Promise<PDU[]> => {
 		const visited = new Set<EventId>();
 		const result: PDU[] = [];
 		const queue = [...eventIds];
@@ -2227,7 +2255,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			const id = queue.shift() as EventId;
 			if (visited.has(id)) continue;
 			visited.add(id);
-			const { rows } = await this.pool.query(
+			const { rows } = await pool.query(
 				"SELECT event_json FROM events WHERE event_id = $1",
 				[id],
 			);
@@ -2239,10 +2267,10 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			}
 		}
 		return result;
-	}
+	};
 
-	async getServersInRoom(roomId: RoomId): Promise<ServerName[]> {
-		const { rows } = await this.pool.query(
+	const getServersInRoom = async (roomId: RoomId): Promise<ServerName[]> => {
+		const { rows } = await pool.query(
 			"SELECT state_key FROM state_events WHERE room_id = $1 AND event_type = 'm.room.member' AND event_json->'content'->>'membership' = 'join'",
 			[roomId],
 		);
@@ -2254,105 +2282,107 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				.join(":") as ServerName;
 			servers.add(serverName);
 		}
-		const ps = this.partialStateRooms.get(roomId);
+		const ps = partialStateRooms.get(roomId);
 		if (ps) for (const s of ps.servers) servers.add(s);
 		return [...servers];
-	}
+	};
 
-	private partialStateRooms = new Map<
+	const partialStateRooms = new Map<
 		string,
 		{ servers: ServerName[]; joinEventId: EventId }
 	>();
-	private partialStateWaiters = new Map<string, Set<() => void>>();
-	private unPartialStatedAt = new Map<string, number>();
+	const partialStateWaiters = new Map<string, Set<() => void>>();
+	const unPartialStatedAt = new Map<string, number>();
 
-	async getRoomUnPartialStatedAt(roomId: RoomId): Promise<number | undefined> {
-		return this.unPartialStatedAt.get(roomId);
-	}
+	const getRoomUnPartialStatedAt = async (
+		roomId: RoomId,
+	): Promise<number | undefined> => {
+		return unPartialStatedAt.get(roomId);
+	};
 
-	async setStateEventHistorical(
+	const setStateEventHistorical = async (
 		roomId: RoomId,
 		event: PDU,
 		eventId: EventId,
-	): Promise<void> {
-		await this.setStateEvent(roomId, event, eventId);
-	}
+	): Promise<void> => {
+		await setStateEvent(roomId, event, eventId);
+	};
 
-	async markRoomPartialState(
+	const markRoomPartialState = async (
 		roomId: RoomId,
 		servers: ServerName[],
 		joinEventId: EventId,
-	): Promise<void> {
-		this.partialStateRooms.set(roomId, { servers, joinEventId });
-	}
+	): Promise<void> => {
+		partialStateRooms.set(roomId, { servers, joinEventId });
+	};
 
-	async clearRoomPartialState(roomId: RoomId): Promise<void> {
-		this.partialStateRooms.delete(roomId);
-		this.streamCounter++;
-		this.unPartialStatedAt.set(roomId, this.streamCounter);
-		const waiters = this.partialStateWaiters.get(roomId);
+	const clearRoomPartialState = async (roomId: RoomId): Promise<void> => {
+		partialStateRooms.delete(roomId);
+		eph.streamCounter++;
+		unPartialStatedAt.set(roomId, eph.streamCounter);
+		const waiters = partialStateWaiters.get(roomId);
 		if (waiters) {
-			this.partialStateWaiters.delete(roomId);
+			partialStateWaiters.delete(roomId);
 			for (const w of waiters) w();
 		}
-		this.wakeWaiters();
-	}
+		eph.wakeWaiters();
+	};
 
-	async getRoomPartialState(
+	const getRoomPartialState = async (
 		roomId: RoomId,
-	): Promise<{ servers: ServerName[]; joinEventId: EventId } | undefined> {
-		return this.partialStateRooms.get(roomId);
-	}
+	): Promise<{ servers: ServerName[]; joinEventId: EventId } | undefined> => {
+		return partialStateRooms.get(roomId);
+	};
 
-	async getAllPartialStateRooms(): Promise<
+	const getAllPartialStateRooms = async (): Promise<
 		{ roomId: RoomId; servers: ServerName[]; joinEventId: EventId }[]
-	> {
-		return [...this.partialStateRooms.entries()].map(([roomId, v]) => ({
+	> => {
+		return [...partialStateRooms.entries()].map(([roomId, v]) => ({
 			roomId: roomId as RoomId,
 			servers: v.servers,
 			joinEventId: v.joinEventId,
 		}));
-	}
+	};
 
-	private partialStateEvents = new Map<string, Set<EventId>>();
+	const partialStateEvents = new Map<string, Set<EventId>>();
 
-	async recordPartialStateEvent(
+	const recordPartialStateEvent = async (
 		roomId: RoomId,
 		eventId: EventId,
-	): Promise<void> {
-		let set = this.partialStateEvents.get(roomId);
+	): Promise<void> => {
+		let set = partialStateEvents.get(roomId);
 		if (!set) {
 			set = new Set();
-			this.partialStateEvents.set(roomId, set);
+			partialStateEvents.set(roomId, set);
 		}
 		set.add(eventId);
-	}
+	};
 
-	async takePartialStateEvents(roomId: RoomId): Promise<EventId[]> {
-		const set = this.partialStateEvents.get(roomId);
-		this.partialStateEvents.delete(roomId);
+	const takePartialStateEvents = async (roomId: RoomId): Promise<EventId[]> => {
+		const set = partialStateEvents.get(roomId);
+		partialStateEvents.delete(roomId);
 		return set ? [...set] : [];
-	}
-	private partialStateDevicePokes = new Map<string, Set<string>>();
+	};
+	const partialStateDevicePokes = new Map<string, Set<string>>();
 
-	async recordPartialStateDevicePoke(
+	const recordPartialStateDevicePoke = async (
 		roomId: RoomId,
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<void> {
-		let set = this.partialStateDevicePokes.get(roomId);
+	): Promise<void> => {
+		let set = partialStateDevicePokes.get(roomId);
 		if (!set) {
 			set = new Set();
-			this.partialStateDevicePokes.set(roomId, set);
+			partialStateDevicePokes.set(roomId, set);
 		}
 		set.add(`${userId}\x1f${deviceId}`);
-	}
+	};
 
-	async takePartialStateDevicePokes(
+	const takePartialStateDevicePokes = async (
 		roomId: RoomId,
-	): Promise<{ userId: UserId; deviceId: DeviceId }[]> {
-		const set = this.partialStateDevicePokes.get(roomId);
-		this.partialStateDevicePokes.delete(roomId);
+	): Promise<{ userId: UserId; deviceId: DeviceId }[]> => {
+		const set = partialStateDevicePokes.get(roomId);
+		partialStateDevicePokes.delete(roomId);
 		return set
 			? [...set].map((s) => {
 					const sep = s.indexOf("\x1f");
@@ -2362,30 +2392,28 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 					};
 				})
 			: [];
-	}
+	};
 
-	async deleteEvent(eventId: EventId): Promise<void> {
-		await this.pool.query("DELETE FROM events WHERE event_id = $1", [eventId]);
-		await this.pool.query("DELETE FROM state_events WHERE event_id = $1", [
-			eventId,
-		]);
-	}
+	const deleteEvent = async (eventId: EventId): Promise<void> => {
+		await pool.query("DELETE FROM events WHERE event_id = $1", [eventId]);
+		await pool.query("DELETE FROM state_events WHERE event_id = $1", [eventId]);
+	};
 
-	async unrejectEvent(_eventId: EventId): Promise<void> {
+	const unrejectEvent = async (_eventId: EventId): Promise<void> => {
 		// deleteEvent is destructive here (no rejected flag), so there is nothing
 		// to restore. No-op; partial-state resync re-evaluation targets sqlite.
-	}
+	};
 
-	async waitForPartialStateClear(
+	const waitForPartialStateClear = async (
 		roomId: RoomId,
 		timeoutMs: number,
-	): Promise<void> {
-		if (!this.partialStateRooms.has(roomId)) return;
+	): Promise<void> => {
+		if (!partialStateRooms.has(roomId)) return;
 		await new Promise<void>((resolve) => {
-			let set = this.partialStateWaiters.get(roomId);
+			let set = partialStateWaiters.get(roomId);
 			if (!set) {
 				set = new Set();
-				this.partialStateWaiters.set(roomId, set);
+				partialStateWaiters.set(roomId, set);
 			}
 			const done = () => {
 				set?.delete(done);
@@ -2395,43 +2423,49 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			const timer = setTimeout(done, timeoutMs);
 			set.add(done);
 		});
-	}
+	};
 
-	async getStateAtEvent(
+	const getStateAtEvent = async (
 		_roomId: RoomId,
 		_eventId: EventId,
-	): Promise<Map<string, PDU> | undefined> {
-		const room = await this.getRoom(_roomId);
+	): Promise<Map<string, PDU> | undefined> => {
+		const room = await getRoom(_roomId);
 		if (!room) return undefined;
 		return new Map(room.state_events);
-	}
+	};
 
-	async getFederationTxn(origin: ServerName, txnId: string): Promise<boolean> {
-		const { rows } = await this.pool.query(
+	const getFederationTxn = async (
+		origin: ServerName,
+		txnId: string,
+	): Promise<boolean> => {
+		const { rows } = await pool.query(
 			"SELECT 1 FROM federation_txns WHERE origin = $1 AND txn_id = $2",
 			[origin, txnId],
 		);
 		return rows.length > 0;
-	}
+	};
 
-	async setFederationTxn(origin: ServerName, txnId: string): Promise<void> {
-		await this.pool.query(
+	const setFederationTxn = async (
+		origin: ServerName,
+		txnId: string,
+	): Promise<void> => {
+		await pool.query(
 			"INSERT INTO federation_txns (origin, txn_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
 			[origin, txnId],
 		);
-	}
+	};
 
-	async enqueueFederationEdu(
+	const enqueueFederationEdu = async (
 		destination: ServerName,
 		edu: EDU,
-	): Promise<number> {
-		const { rows } = await this.pool.query(
+	): Promise<number> => {
+		const { rows } = await pool.query(
 			"INSERT INTO pending_federation_edus (destination, edu_json) VALUES ($1, $2) RETURNING id",
 			[destination, JSON.stringify(edu)],
 		);
 		const id = Number((rows[0] as { id: string | number }).id);
 		// Enforce the per-destination cap: delete oldest rows beyond the cap.
-		const { rowCount } = await this.pool.query(
+		const { rowCount } = await pool.query(
 			"DELETE FROM pending_federation_edus WHERE id IN (SELECT id FROM pending_federation_edus WHERE destination = $1 ORDER BY id ASC OFFSET $2)",
 			[destination, PENDING_FEDERATION_EDU_CAP],
 		);
@@ -2441,13 +2475,13 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			);
 		}
 		return id;
-	}
+	};
 
-	async getPendingFederationEdus(
+	const getPendingFederationEdus = async (
 		destination: ServerName,
 		limit: number,
-	): Promise<{ id: number; edu: EDU }[]> {
-		const { rows } = await this.pool.query(
+	): Promise<{ id: number; edu: EDU }[]> => {
+		const { rows } = await pool.query(
 			"SELECT id, edu_json FROM pending_federation_edus WHERE destination = $1 ORDER BY id ASC LIMIT $2",
 			[destination, limit],
 		);
@@ -2455,25 +2489,23 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			id: Number(r.id),
 			edu: JSON.parse(r.edu_json) as EDU,
 		}));
-	}
+	};
 
-	async deleteFederationEdu(id: number): Promise<void> {
-		await this.pool.query("DELETE FROM pending_federation_edus WHERE id = $1", [
-			id,
-		]);
-	}
+	const deleteFederationEdu = async (id: number): Promise<void> => {
+		await pool.query("DELETE FROM pending_federation_edus WHERE id = $1", [id]);
+	};
 
-	async getPendingFederationDestinations(): Promise<ServerName[]> {
-		const { rows } = await this.pool.query(
+	const getPendingFederationDestinations = async (): Promise<ServerName[]> => {
+		const { rows } = await pool.query(
 			"SELECT DISTINCT destination FROM pending_federation_edus",
 		);
 		return (rows as { destination: string }[]).map(
 			(r) => r.destination as ServerName,
 		);
-	}
+	};
 
 	// 3PID verification — in-memory for simplicity (not persisted across restarts)
-	private verificationSessions = new Map<
+	const verificationSessions = new Map<
 		string,
 		{
 			medium: string;
@@ -2485,12 +2517,9 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			userId?: string;
 		}
 	>();
-	private loginTokens = new Map<
-		string,
-		{ userId: UserId; expiresAt: number }
-	>();
+	const loginTokens = new Map<string, { userId: UserId; expiresAt: number }>();
 
-	async storeVerificationToken(
+	const storeVerificationToken = async (
 		sessionId: string,
 		data: {
 			medium: string;
@@ -2501,11 +2530,13 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			validated: boolean;
 			userId?: string;
 		},
-	): Promise<void> {
-		this.verificationSessions.set(sessionId, { ...data });
-	}
+	): Promise<void> => {
+		verificationSessions.set(sessionId, { ...data });
+	};
 
-	async getVerificationSession(sessionId: string): Promise<
+	const getVerificationSession = async (
+		sessionId: string,
+	): Promise<
 		| {
 				medium: string;
 				address: string;
@@ -2516,54 +2547,54 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 				userId?: string;
 		  }
 		| undefined
-	> {
-		return this.verificationSessions.get(sessionId);
-	}
+	> => {
+		return verificationSessions.get(sessionId);
+	};
 
-	async validateVerificationToken(
+	const validateVerificationToken = async (
 		sessionId: string,
 		token: string,
-	): Promise<boolean> {
-		const session = this.verificationSessions.get(sessionId);
+	): Promise<boolean> => {
+		const session = verificationSessions.get(sessionId);
 		if (!session) return false;
 		if (session.token !== token) return false;
 		session.validated = true;
 		return true;
-	}
+	};
 
-	async storeLoginToken(
+	const storeLoginToken = async (
 		token: string,
 		userId: UserId,
 		expiresAt: number,
-	): Promise<void> {
-		this.loginTokens.set(token, { userId, expiresAt });
-	}
+	): Promise<void> => {
+		loginTokens.set(token, { userId, expiresAt });
+	};
 
-	async getLoginToken(
+	const getLoginToken = async (
 		token: string,
-	): Promise<{ userId: UserId; expiresAt: number } | undefined> {
-		return this.loginTokens.get(token);
-	}
+	): Promise<{ userId: UserId; expiresAt: number } | undefined> => {
+		return loginTokens.get(token);
+	};
 
-	async deleteLoginToken(token: string): Promise<void> {
-		this.loginTokens.delete(token);
-	}
+	const deleteLoginToken = async (token: string): Promise<void> => {
+		loginTokens.delete(token);
+	};
 
-	async importRoomState(
+	const importRoomState = async (
 		roomId: RoomId,
 		roomVersion: RoomVersion,
 		stateEvents: PDU[],
 		authChain: PDU[],
-	): Promise<void> {
-		const client = await this.pool.connect();
+	): Promise<void> => {
+		const client = await pool.connect();
 		try {
 			await client.query("BEGIN");
 			for (const event of authChain) {
 				const eventId = computeEventId(event, roomVersion);
-				this.streamCounter++;
+				eph.streamCounter++;
 				await client.query(
 					"INSERT INTO events (event_id, room_id, stream_pos, event_json) VALUES ($1, $2, $3, $4) ON CONFLICT (event_id) DO NOTHING",
-					[eventId, event.room_id, this.streamCounter, JSON.stringify(event)],
+					[eventId, event.room_id, eph.streamCounter, JSON.stringify(event)],
 				);
 			}
 
@@ -2571,10 +2602,10 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 			const extremities: EventId[] = [];
 			for (const event of stateEvents) {
 				const eventId = computeEventId(event, roomVersion);
-				this.streamCounter++;
+				eph.streamCounter++;
 				await client.query(
 					"INSERT INTO events (event_id, room_id, stream_pos, event_json) VALUES ($1, $2, $3, $4) ON CONFLICT (event_id) DO NOTHING",
-					[eventId, event.room_id, this.streamCounter, JSON.stringify(event)],
+					[eventId, event.room_id, eph.streamCounter, JSON.stringify(event)],
 				);
 				await client.query(
 					`INSERT INTO state_events (room_id, event_type, state_key, event_id, event_json) VALUES ($1, $2, $3, $4, $5)
@@ -2604,6 +2635,159 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 		} finally {
 			client.release();
 		}
-		this.wakeWaiters();
-	}
-}
+		eph.wakeWaiters();
+	};
+
+	pool = new pg.Pool({ connectionString, max: 20 });
+	await init();
+
+	return {
+		addOneTimeKeys,
+		addThreePid,
+		addUIAACompleted,
+		claimOneTimeKey,
+		clearRoomPartialState,
+		clearToDeviceMessages,
+		createFilter,
+		createKeyBackupVersion,
+		createRoom,
+		createRoomAlias,
+		createSession,
+		createUIAASession,
+		createUser,
+		deactivateUser,
+		deleteAllSessions,
+		deleteDeviceKeys,
+		deleteDeviceSession,
+		deleteEvent,
+		deleteFederationEdu,
+		deleteGlobalAccountData,
+		deleteKeyBackupKeys,
+		deleteKeyBackupVersion,
+		deleteLoginToken,
+		deletePusher,
+		deletePusherByKey,
+		deleteRoomAccountData,
+		deleteRoomAlias,
+		deleteSession,
+		deleteThreePid,
+		deleteUIAASession,
+		enqueueFederationEdu,
+		getAliasCreator,
+		getAliasesForRoom,
+		getAllDeviceKeys,
+		getAllDevices,
+		getAllGlobalAccountData,
+		getAllPartialStateRooms,
+		getAllRoomAccountData,
+		getAllState,
+		getAnnotationCounts,
+		getAuthChain,
+		getChangedDeviceUsers,
+		getCrossSigningKeys,
+		getDevice,
+		getDeviceKeys,
+		getEvent,
+		getEventsByRoom,
+		getEventsByRoomSince,
+		getFallbackKeyTypes,
+		getFederationTxn,
+		getFilter,
+		getGlobalAccountData,
+		getGlobalAccountDataSince,
+		getKeyBackupKeys,
+		getKeyBackupVersion,
+		getLatestEdit,
+		getLoginToken,
+		getMedia,
+		getMemberEvents,
+		getOneTimeKeyCounts,
+		getOpenIdToken,
+		getPendingFederationDestinations,
+		getPendingFederationEdus,
+		getProfile,
+		getPublicRoomIds,
+		getPushers,
+		getReceipts,
+		getRelatedEvents,
+		getRoom,
+		getRoomAccountData,
+		getRoomAccountDataSince,
+		getRoomByAlias,
+		getRoomPartialState,
+		getRoomsForUser,
+		getRoomsForUserWithMembership,
+		getRoomUnPartialStatedAt,
+		getRoomVisibility,
+		getServerKeys,
+		getServersInRoom,
+		getSessionByAccessToken,
+		getSessionByRefreshToken,
+		getSessionsByUser,
+		getStateAtEvent,
+		getStateEvent,
+		getStreamPosition,
+		getStrippedState,
+		getThreadRoots,
+		getThreadSummary,
+		getThreePids,
+		getToDeviceMessages,
+		getTxnEventId,
+		getUIAASession,
+		getUserById,
+		getUserByLocalpart,
+		getVerificationSession,
+		importRoomState,
+		markRoomPartialState,
+		putKeyBackupKeys,
+		recordDeviceKeyChange,
+		recordPartialStateDevicePoke,
+		recordPartialStateEvent,
+		reserveMedia,
+		rotateToken,
+		searchRoomEvents,
+		searchUserDirectory,
+		sendToDevice,
+		setAvatarUrl,
+		setCrossSigningKeys,
+		setDeviceKeys,
+		setDisplayName,
+		setFallbackKeys,
+		setFederationTxn,
+		setGlobalAccountData,
+		setPusher,
+		setReceipt,
+		setRoomAccountData,
+		setRoomVisibility,
+		setStateEvent,
+		setStateEventHistorical,
+		setTxnEventId,
+		storeCrossSigningSignatures,
+		storeEvent,
+		storeLoginToken,
+		storeMedia,
+		storeOpenIdToken,
+		storeRelation,
+		storeReport,
+		storeServerKeys,
+		storeVerificationToken,
+		takePartialStateDevicePokes,
+		takePartialStateEvents,
+		touchSession,
+		unrejectEvent,
+		updateDeviceDisplayName,
+		updateEvent,
+		updateKeyBackupVersion,
+		updateMediaContent,
+		updatePassword,
+		validateVerificationToken,
+		waitForPartialStateClear,
+		waitForEvents: eph.waitForEvents,
+		setTyping: eph.setTyping,
+		getTypingUsers: eph.getTypingUsers,
+		getTypingChangedAt: eph.getTypingChangedAt,
+		setPresence: eph.setPresence,
+		getPresenceChangedAt: eph.getPresenceChangedAt,
+		getPresence: eph.getPresence,
+	};
+};
