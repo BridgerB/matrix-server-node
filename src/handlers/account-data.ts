@@ -100,11 +100,7 @@ export const putRoomAccountData =
 		// MSC3391: PUT with an empty content dictionary deletes the account data
 		// type, so a subsequent GET returns 404.
 		if (isEmptyObject(content)) {
-			await storage.deleteRoomAccountData(
-				userId,
-				roomId,
-				type,
-			);
+			await storage.deleteRoomAccountData(userId, roomId, type);
 			return { status: 200, body: {} };
 		}
 		await storage.setRoomAccountData(userId, roomId, type, content);

@@ -7,11 +7,7 @@ import { evaluatePushRules, getOrInitRules } from "../push-rules.ts";
 import { bundleAggregations } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
-import type {
-	ClientEvent,
-	PDU,
-	StrippedStateEvent,
-} from "../types/events.ts";
+import type { ClientEvent, PDU, StrippedStateEvent } from "../types/events.ts";
 import type {
 	RoomEventFilter,
 	StateFilter,
@@ -43,7 +39,11 @@ const buildKnockRoom = async (
 	roomId: RoomId,
 	userId: UserId,
 ): Promise<KnockedRoom> => {
-	const memberEvt = await storage.getStateEvent(roomId, "m.room.member", userId);
+	const memberEvt = await storage.getStateEvent(
+		roomId,
+		"m.room.member",
+		userId,
+	);
 	const knockRoomState = (
 		memberEvt?.event.unsigned as Record<string, unknown> | undefined
 	)?.knock_room_state as StrippedStateEvent[] | undefined;
@@ -115,10 +115,8 @@ const resolveFilter = async (
 	if (!filter) return defaults;
 
 	return {
-		timelineLimit:
-			filter.room?.timeline?.limit ?? DEFAULT_TIMELINE_LIMIT,
-		lazyLoadMembers:
-			filter.room?.state?.lazy_load_members ?? false,
+		timelineLimit: filter.room?.timeline?.limit ?? DEFAULT_TIMELINE_LIMIT,
+		lazyLoadMembers: filter.room?.state?.lazy_load_members ?? false,
 		includeLeave: filter.room?.include_leave ?? false,
 		unreadThreadNotifications:
 			filter.room?.timeline?.unread_thread_notifications ?? false,
@@ -217,14 +215,10 @@ const computeMembershipMap = async (
 	const map = new Map<EventId, string>();
 	let current = "leave";
 	for (const { event, eventId } of all.events) {
-		if (
-			event.type === "m.room.member" &&
-			event.state_key === userId
-		) {
+		if (event.type === "m.room.member" && event.state_key === userId) {
 			// The user's own membership transition: the new membership applies to
 			// this event and all subsequent events.
-			const membership = (event.content as Record<string, unknown>)
-				.membership;
+			const membership = (event.content as Record<string, unknown>).membership;
 			if (typeof membership === "string") current = membership;
 			map.set(eventId, current);
 		} else {
@@ -368,8 +362,7 @@ const buildEphemeralEvents = async (
 	const receipts = await storage.getReceipts(roomId);
 	// Filter private receipts: m.read.private only visible to the owning user
 	const visibleReceipts = receipts.filter(
-		(r) =>
-			r.receiptType !== "m.read.private" || r.userId === forUserId,
+		(r) => r.receiptType !== "m.read.private" || r.userId === forUserId,
 	);
 	if (visibleReceipts.length > 0) {
 		events.push({
@@ -735,12 +728,8 @@ const buildLeaveRoom = async (
 	const stateCandidates =
 		sinceEventIds === undefined
 			? [...stateAtLeave.values()]
-			: [...stateAtLeave.values()].filter((e) =>
-					sinceEventIds!.has(e.eventId),
-				);
-	let stateEntries = stateCandidates.filter(
-		(e) => !timelineIds.has(e.eventId),
-	);
+			: [...stateAtLeave.values()].filter((e) => sinceEventIds!.has(e.eventId));
+	let stateEntries = stateCandidates.filter((e) => !timelineIds.has(e.eventId));
 	if (filter.stateFilter) {
 		stateEntries = stateEntries.filter((e) =>
 			matchesRoomEventFilter(
@@ -842,11 +831,7 @@ const buildInitialSync = async (
 			// current head and surfaces in the `state` block via `getAllState`
 			// (TestSyncOmitsStateChangeOnFilteredEvents). Rooms are small here so loading
 			// the whole timeline and slicing in-memory is fine.
-			const fullWindow = await storage.getEventsByRoomSince(
-				roomId,
-				0,
-				100000,
-			);
+			const fullWindow = await storage.getEventsByRoomSince(roomId, 0, 100000);
 
 			const allState = await storage.getAllState(roomId);
 
@@ -890,7 +875,7 @@ const buildInitialSync = async (
 			// current state.
 			const kept = filter.timelineFilter
 				? recentWindow.filter((e) =>
-					matchesRoomEventFilter(e.clientEvent, filter.timelineFilter),
+						matchesRoomEventFilter(e.clientEvent, filter.timelineFilter),
 					)
 				: recentWindow;
 			let timelineClientEvents = kept.map((e) => e.clientEvent);
@@ -900,8 +885,9 @@ const buildInitialSync = async (
 			const timelineEventIds = new Set(
 				timelineClientEvents.map((e) => e.event_id as EventId),
 			);
-			let stateEntries = allState
-				.filter((e) => !timelineEventIds.has(e.eventId));
+			let stateEntries = allState.filter(
+				(e) => !timelineEventIds.has(e.eventId),
+			);
 
 			// When lazy_load_members is enabled, only include member events
 			// for users who appear in the timeline
@@ -927,11 +913,7 @@ const buildInitialSync = async (
 			await bundleAggregations(storage, timelineClientEvents, userId);
 
 			// MSC4115: stamp the syncing user's membership onto each timeline event.
-			const membershipMap = await computeMembershipMap(
-				storage,
-				roomId,
-				userId,
-			);
+			const membershipMap = await computeMembershipMap(storage, roomId, userId);
 			stampMembership(timelineClientEvents, membershipMap);
 
 			// prev_batch is always present. For a limited timeline it points just
@@ -999,9 +981,7 @@ const buildInitialSync = async (
 				}
 				attachStateAfter(
 					join[roomId] as JoinedRoom,
-					stateAfterEntries.map((e) =>
-						pduToClientEvent(e.event, e.eventId),
-					),
+					stateAfterEntries.map((e) => pduToClientEvent(e.event, e.eventId)),
 				);
 			}
 		} else if (membership === "invite") {
@@ -1013,7 +993,11 @@ const buildInitialSync = async (
 					(e.content as Record<string, unknown>).membership === "invite",
 			);
 			const inviter = inviterEvent?.sender as UserId | undefined;
-			if (inviter && (ignoredUsers.has(inviter) || ignoredInviteSenders.has(inviter))) continue;
+			if (
+				inviter &&
+				(ignoredUsers.has(inviter) || ignoredInviteSenders.has(inviter))
+			)
+				continue;
 			invite[roomId] = { invite_state: { events: stripped } };
 		} else if (membership === "knock") {
 			knock[roomId] = await buildKnockRoom(storage, roomId as RoomId, userId);
@@ -1160,8 +1144,7 @@ const buildIncrementalSync = async (
 			// events were stored at recent stream positions; keep them OUT of the
 			// timeline delta so they land in `state` rather than appearing as live
 			// timeline activity.
-			const unPartialStatedAt =
-				await storage.getRoomUnPartialStatedAt(roomId);
+			const unPartialStatedAt = await storage.getRoomUnPartialStatedAt(roomId);
 			const unPartialStatedThisWindow =
 				unPartialStatedAt !== undefined && unPartialStatedAt > since;
 
@@ -1248,7 +1231,7 @@ const buildIncrementalSync = async (
 			// so the exclusion set below is computed from the filtered timeline.
 			const filteredCandidates = filter.timelineFilter
 				? candidates.filter((e) =>
-					matchesRoomEventFilter(e.clientEvent, filter.timelineFilter),
+						matchesRoomEventFilter(e.clientEvent, filter.timelineFilter),
 					)
 				: candidates;
 
@@ -1258,8 +1241,8 @@ const buildIncrementalSync = async (
 			const kept =
 				filteredCandidates.length > filter.timelineLimit
 					? filteredCandidates.slice(
-						filteredCandidates.length - filter.timelineLimit,
-					)
+							filteredCandidates.length - filter.timelineLimit,
+						)
 					: filteredCandidates;
 			const newEvents = kept;
 			let timelineClientEvents = kept.map((e) => e.clientEvent);
@@ -1289,8 +1272,9 @@ const buildIncrementalSync = async (
 				// current room state (minus events already in the timeline) as its
 				// `state` block — the same shape as an initial sync.
 				const allState = await storage.getAllState(roomId);
-				let stateEntries = allState
-					.filter((e) => !filteredTimelineIds.has(e.eventId));
+				let stateEntries = allState.filter(
+					(e) => !filteredTimelineIds.has(e.eventId),
+				);
 
 				if (filter.lazyLoadMembers) {
 					const timelineSenders = new Set<string>();
@@ -1307,8 +1291,9 @@ const buildIncrementalSync = async (
 					);
 				}
 
-				stateClientEvents = stateEntries
-					.map((e) => pduToClientEvent(e.event, e.eventId));
+				stateClientEvents = stateEntries.map((e) =>
+					pduToClientEvent(e.event, e.eventId),
+				);
 			} else {
 				// Incremental (delta) sync: report state events that arrived within
 				// this window (since, nextBatch] but did NOT survive the timeline
@@ -1357,9 +1342,7 @@ const buildIncrementalSync = async (
 							!seenMembers.has(e.event.state_key ?? "") &&
 							!filteredTimelineIds.has(e.eventId)
 						) {
-							stateClientEvents.push(
-								pduToClientEvent(e.event, e.eventId),
-							);
+							stateClientEvents.push(pduToClientEvent(e.event, e.eventId));
 							seenMembers.add(e.event.state_key ?? "");
 						}
 					}
@@ -1524,7 +1507,11 @@ const buildIncrementalSync = async (
 						(e.content as Record<string, unknown>).membership === "invite",
 				);
 				const inviter = inviterEvent?.sender as UserId | undefined;
-				if (inviter && (ignoredUsers.has(inviter) || ignoredInviteSenders.has(inviter))) continue;
+				if (
+					inviter &&
+					(ignoredUsers.has(inviter) || ignoredInviteSenders.has(inviter))
+				)
+					continue;
 				invite[roomId] = { invite_state: { events: stripped } };
 			}
 		} else if (membership === "knock") {
@@ -1559,7 +1546,10 @@ const buildIncrementalSync = async (
 				// handlers/device.py:770-772 does the same via get_users_in_room.
 				// Survivors who share another joined room with us are filtered out
 				// after the loop.
-				const leftRoomUsers = await collectJoinedUsers(storage, roomId as RoomId);
+				const leftRoomUsers = await collectJoinedUsers(
+					storage,
+					roomId as RoomId,
+				);
 				for (const u of leftRoomUsers) {
 					if (u !== userId) newlyLeftUsers.add(u);
 				}
@@ -1581,9 +1571,7 @@ const buildIncrementalSync = async (
 	);
 
 	const joinedRoomIds = new Set(
-		userRooms
-			.filter((r) => r.membership === "join")
-			.map((r) => r.roomId),
+		userRooms.filter((r) => r.membership === "join").map((r) => r.roomId),
 	);
 	const roomAccountDataSince = await storage.getRoomAccountDataSince(
 		userId,

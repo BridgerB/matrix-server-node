@@ -157,7 +157,11 @@ export const getDisplayName =
 	): Handler =>
 	async (req) => {
 		const userId = req.params.userId as UserId;
-		const remote = await fetchRemoteProfile(userId, serverName, federationClient);
+		const remote = await fetchRemoteProfile(
+			userId,
+			serverName,
+			federationClient,
+		);
 		if (remote) {
 			return { status: 200, body: { displayname: remote.displayname ?? null } };
 		}
@@ -174,7 +178,11 @@ export const getAvatarUrl =
 	): Handler =>
 	async (req) => {
 		const userId = req.params.userId as UserId;
-		const remote = await fetchRemoteProfile(userId, serverName, federationClient);
+		const remote = await fetchRemoteProfile(
+			userId,
+			serverName,
+			federationClient,
+		);
 		if (remote) {
 			return { status: 200, body: { avatar_url: remote.avatar_url ?? null } };
 		}
@@ -297,12 +305,8 @@ export const putProfileField =
 		if (keyName === "displayname") {
 			const displayname = body.displayname as string | undefined;
 			if (displayname !== undefined && displayname !== null) {
-				if (
-					Buffer.byteLength(displayname, "utf-8") > MAX_DISPLAYNAME_BYTES
-				)
-					throw badJson(
-						`Displayname exceeds ${MAX_DISPLAYNAME_BYTES} bytes`,
-					);
+				if (Buffer.byteLength(displayname, "utf-8") > MAX_DISPLAYNAME_BYTES)
+					throw badJson(`Displayname exceeds ${MAX_DISPLAYNAME_BYTES} bytes`);
 			}
 			await storage.setDisplayName(targetUserId, displayname ?? null);
 			await propagateProfileToRooms(storage, serverName, targetUserId);
@@ -312,9 +316,7 @@ export const putProfileField =
 			const avatarUrl = body.avatar_url as string | undefined;
 			if (avatarUrl !== undefined && avatarUrl !== null) {
 				if (Buffer.byteLength(avatarUrl, "utf-8") > MAX_AVATAR_URL_BYTES)
-					throw badJson(
-						`Avatar URL exceeds ${MAX_AVATAR_URL_BYTES} bytes`,
-					);
+					throw badJson(`Avatar URL exceeds ${MAX_AVATAR_URL_BYTES} bytes`);
 			}
 			await storage.setAvatarUrl(targetUserId, avatarUrl ?? null);
 			await propagateProfileToRooms(storage, serverName, targetUserId);

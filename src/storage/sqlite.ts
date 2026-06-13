@@ -660,9 +660,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 
 	async getEvent(
 		eventId: EventId,
-	): Promise<
-		{ event: PDU; eventId: EventId; rejected?: boolean } | undefined
-	> {
+	): Promise<{ event: PDU; eventId: EventId; rejected?: boolean } | undefined> {
 		const row = this.stmts.getEvent.get(eventId) as
 			| { event_id: string; event_json: string; rejected?: number }
 			| undefined;
@@ -2431,7 +2429,8 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		const ps = this.db
 			.prepare("SELECT servers FROM partial_state_rooms WHERE room_id = ?")
 			.get(roomId) as { servers: string } | undefined;
-		if (ps) for (const s of JSON.parse(ps.servers) as ServerName[]) servers.add(s);
+		if (ps)
+			for (const s of JSON.parse(ps.servers) as ServerName[]) servers.add(s);
 		return [...servers];
 	}
 
@@ -2439,9 +2438,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 	private unPartialStatedAt = new Map<string, number>();
 	private historicalPos = -1;
 
-	async getRoomUnPartialStatedAt(
-		roomId: RoomId,
-	): Promise<number | undefined> {
+	async getRoomUnPartialStatedAt(roomId: RoomId): Promise<number | undefined> {
 		return this.unPartialStatedAt.get(roomId);
 	}
 
@@ -2509,9 +2506,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			.prepare(
 				"SELECT servers, join_event_id FROM partial_state_rooms WHERE room_id = ?",
 			)
-			.get(roomId) as
-			| { servers: string; join_event_id: string }
-			| undefined;
+			.get(roomId) as { servers: string; join_event_id: string } | undefined;
 		if (!row) return undefined;
 		return {
 			servers: JSON.parse(row.servers) as ServerName[],
@@ -2523,7 +2518,9 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		{ roomId: RoomId; servers: ServerName[]; joinEventId: EventId }[]
 	> {
 		const rows = this.db
-			.prepare("SELECT room_id, servers, join_event_id FROM partial_state_rooms")
+			.prepare(
+				"SELECT room_id, servers, join_event_id FROM partial_state_rooms",
+			)
 			.all() as {
 			room_id: string;
 			servers: string;
@@ -2709,9 +2706,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 
 	async getPendingFederationDestinations(): Promise<ServerName[]> {
 		const rows = this.db
-			.prepare(
-				"SELECT DISTINCT destination FROM pending_federation_edus",
-			)
+			.prepare("SELECT DISTINCT destination FROM pending_federation_edus")
 			.all() as { destination: string }[];
 		return rows.map((r) => r.destination as ServerName);
 	}

@@ -28,10 +28,17 @@ export const putTyping =
 
 		// Federate the typing notification to remote servers sharing the room.
 		if (serverName && signingKey && federationClient) {
-			void fanoutEdu(storage, serverName, signingKey, federationClient, roomId, {
-				edu_type: "m.typing",
-				content: { room_id: roomId, user_id: userId, typing },
-			}).catch(() => {});
+			void fanoutEdu(
+				storage,
+				serverName,
+				signingKey,
+				federationClient,
+				roomId,
+				{
+					edu_type: "m.typing",
+					content: { room_id: roomId, user_id: userId, typing },
+				},
+			).catch(() => {});
 		}
 
 		return { status: 200, body: {} };

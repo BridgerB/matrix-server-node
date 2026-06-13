@@ -768,9 +768,9 @@ const processPdu = async (
 	const roomVersion =
 		roomForVersion?.room_version ??
 		(pdu.type === "m.room.create"
-			? ((pdu.content as Record<string, unknown>).room_version as
+			? (((pdu.content as Record<string, unknown>).room_version as
 					| string
-					| undefined) ?? "10"
+					| undefined) ?? "10")
 			: undefined);
 
 	// Strict canonical-JSON validation (room version 6+). Reject any event whose
@@ -886,9 +886,7 @@ const processPdu = async (
 		// reject (Synapse `on_receive_pdu` raises FederationError 403). Crucially,
 		// we do NOT call /state_ids for the top-level event's missing prev here.
 		if (missingPrevs.length > 0 && allowGapFill) {
-			throw new Error(
-				"Your server isn't divulging details about prev_events",
-			);
+			throw new Error("Your server isn't divulging details about prev_events");
 		}
 
 		if (missingPrevs.length > 0) {
@@ -1167,8 +1165,7 @@ const processPdu = async (
 						)}/${encodeURIComponent(eventId)}`,
 					);
 					const chain =
-						(res.body as { auth_chain?: PDU[] } | undefined)?.auth_chain ??
-						[];
+						(res.body as { auth_chain?: PDU[] } | undefined)?.auth_chain ?? [];
 					for (const ev of chain) {
 						if (
 							ev.type === "m.room.member" &&
@@ -1438,9 +1435,9 @@ export const putFederationSend =
 			const eventIdRoomVersion =
 				roomForVersion?.room_version ??
 				(pdu.type === "m.room.create"
-					? ((pdu.content as Record<string, unknown>).room_version as
+					? (((pdu.content as Record<string, unknown>).room_version as
 							| string
-							| undefined) ?? "10"
+							| undefined) ?? "10")
 					: undefined);
 			const eventId = computeEventId(pdu, eventIdRoomVersion);
 			try {
@@ -1483,12 +1480,7 @@ export const putFederationSend =
 
 		for (const edu of edus) {
 			try {
-				await processEdu(
-					storage,
-					edu,
-					origin,
-					serverName as ServerName,
-				);
+				await processEdu(storage, edu, origin, serverName as ServerName);
 			} catch {}
 		}
 

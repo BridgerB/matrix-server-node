@@ -69,7 +69,7 @@ const stateAtEvent = async (
 		}
 	}
 	return latestByKey;
-}
+};
 
 /**
  * Decide whether the requesting server is allowed to see an event in full,
@@ -103,7 +103,7 @@ const eventVisibleToServer = async (
 		if (membership === "invite" && visibility === "invited") return true;
 	}
 	return false;
-}
+};
 
 /**
  * Resolve the state map to serve for a federation `/state` or `/state_ids`
@@ -144,7 +144,7 @@ const resolveStateMap = async (
 	// storage lookup, then the current room state.
 	const fromStorage = await storage.getStateAtEvent(roomId, eventId);
 	return fromStorage ?? room.state_events;
-}
+};
 
 /**
  * Compute the auth chain to return alongside a set of state events. Mirrors
@@ -162,7 +162,7 @@ const authChainForState = async (
 		for (const id of event.auth_events) authEventIds.add(id);
 	}
 	return storage.getAuthChain([...authEventIds]);
-}
+};
 
 export const getFederationEvent =
 	(storage: Storage, serverName: string): Handler =>
@@ -294,8 +294,7 @@ export const getFederationEventAuth =
 			throw forbidden("Server is denied by ACL");
 
 		const servers = await storage.getServersInRoom(roomId);
-		if (!servers.includes(origin))
-			throw forbidden("Host not in room");
+		if (!servers.includes(origin)) throw forbidden("Host not in room");
 
 		const authChain = await storage.getAuthChain(result.event.auth_events);
 
@@ -504,9 +503,7 @@ export const getFederationTimestampToEvent =
 		// annotated with its `streamPos` (stream_ordering).
 		const all = await storage.getEventsByRoomSince(roomId, 0, 1_000_000);
 
-		let best:
-			| { event: PDU; eventId: EventId; streamPos: number }
-			| undefined;
+		let best: { event: PDU; eventId: EventId; streamPos: number } | undefined;
 		for (const cand of all.events) {
 			const candTs = cand.event.origin_server_ts;
 			if (dir === "f" ? candTs < ts : candTs > ts) continue;

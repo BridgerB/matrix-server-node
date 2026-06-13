@@ -42,9 +42,7 @@ export const requireUIAA = async (
 		await storage.addUIAACompleted(sessionId, "m.login.dummy");
 	} else if (auth.type === "m.login.password") {
 		// Validate password for m.login.password UIAA
-		const identifier = auth.identifier as
-			| Record<string, unknown>
-			| undefined;
+		const identifier = auth.identifier as Record<string, unknown> | undefined;
 		const password = auth.password as string | undefined;
 
 		const failWithUIAA = (error: string): never => {
@@ -71,11 +69,11 @@ export const requireUIAA = async (
 		} else if (userId) {
 			// Fall back to the authenticated user
 			const colonIdx = userId.indexOf(":");
-			localpart =
-				colonIdx > 0 ? userId.slice(1, colonIdx) : userId.slice(1);
+			localpart = colonIdx > 0 ? userId.slice(1, colonIdx) : userId.slice(1);
 		}
 
-		if (!localpart) return failWithUIAA("Cannot determine user for authentication");
+		if (!localpart)
+			return failWithUIAA("Cannot determine user for authentication");
 
 		const account = await storage.getUserByLocalpart(localpart);
 		if (!account) return failWithUIAA("Invalid username or password");
@@ -83,10 +81,7 @@ export const requireUIAA = async (
 		const valid = await verifyPassword(password, account.password_hash);
 		if (!valid) return failWithUIAA("Invalid username or password");
 
-		await storage.addUIAACompleted(
-			sessionId,
-			"m.login.password" as AuthType,
-		);
+		await storage.addUIAACompleted(sessionId, "m.login.password" as AuthType);
 	} else {
 		throw badJson(`Unsupported auth type: ${auth.type}`);
 	}

@@ -51,9 +51,8 @@ export const sendDeviceListUpdate = async (
 	for (const roomId of roomIds) {
 		const members = await storage.getMemberEvents(roomId);
 		for (const { event } of members) {
-			const membership = (
-				event.content as { membership?: string } | undefined
-			)?.membership;
+			const membership = (event.content as { membership?: string } | undefined)
+				?.membership;
 			if (membership !== "join") continue;
 			const memberId = event.state_key;
 			if (!memberId) continue;
@@ -217,12 +216,7 @@ export const postKeysUpload =
 
 		// When a local user's device keys change, notify remote servers that
 		// share a room with them. Only possible when federation deps are wired.
-		if (
-			deviceKeysChanged &&
-			serverName &&
-			signingKey &&
-			federationClient
-		) {
+		if (deviceKeysChanged && serverName && signingKey && federationClient) {
 			void sendDeviceListUpdate(
 				storage,
 				serverName,
@@ -311,11 +305,7 @@ const isRemoteUserTracked = async (
 			for (const m of members) {
 				const sk = m.event.state_key;
 				if (!sk) continue;
-				if (
-					membershipOf(m.event) !==
-					"join"
-				)
-					continue;
+				if (membershipOf(m.event) !== "join") continue;
 				if (domainOf(sk) === serverName) return true;
 			}
 			continue;
@@ -365,9 +355,7 @@ export const postKeysQuery =
 		// which tracks a user's devices through /user/devices and serves later
 		// /keys/query from the cache (TestPartialStateJoin Device_list_tracking).
 		const trackedUncached: UserId[] = [];
-		for (const [targetUserId, deviceIds] of Object.entries(
-			body.device_keys,
-		)) {
+		for (const [targetUserId, deviceIds] of Object.entries(body.device_keys)) {
 			const dest = domainOf(targetUserId) as ServerName;
 			if (!serverName || !federationClient || dest === serverName) {
 				localRequest[targetUserId] = deviceIds;
@@ -406,12 +394,10 @@ export const postKeysQuery =
 			if (crossKeys.master_key)
 				masterKeys[targetUserId as UserId] = crossKeys.master_key;
 			if (crossKeys.self_signing_key)
-				selfSigningKeys[targetUserId as UserId] =
-					crossKeys.self_signing_key;
+				selfSigningKeys[targetUserId as UserId] = crossKeys.self_signing_key;
 			// user_signing_key is only returned for the requesting user
 			if (targetUserId === userId && crossKeys.user_signing_key)
-				userSigningKeys[targetUserId as UserId] =
-					crossKeys.user_signing_key;
+				userSigningKeys[targetUserId as UserId] = crossKeys.user_signing_key;
 		}
 
 		// Federate remote users: one request per destination server, merging
@@ -464,34 +450,19 @@ export const postKeysQuery =
 						{ device_keys: group },
 					);
 					const resp = (respBody ?? {}) as {
-						device_keys?: Record<
-							UserId,
-							Record<DeviceId, DeviceKeys>
-						>;
+						device_keys?: Record<UserId, Record<DeviceId, DeviceKeys>>;
 						master_keys?: Record<UserId, CrossSigningKey>;
 						self_signing_keys?: Record<UserId, CrossSigningKey>;
 					};
 					if (resp.device_keys) {
-						for (const [u, keys] of Object.entries(
-							resp.device_keys,
-						)) {
+						for (const [u, keys] of Object.entries(resp.device_keys)) {
 							deviceKeys[u as UserId] = keys;
 							// Cache for subsequent queries once we are tracking the
 							// user (they share a non-partial room with us), so the next
 							// /keys/query is served locally without federating.
-							if (
-							await isRemoteUserTracked(
-								storage,
-								u as UserId,
-								serverName,
-							)
-						) {
+							if (await isRemoteUserTracked(storage, u as UserId, serverName)) {
 								for (const [did, k] of Object.entries(keys)) {
-									await storage.setDeviceKeys(
-										u as UserId,
-										did as DeviceId,
-										k,
-									);
+									await storage.setDeviceKeys(u as UserId, did as DeviceId, k);
 								}
 							}
 						}
@@ -502,9 +473,7 @@ export const postKeysQuery =
 						}
 					}
 					if (resp.self_signing_keys) {
-						for (const [u, k] of Object.entries(
-							resp.self_signing_keys,
-						)) {
+						for (const [u, k] of Object.entries(resp.self_signing_keys)) {
 							selfSigningKeys[u as UserId] = k;
 						}
 					}
@@ -523,15 +492,10 @@ export const postKeysQuery =
 				master_keys:
 					Object.keys(masterKeys).length > 0 ? masterKeys : undefined,
 				self_signing_keys:
-					Object.keys(selfSigningKeys).length > 0
-						? selfSigningKeys
-						: undefined,
+					Object.keys(selfSigningKeys).length > 0 ? selfSigningKeys : undefined,
 				user_signing_keys:
-					Object.keys(userSigningKeys).length > 0
-						? userSigningKeys
-						: undefined,
-				failures:
-					Object.keys(failures).length > 0 ? failures : undefined,
+					Object.keys(userSigningKeys).length > 0 ? userSigningKeys : undefined,
+				failures: Object.keys(failures).length > 0 ? failures : undefined,
 			},
 		};
 	};
@@ -559,16 +523,12 @@ export const postKeysClaim =
 			ServerName,
 			Record<string, Record<string, string>>
 		>();
-		for (const [targetUserId, devices] of Object.entries(
-			body.one_time_keys,
-		)) {
+		for (const [targetUserId, devices] of Object.entries(body.one_time_keys)) {
 			const dest = domainOf(targetUserId) as ServerName;
-			const isLocal =
-				!serverName || !federationClient || dest === serverName;
+			const isLocal = !serverName || !federationClient || dest === serverName;
 			for (const [targetDeviceId, algorithm] of Object.entries(devices)) {
 				if (isLocal) {
-					(localClaims[targetUserId] ??= {})[targetDeviceId] =
-						algorithm;
+					(localClaims[targetUserId] ??= {})[targetDeviceId] = algorithm;
 				} else {
 					const group = remoteByDest.get(dest) ?? {};
 					(group[targetUserId] ??= {})[targetDeviceId] = algorithm;
@@ -620,18 +580,12 @@ export const postKeysClaim =
 					const resp = (respBody ?? {}) as {
 						one_time_keys?: Record<
 							UserId,
-							Record<
-								DeviceId,
-								Record<string, string | JsonObject>
-							>
+							Record<DeviceId, Record<string, string | JsonObject>>
 						>;
 					};
 					if (resp.one_time_keys) {
-						for (const [u, devs] of Object.entries(
-							resp.one_time_keys,
-						)) {
-							const existing = (oneTimeKeys[u as UserId] ??=
-								{}) as Record<
+						for (const [u, devs] of Object.entries(resp.one_time_keys)) {
+							const existing = (oneTimeKeys[u as UserId] ??= {}) as Record<
 								DeviceId,
 								Record<string, string | JsonObject>
 							>;
@@ -652,8 +606,7 @@ export const postKeysClaim =
 			status: 200,
 			body: {
 				one_time_keys: oneTimeKeys,
-				failures:
-					Object.keys(failures).length > 0 ? failures : undefined,
+				failures: Object.keys(failures).length > 0 ? failures : undefined,
 			},
 		};
 	};
@@ -687,8 +640,7 @@ export const putSendToDevice =
 
 		for (const [targetUserId, devices] of Object.entries(body.messages)) {
 			const dest = domainOf(targetUserId) as ServerName;
-			const isLocal =
-				!serverName || !federationClient || dest === serverName;
+			const isLocal = !serverName || !federationClient || dest === serverName;
 
 			if (!isLocal) {
 				// Forward verbatim to the owning server. The "*" wildcard device
@@ -794,8 +746,7 @@ export const getKeysChanges =
 			await storage.getChangedDeviceUsers(from, to),
 		);
 
-		const roomMemberships =
-			await storage.getRoomsForUserWithMembership(userId);
+		const roomMemberships = await storage.getRoomsForUserWithMembership(userId);
 		const joinedRoomIds = roomMemberships
 			.filter((r) => r.membership === "join")
 			.map((r) => r.roomId);
@@ -808,11 +759,7 @@ export const getKeysChanges =
 				const membership = (
 					event.content as { membership?: string } | undefined
 				)?.membership;
-				if (
-					memberUserId &&
-					membership === "join" &&
-					memberUserId !== userId
-				) {
+				if (memberUserId && membership === "join" && memberUserId !== userId) {
 					sharedUsers.add(memberUserId);
 				}
 			}

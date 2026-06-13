@@ -11,11 +11,7 @@ import { bundleAggregations } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { ClientEvent, PDU } from "../types/events.ts";
-import type {
-	EventId,
-	RoomId,
-	ServerName,
-} from "../types/identifiers.ts";
+import type { EventId, RoomId, ServerName } from "../types/identifiers.ts";
 
 export const getRelations =
 	(storage: Storage): Handler =>
@@ -406,8 +402,15 @@ const processRelationships = async (params: {
 	returned: { event: PDU; eventId: EventId }[];
 	limited: boolean;
 }> => {
-	const { storage, serverName, req, rootEntry, roomId, graph, federationClient } =
-		params;
+	const {
+		storage,
+		serverName,
+		req,
+		rootEntry,
+		roomId,
+		graph,
+		federationClient,
+	} = params;
 
 	const returned: { event: PDU; eventId: EventId }[] = [rootEntry];
 	const included = new Set<EventId>([rootEntry.eventId]);

@@ -65,7 +65,8 @@ export const getSsoRedirect =
 	(ssoConfig: SsoConfig): Handler =>
 	async (req) => {
 		const redirectUrl = req.query.get("redirectUrl");
-		if (!redirectUrl) throw missingParam("Missing required 'redirectUrl' query parameter");
+		if (!redirectUrl)
+			throw missingParam("Missing required 'redirectUrl' query parameter");
 
 		cleanExpired(ssoStateStore);
 
@@ -195,7 +196,9 @@ export const getSsoCallback =
 		});
 
 		if (tokenResponse.status !== 200) {
-			throw forbidden("Failed to exchange authorization code with OIDC provider");
+			throw forbidden(
+				"Failed to exchange authorization code with OIDC provider",
+			);
 		}
 
 		const tokenBody = tokenResponse.body as Record<string, unknown>;

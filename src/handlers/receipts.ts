@@ -103,11 +103,7 @@ export const postReceipt =
 
 		// Federate the receipt to remote servers in the room. Private receipts
 		// (`m.read.private`) MUST NOT be federated.
-		if (
-			serverName &&
-			federationClient &&
-			receiptType !== "m.read.private"
-		) {
+		if (serverName && federationClient && receiptType !== "m.read.private") {
 			void sendReceiptEdu(
 				storage,
 				serverName,

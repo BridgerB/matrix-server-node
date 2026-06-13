@@ -1888,9 +1888,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 	private partialStateWaiters = new Map<string, Set<() => void>>();
 	private unPartialStatedAt = new Map<string, number>();
 
-	async getRoomUnPartialStatedAt(
-		roomId: RoomId,
-	): Promise<number | undefined> {
+	async getRoomUnPartialStatedAt(roomId: RoomId): Promise<number | undefined> {
 		return this.unPartialStatedAt.get(roomId);
 	}
 
@@ -1904,10 +1902,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		this.events.set(eventId, event);
 		const room = this.rooms.get(roomId);
 		if (room) {
-			room.state_events.set(
-				`${event.type}\x1f${event.state_key ?? ""}`,
-				event,
-			);
+			room.state_events.set(`${event.type}\x1f${event.state_key ?? ""}`, event);
 		}
 	}
 

@@ -37,8 +37,7 @@ export const postAppservicePing =
 		await new Promise<void>((resolve, reject) => {
 			try {
 				const url = new URL("/_matrix/app/v1/ping", reg.url);
-				const reqFn =
-					url.protocol === "https:" ? httpsRequest : httpRequest;
+				const reqFn = url.protocol === "https:" ? httpsRequest : httpRequest;
 
 				const outReq = reqFn(
 					url,
@@ -54,11 +53,7 @@ export const postAppservicePing =
 					(res) => {
 						res.resume();
 						if (res.statusCode && res.statusCode >= 400) {
-							reject(
-								new Error(
-									`Appservice returned status ${res.statusCode}`,
-								),
-							);
+							reject(new Error(`Appservice returned status ${res.statusCode}`));
 						} else {
 							resolve();
 						}

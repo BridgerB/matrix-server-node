@@ -129,8 +129,12 @@ const handleTokenLogin = async (
 	if (account.is_deactivated)
 		throw forbidden("This account has been deactivated");
 
-	const { accessToken, deviceId, refreshToken } =
-		await createSessionAndRespond(storage, req, account.user_id, body);
+	const { accessToken, deviceId, refreshToken } = await createSessionAndRespond(
+		storage,
+		req,
+		account.user_id,
+		body,
+	);
 
 	const response: LoginResponse = {
 		user_id: account.user_id,
@@ -202,8 +206,12 @@ const handleAppserviceLogin = async (
 	if (account.is_deactivated)
 		throw forbidden("This account has been deactivated");
 
-	const { accessToken, deviceId, refreshToken } =
-		await createSessionAndRespond(storage, req, account.user_id, body);
+	const { accessToken, deviceId, refreshToken } = await createSessionAndRespond(
+		storage,
+		req,
+		account.user_id,
+		body,
+	);
 
 	const response: LoginResponse = {
 		user_id: account.user_id,

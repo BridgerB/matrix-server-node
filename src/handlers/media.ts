@@ -63,7 +63,8 @@ const signedFederationGet = (
 						const headers: Record<string, string> = {};
 						for (const [k, v] of Object.entries(res.headers)) {
 							if (typeof v === "string") headers[k.toLowerCase()] = v;
-							else if (Array.isArray(v)) headers[k.toLowerCase()] = v.join(", ");
+							else if (Array.isArray(v))
+								headers[k.toLowerCase()] = v.join(", ");
 						}
 						resolve({
 							status: res.statusCode ?? 500,
@@ -86,7 +87,9 @@ const parseContentDisposition = (
 	value: string,
 ): { isAttachment: boolean; fileName?: string } => {
 	const semi = value.indexOf(";");
-	const disp = (semi === -1 ? value : value.slice(0, semi)).trim().toLowerCase();
+	const disp = (semi === -1 ? value : value.slice(0, semi))
+		.trim()
+		.toLowerCase();
 	const isAttachment = disp === "attachment";
 	// filename*=UTF-8''<pct-encoded> (RFC 5987)
 	const ext = value.match(/filename\*\s*=\s*[^']*'[^']*'([^;]+)/i);
@@ -189,7 +192,8 @@ const parseFederationMediaResponse = (
 		return { data: Buffer.alloc(0), contentType: "application/octet-stream" };
 	}
 
-	const partCt = filePart.headers.get("content-type") ?? "application/octet-stream";
+	const partCt =
+		filePart.headers.get("content-type") ?? "application/octet-stream";
 	const disposition = filePart.headers.get("content-disposition");
 	const fileName = disposition
 		? parseContentDisposition(disposition).fileName
@@ -337,11 +341,7 @@ export const getDownload =
 
 		if (!result) {
 			// Media lives on a remote server: fetch it over federation.
-			if (
-				ourServerName &&
-				signingKey &&
-				serverName !== ourServerName
-			) {
+			if (ourServerName && signingKey && serverName !== ourServerName) {
 				const remote = await fetchRemoteMedia(
 					ourServerName,
 					signingKey,
@@ -424,11 +424,7 @@ export const getThumbnail =
 		const result = await storage.getMedia(serverName, mediaId);
 
 		if (!result) {
-			if (
-				ourServerName &&
-				signingKey &&
-				serverName !== ourServerName
-			) {
+			if (ourServerName && signingKey && serverName !== ourServerName) {
 				const remote = await fetchRemoteMedia(
 					ourServerName,
 					signingKey,
@@ -518,10 +514,7 @@ export const putAsyncUpload =
 			);
 		}
 
-		const existing = await storage.getMedia(
-			serverName as ServerName,
-			mediaId,
-		);
+		const existing = await storage.getMedia(serverName as ServerName, mediaId);
 		if (!existing) throw notFound("Media not found");
 
 		if (existing.metadata.user_id !== userId) {
@@ -543,11 +536,7 @@ export const putAsyncUpload =
 		const data = req.rawBody ?? Buffer.alloc(0);
 
 		if (data.length === 0) {
-			throw new MatrixError(
-				"M_BAD_JSON",
-				"No content provided",
-				400,
-			);
+			throw new MatrixError("M_BAD_JSON", "No content provided", 400);
 		}
 
 		if (data.length > MAX_UPLOAD_SIZE) {

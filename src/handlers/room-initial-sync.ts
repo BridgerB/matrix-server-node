@@ -14,9 +14,7 @@ export const getRoomInitialSync =
 
 		// Get current state
 		const stateEntries = await storage.getAllState(roomId);
-		const state = stateEntries.map((e) =>
-			pduToClientEvent(e.event, e.eventId),
-		);
+		const state = stateEntries.map((e) => pduToClientEvent(e.event, e.eventId));
 
 		// Get recent messages
 		const result = await storage.getEventsByRoom(roomId, 20, undefined, "b");

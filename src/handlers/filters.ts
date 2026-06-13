@@ -67,12 +67,7 @@ function validateFilter(filter: JsonObject): void {
 
 	const room = filter.room;
 	if (isObject(room)) {
-		for (const field of [
-			"state",
-			"timeline",
-			"ephemeral",
-			"account_data",
-		]) {
+		for (const field of ["state", "timeline", "ephemeral", "account_data"]) {
 			const value = room[field];
 			if (value !== undefined && !isObject(value)) {
 				throw badJson(`'room.${field}' must be an object`);

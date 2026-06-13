@@ -106,8 +106,9 @@ const computeRoomName = async (
 ): Promise<string | undefined> => {
 	const nameEvent = await storage.getStateEvent(roomId, "m.room.name", "");
 	if (nameEvent) {
-		const name = (nameEvent.event.content as Record<string, unknown>)
-			.name as string | undefined;
+		const name = (nameEvent.event.content as Record<string, unknown>).name as
+			| string
+			| undefined;
 		if (name) return name;
 	}
 
@@ -117,9 +118,8 @@ const computeRoomName = async (
 		"",
 	);
 	if (canonicalAliasEvent) {
-		const alias = (
-			canonicalAliasEvent.event.content as Record<string, unknown>
-		).alias as string | undefined;
+		const alias = (canonicalAliasEvent.event.content as Record<string, unknown>)
+			.alias as string | undefined;
 		if (alias) return alias;
 	}
 
@@ -337,7 +337,8 @@ const computeSlidingSyncNotifications = async (
 
 	for (const { event } of recentResult.events) {
 		if (event.sender === userId) continue;
-		const senderPl = powerLevels?.users?.[event.sender] ?? powerLevels?.users_default ?? 0;
+		const senderPl =
+			powerLevels?.users?.[event.sender] ?? powerLevels?.users_default ?? 0;
 		const result = evaluatePushRules(userRules, {
 			event,
 			userId,
@@ -373,11 +374,7 @@ const buildRoomData = async (
 	roomData.name = await computeRoomName(storage, roomId, userId);
 
 	// Avatar
-	const avatarEvent = await storage.getStateEvent(
-		roomId,
-		"m.room.avatar",
-		"",
-	);
+	const avatarEvent = await storage.getStateEvent(roomId, "m.room.avatar", "");
 	if (avatarEvent) {
 		roomData.avatar = (avatarEvent.event.content as Record<string, unknown>)
 			.url as string | undefined;
@@ -412,12 +409,7 @@ const buildRoomData = async (
 		await bundleAggregations(storage, timelineClientEvents, userId);
 		roomData.timeline = timelineClientEvents;
 	} else {
-		const result = await storage.getEventsByRoom(
-			roomId,
-			limit,
-			undefined,
-			"b",
-		);
+		const result = await storage.getEventsByRoom(roomId, limit, undefined, "b");
 		const timelineEvents = result.events.reverse();
 		const timelineClientEvents = timelineEvents.map((e) =>
 			pduToClientEvent(e.event, e.eventId),
@@ -440,12 +432,10 @@ const buildRoomData = async (
 	// Member counts
 	const members = await storage.getMemberEvents(roomId);
 	roomData.joined_count = members.filter(
-		(m) =>
-			(m.event.content as Record<string, unknown>).membership === "join",
+		(m) => (m.event.content as Record<string, unknown>).membership === "join",
 	).length;
 	roomData.invited_count = members.filter(
-		(m) =>
-			(m.event.content as Record<string, unknown>).membership === "invite",
+		(m) => (m.event.content as Record<string, unknown>).membership === "invite",
 	).length;
 
 	// Notification counts
@@ -465,10 +455,7 @@ export const slidingSync =
 		const body = (req.body ?? {}) as SlidingSyncRequest;
 
 		const pos = body.pos !== undefined ? parseInt(body.pos, 10) : undefined;
-		const timeout = Math.min(
-			Math.max(body.timeout ?? 0, 0),
-			MAX_TIMEOUT,
-		);
+		const timeout = Math.min(Math.max(body.timeout ?? 0, 0), MAX_TIMEOUT);
 
 		// Long-poll if we have a position and timeout
 		if (pos !== undefined && timeout > 0) {
@@ -569,8 +556,7 @@ export const slidingSync =
 						if (!roomsToInclude.has(roomId)) {
 							roomsToInclude.set(roomId, {
 								requiredState: list.required_state,
-								timelineLimit:
-									list.timeline_limit ?? DEFAULT_TIMELINE_LIMIT,
+								timelineLimit: list.timeline_limit ?? DEFAULT_TIMELINE_LIMIT,
 							});
 						}
 					}
@@ -585,9 +571,7 @@ export const slidingSync =
 
 		// Process room subscriptions
 		if (body.room_subscriptions) {
-			for (const [roomIdStr, sub] of Object.entries(
-				body.room_subscriptions,
-			)) {
+			for (const [roomIdStr, sub] of Object.entries(body.room_subscriptions)) {
 				const roomId = roomIdStr as RoomId;
 				// Only include if user is actually in the room
 				if (joinedRoomIds.includes(roomId)) {
@@ -621,10 +605,7 @@ export const slidingSync =
 
 			// E2EE extension
 			if (body.extensions.e2ee?.enabled) {
-				const otkCounts = await storage.getOneTimeKeyCounts(
-					userId,
-					deviceId,
-				);
+				const otkCounts = await storage.getOneTimeKeyCounts(userId, deviceId);
 				const fallbackKeyTypes = await storage.getFallbackKeyTypes(
 					userId,
 					deviceId,
@@ -652,8 +633,7 @@ export const slidingSync =
 
 			// Account data extension
 			if (body.extensions.account_data?.enabled) {
-				const globalData =
-					await storage.getAllGlobalAccountData(userId);
+				const globalData = await storage.getAllGlobalAccountData(userId);
 				const globalEvents = globalData.map(
 					(d) =>
 						({
@@ -667,14 +647,9 @@ export const slidingSync =
 			}
 
 			// MSC4308 thread subscriptions extension
-			if (
-				body.extensions["io.element.msc4308.thread_subscriptions"]
-					?.enabled
-			) {
+			if (body.extensions["io.element.msc4308.thread_subscriptions"]?.enabled) {
 				const subscribed = getThreadSubscriptionsForSync(userId, pos);
-				response.extensions[
-					"io.element.msc4308.thread_subscriptions"
-				] =
+				response.extensions["io.element.msc4308.thread_subscriptions"] =
 					Object.keys(subscribed).length > 0 ? { subscribed } : {};
 			}
 		}

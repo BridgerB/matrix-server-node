@@ -145,9 +145,14 @@ export const deliverEduToDestination = async (
 
 	let delivered = false;
 	try {
-		const resp = await sendTransaction(federationClient, serverName, destination, {
-			edus: batch.map((b) => b.edu),
-		});
+		const resp = await sendTransaction(
+			federationClient,
+			serverName,
+			destination,
+			{
+				edus: batch.map((b) => b.edu),
+			},
+		);
 		delivered = resp.status < 400;
 		if (!delivered) {
 			console.error(
@@ -165,9 +170,7 @@ export const deliverEduToDestination = async (
 		// Remove every successfully delivered persisted entry.
 		for (const b of batch) {
 			if (b.id !== undefined) {
-				await storage
-					.deleteFederationEdu(b.id)
-					.catch(() => {});
+				await storage.deleteFederationEdu(b.id).catch(() => {});
 			}
 		}
 		return;
@@ -212,9 +215,14 @@ export const flushPendingEdusForDestination = async (
 
 		let delivered = false;
 		try {
-			const resp = await sendTransaction(federationClient, serverName, destination, {
-				edus: pending.map((p) => p.edu),
-			});
+			const resp = await sendTransaction(
+				federationClient,
+				serverName,
+				destination,
+				{
+					edus: pending.map((p) => p.edu),
+				},
+			);
 			delivered = resp.status < 400;
 		} catch {
 			delivered = false;

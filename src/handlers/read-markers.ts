@@ -45,13 +45,7 @@ export const postReadMarkers =
 		const now = Date.now();
 
 		if (read) {
-			await storage.setReceipt(
-				roomId,
-				userId,
-				read as EventId,
-				"m.read",
-				now,
-			);
+			await storage.setReceipt(roomId, userId, read as EventId, "m.read", now);
 			// Federate the public read receipt to remote servers in the room
 			// (private receipts below are never federated).
 			if (serverName && federationClient) {

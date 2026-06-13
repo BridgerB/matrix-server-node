@@ -15,9 +15,7 @@ export const getRoomSummary =
 
 		let roomId: RoomId;
 		if (roomIdOrAlias.startsWith("#")) {
-			const result = await storage.getRoomByAlias(
-				roomIdOrAlias as RoomAlias,
-			);
+			const result = await storage.getRoomByAlias(roomIdOrAlias as RoomAlias);
 			if (!result) throw notFound("Room alias not found");
 			roomId = result.room_id;
 		} else {

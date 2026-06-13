@@ -209,7 +209,9 @@ export const postFederationHierarchy =
 				inaccessibleChildren.push(childId);
 				continue;
 			}
-			children.push(buildFederationRoomEntry(childRoom, childId, suggestedOnly));
+			children.push(
+				buildFederationRoomEntry(childRoom, childId, suggestedOnly),
+			);
 		}
 
 		return {

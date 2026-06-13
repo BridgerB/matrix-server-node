@@ -56,7 +56,9 @@ export const postReportUser =
 			"" as RoomId,
 			"" as EventId,
 			undefined,
-			body.reason ? `User report for ${_targetUserId}: ${body.reason}` : `User report for ${_targetUserId}`,
+			body.reason
+				? `User report for ${_targetUserId}: ${body.reason}`
+				: `User report for ${_targetUserId}`,
 		);
 
 		return { status: 200, body: {} };

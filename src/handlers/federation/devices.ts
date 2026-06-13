@@ -118,14 +118,11 @@ export const postFederationKeysQuery =
 				deviceKeys[userId as UserId] = enriched;
 
 				// Cross-signing keys for the queried user, if present.
-				const crossKeys = await storage.getCrossSigningKeys(
-					userId as UserId,
-				);
+				const crossKeys = await storage.getCrossSigningKeys(userId as UserId);
 				if (crossKeys.master_key)
 					masterKeys[userId as UserId] = crossKeys.master_key;
 				if (crossKeys.self_signing_key)
-					selfSigningKeys[userId as UserId] =
-						crossKeys.self_signing_key;
+					selfSigningKeys[userId as UserId] = crossKeys.self_signing_key;
 			}
 		}
 
@@ -170,8 +167,10 @@ export const postFederationKeysClaim =
 						algorithm,
 					);
 					if (claimed) {
-						const userKeys = (oneTimeKeys[userId as UserId] ??=
-							{}) as Record<DeviceId, Record<KeyId, unknown>>;
+						const userKeys = (oneTimeKeys[userId as UserId] ??= {}) as Record<
+							DeviceId,
+							Record<KeyId, unknown>
+						>;
 						const deviceKeys = (userKeys[deviceId as DeviceId] ??=
 							{}) as Record<KeyId, unknown>;
 						deviceKeys[claimed.keyId] = claimed.key;

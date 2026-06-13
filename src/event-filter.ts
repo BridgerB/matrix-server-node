@@ -19,7 +19,8 @@ export const matchesRoomEventFilter = (
 	if (!filter) return true;
 
 	if (filter.types && !matchesAny(filter.types, event.type)) return false;
-	if (filter.not_types && matchesAny(filter.not_types, event.type)) return false;
+	if (filter.not_types && matchesAny(filter.not_types, event.type))
+		return false;
 
 	if (filter.senders && !filter.senders.includes(event.sender as UserId)) {
 		return false;

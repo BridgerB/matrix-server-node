@@ -174,9 +174,7 @@ export const postFederationPublicRooms =
 		const startIdx = body.since ? parseInt(body.since, 10) : 0;
 		const chunk = filtered.slice(startIdx, startIdx + limit);
 		const nextBatch =
-			startIdx + limit < filtered.length
-				? String(startIdx + limit)
-				: undefined;
+			startIdx + limit < filtered.length ? String(startIdx + limit) : undefined;
 
 		return {
 			status: 200,

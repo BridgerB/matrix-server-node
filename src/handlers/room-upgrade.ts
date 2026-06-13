@@ -259,7 +259,13 @@ export const postRoomUpgrade =
 		// Copy over any room-scoped push rules for all local joined users from the
 		// old room id to the new room id (matches Synapse's
 		// copy_push_rules_from_room_to_room_for_user behaviour on upgrade).
-		await migrateRoomPushRules(storage, serverName, oldRoom, oldRoomId, newRoomId);
+		await migrateRoomPushRules(
+			storage,
+			serverName,
+			oldRoom,
+			oldRoomId,
+			newRoomId,
+		);
 
 		return {
 			status: 200,
@@ -327,8 +333,7 @@ export async function migrateRoomPushRules(
 		.map(([, event]) => event)
 		.filter(
 			(event) =>
-				event.state_key?.endsWith(suffix) &&
-				membershipOf(event) === "join",
+				event.state_key?.endsWith(suffix) && membershipOf(event) === "join",
 		)
 		.map((event) => event.state_key as UserId);
 
@@ -366,4 +371,3 @@ export async function copyPredecessorPushRulesOnJoin(
 
 	await copyRoomPushRule(storage, userId, oldRoomId as RoomId, newRoomId);
 }
-

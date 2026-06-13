@@ -42,7 +42,13 @@ import { migrateRoomPushRules } from "./room-upgrade.ts";
 import type { Handler } from "../router.ts";
 import type { SigningKey } from "../signing.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { EventId, PDU, RoomAlias, RoomId, UserId } from "../types/index.ts";
+import type {
+	EventId,
+	PDU,
+	RoomAlias,
+	RoomId,
+	UserId,
+} from "../types/index.ts";
 import type { JsonObject } from "../types/json.ts";
 
 /**
@@ -113,7 +119,11 @@ const requireHistoryVisibleOr404 = async (
 	// Walk the full timeline in ascending stream order, tracking this user's
 	// membership and the active history_visibility, until we reach the target
 	// event. We then decide based on the membership/visibility at that point.
-	const all = await storage.getEventsByRoomSince(roomId as RoomId, 0, 1_000_000);
+	const all = await storage.getEventsByRoomSince(
+		roomId as RoomId,
+		0,
+		1_000_000,
+	);
 	let membership: string | undefined;
 	let activeVisibility = "shared";
 	let found = false;
@@ -183,7 +193,8 @@ const validateCanonicalAlias = async (
 ): Promise<void> => {
 	const candidates: unknown[] = [];
 	if (content.alias !== undefined) candidates.push(content.alias);
-	if (Array.isArray(content.alt_aliases)) candidates.push(...content.alt_aliases);
+	if (Array.isArray(content.alt_aliases))
+		candidates.push(...content.alt_aliases);
 
 	for (const candidate of candidates) {
 		if (!isWellFormedAlias(candidate)) {
@@ -208,9 +219,10 @@ const validateCanonicalAlias = async (
  * users never get to set `origin_server_ts`. Returns `undefined` when no valid
  * override applies, in which case `buildEvent` uses `Date.now()` as normal.
  */
-const resolveTsOverride = (
-	req: { query: URLSearchParams; userId?: string },
-): number | undefined => {
+const resolveTsOverride = (req: {
+	query: URLSearchParams;
+	userId?: string;
+}): number | undefined => {
 	const tsStr = req.query.get("ts");
 	if (tsStr === null) return undefined;
 	if (!req.userId) return undefined;
@@ -317,7 +329,13 @@ export const putSendEvent =
 		const tsOverride = resolveTsOverride(req);
 		const { event, eventId } =
 			tsOverride !== undefined
-				? applyTsOverride(built.event, tsOverride, serverName, signingKey, room.room_version)
+				? applyTsOverride(
+						built.event,
+						tsOverride,
+						serverName,
+						signingKey,
+						room.room_version,
+					)
 				: built;
 
 		const eventSize = Buffer.byteLength(canonicalJson(event), "utf-8");
@@ -625,8 +643,7 @@ export const getStateEvent =
 		if (departed.allowed) {
 			const stateEntries = await stateAsOf(storage, roomId, departed.leavePos);
 			entry = stateEntries.find(
-				(e) =>
-					e.event.type === eventType && e.event.state_key === stateKey,
+				(e) => e.event.type === eventType && e.event.state_key === stateKey,
 			);
 		} else {
 			await requireJoinedOrWorldReadable(storage, roomId, req.userId);
@@ -701,9 +718,7 @@ const backfillMissingHistory = async (
 		if (seeds.size === 0) break; // No gap — nothing to backfill.
 
 		const v = [...seeds].slice(0, 10);
-		const qs = v
-			.map((id) => `v=${encodeURIComponent(id)}`)
-			.join("&");
+		const qs = v.map((id) => `v=${encodeURIComponent(id)}`).join("&");
 		const path = `/_matrix/federation/v1/backfill/${encodeURIComponent(
 			roomId,
 		)}?${qs}&limit=100`;
@@ -716,7 +731,11 @@ const backfillMissingHistory = async (
 			} catch {
 				continue; // Try the next server.
 			}
-			if (res.status !== 200 || typeof res.body !== "object" || res.body === null)
+			if (
+				res.status !== 200 ||
+				typeof res.body !== "object" ||
+				res.body === null
+			)
 				continue;
 
 			const pdus = (res.body as { pdus?: unknown }).pdus;
@@ -795,7 +814,10 @@ const parseTopoToken = (
 	if (!s) return undefined;
 	const m = /^t(\d+)-(\d+)$/.exec(s);
 	if (!m) return undefined;
-	return { depth: parseInt(m[1] as string, 10), stream: parseInt(m[2] as string, 10) };
+	return {
+		depth: parseInt(m[1] as string, 10),
+		stream: parseInt(m[2] as string, 10),
+	};
 };
 
 /** Compare two (depth, stream) positions. Negative if a < b. */
@@ -844,11 +866,7 @@ export const getMessages =
 		// leave point. `departed.leavePos` is the stream position of their last
 		// membership event; events after it are not visible to them (enforced
 		// below by clamping the returned chunk).
-		const messagesDeparted = await resolveDepartedRead(
-			storage,
-			roomId,
-			userId,
-		);
+		const messagesDeparted = await resolveDepartedRead(storage, roomId, userId);
 		if (
 			!messagesRoom ||
 			(!messagesDeparted.allowed &&
@@ -944,9 +962,7 @@ export const getMessages =
 						undefined,
 						"f",
 					);
-					const known = new Set<EventId>(
-						localAll.events.map((e) => e.eventId),
-					);
+					const known = new Set<EventId>(localAll.events.map((e) => e.eventId));
 					const hasGap = localAll.events.some((e) =>
 						e.event.prev_events.some((p) => !known.has(p)),
 					);
@@ -997,7 +1013,10 @@ export const getMessages =
 				localWithPos.events.map((e) => [e.eventId, e.streamPos]),
 			);
 			const ordered = buildDepthOrdered(
-				localWithPos.events.map((e) => ({ event: e.event, eventId: e.eventId })),
+				localWithPos.events.map((e) => ({
+					event: e.event,
+					eventId: e.eventId,
+				})),
 			).map((o) => ({
 				event: o.event,
 				eventId: o.eventId,
@@ -1108,8 +1127,7 @@ export const getMessages =
 
 			// Topological (depth, then stream) ascending order over the whole room.
 			const ordered = [...all.events].sort(
-				(a, b) =>
-					a.event.depth - b.event.depth || a.streamPos - b.streamPos,
+				(a, b) => a.event.depth - b.event.depth || a.streamPos - b.streamPos,
 			);
 
 			let page: { event: PDU; eventId: EventId; streamPos: number }[];
@@ -1154,9 +1172,7 @@ export const getMessages =
 			};
 		}
 
-		let chunk = result.events.map((e) =>
-			pduToClientEvent(e.event, e.eventId),
-		);
+		let chunk = result.events.map((e) => pduToClientEvent(e.event, e.eventId));
 
 		if (filter) {
 			chunk = chunk.filter((e) => matchesRoomEventFilter(e, filter));
@@ -1179,8 +1195,7 @@ export const getMessages =
 		if (ignoredUsers.size > 0) {
 			chunk = chunk.filter(
 				(e) =>
-					e.state_key !== undefined ||
-					!ignoredUsers.has(e.sender as UserId),
+					e.state_key !== undefined || !ignoredUsers.has(e.sender as UserId),
 			);
 		}
 
@@ -1204,9 +1219,7 @@ export const getMessages =
 					sender,
 				);
 				if (entry) {
-					memberEvents.push(
-						pduToClientEvent(entry.event, entry.eventId),
-					);
+					memberEvents.push(pduToClientEvent(entry.event, entry.eventId));
 				}
 			}
 			state = memberEvents;
@@ -1621,9 +1634,7 @@ const findClosestLocalEvent = (
 	ts: number,
 	dir: "f" | "b",
 ): { eventId: EventId; event: PDU } | undefined => {
-	let best:
-		| { eventId: EventId; event: PDU; streamPos: number }
-		| undefined;
+	let best: { eventId: EventId; event: PDU; streamPos: number } | undefined;
 
 	for (const cand of events) {
 		const candTs = cand.event.origin_server_ts;
@@ -1660,9 +1671,7 @@ const findClosestLocalEvent = (
 		if (better) best = cand;
 	}
 
-	return best
-		? { eventId: best.eventId, event: best.event }
-		: undefined;
+	return best ? { eventId: best.eventId, event: best.event } : undefined;
 };
 
 /**
@@ -1672,10 +1681,8 @@ const findClosestLocalEvent = (
  * older than it that could hold a closer event. (Synapse keys this off
  * `event_backward_extremities`; the unheld prev_events are their analogue.)
  */
-const isEventNextToBackwardGap = (
-	event: PDU,
-	held: Set<EventId>,
-): boolean => event.prev_events.some((p) => !held.has(p));
+const isEventNextToBackwardGap = (event: PDU, held: Set<EventId>): boolean =>
+	event.prev_events.some((p) => !held.has(p));
 
 /**
  * Mirror of Synapse's `is_event_next_to_forward_gap` (events_worker.py):

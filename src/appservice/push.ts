@@ -8,10 +8,7 @@ import type { EventId } from "../types/identifiers.ts";
 let txnCounter = 0;
 
 // Cache compiled regexes per registration to avoid recompilation on every event
-const regexCache = new WeakMap<
-	{ regex: string },
-	RegExp
->();
+const regexCache = new WeakMap<{ regex: string }, RegExp>();
 
 const getRegex = (ns: { regex: string }): RegExp => {
 	let cached = regexCache.get(ns);
@@ -45,8 +42,7 @@ export const pushToAppservices = (
 		const matchesUser = reg.namespaces.users?.some(
 			(ns) =>
 				getRegex(ns).test(event.sender) ||
-				(event.state_key !== undefined &&
-					getRegex(ns).test(event.state_key)),
+				(event.state_key !== undefined && getRegex(ns).test(event.state_key)),
 		);
 
 		const matchesRoom = reg.namespaces.rooms?.some((ns) =>
@@ -59,10 +55,7 @@ export const pushToAppservices = (
 		const body = JSON.stringify({ events: [clientEvent] });
 
 		try {
-			const url = new URL(
-				`/_matrix/app/v1/transactions/${txnId}`,
-				reg.url,
-			);
+			const url = new URL(`/_matrix/app/v1/transactions/${txnId}`, reg.url);
 
 			const reqFn = url.protocol === "https:" ? httpsRequest : httpRequest;
 

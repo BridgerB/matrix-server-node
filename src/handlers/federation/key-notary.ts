@@ -7,13 +7,18 @@ export const postKeyQuery =
 	(storage: Storage): Handler =>
 	async (req) => {
 		const body = (req.body ?? {}) as {
-			server_keys?: Record<string, Record<string, { minimum_valid_until_ts?: number }>>;
+			server_keys?: Record<
+				string,
+				Record<string, { minimum_valid_until_ts?: number }>
+			>;
 		};
 
 		const serverKeys: ServerKeys[] = [];
 
 		if (body.server_keys) {
-			for (const [serverName, keyRequests] of Object.entries(body.server_keys)) {
+			for (const [serverName, keyRequests] of Object.entries(
+				body.server_keys,
+			)) {
 				for (const keyId of Object.keys(keyRequests)) {
 					const cached = await storage.getServerKeys(
 						serverName as ServerName,

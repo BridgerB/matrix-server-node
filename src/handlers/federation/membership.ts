@@ -126,8 +126,9 @@ const findAuthorisingLocalUser = (
 
 	for (const [key, event] of room.state_events) {
 		if (!key.startsWith("m.room.member\x1f")) continue;
-		const membership = (event.content as Record<string, unknown>)
-			.membership as string | undefined;
+		const membership = (event.content as Record<string, unknown>).membership as
+			| string
+			| undefined;
 		if (membership !== "join") continue;
 
 		const memberId = key.slice("m.room.member\x1f".length) as UserId;
@@ -148,7 +149,10 @@ const findAuthorisingLocalUser = (
  * m.room.join_rules content.allow with type "m.room_membership".
  */
 /** True if `serverName` has at least one currently-joined member in `room`. */
-const serverHasJoinedMember = (room: RoomState, serverName: string): boolean => {
+const serverHasJoinedMember = (
+	room: RoomState,
+	serverName: string,
+): boolean => {
 	for (const [key, event] of room.state_events) {
 		if (!key.startsWith("m.room.member\x1f")) continue;
 		if ((event.content as Record<string, unknown>).membership !== "join")
@@ -1026,7 +1030,8 @@ export const putSendKnock =
 		// The knocking room version must actually support knocking.
 		const joinRulesEvent = room.state_events.get("m.room.join_rules\x1f");
 		const joinRule = joinRulesEvent
-			? ((joinRulesEvent.content as Record<string, unknown>).join_rule as string)
+			? ((joinRulesEvent.content as Record<string, unknown>)
+					.join_rule as string)
 			: "invite";
 		if (joinRule !== "knock" && joinRule !== "knock_restricted") {
 			throw forbidden("Room does not support knocking");

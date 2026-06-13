@@ -7,7 +7,10 @@ import type { UserId } from "../types/index.ts";
 const lockedUsers = new Map<UserId, boolean>();
 
 /** In-memory suspended status for user accounts */
-const suspendedUsers = new Map<UserId, { suspended: boolean; reason?: string }>();
+const suspendedUsers = new Map<
+	UserId,
+	{ suspended: boolean; reason?: string }
+>();
 
 export const putAdminLock =
 	(storage: Storage): Handler =>

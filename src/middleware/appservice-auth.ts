@@ -16,10 +16,7 @@ import type { DeviceId, UserId } from "../types/identifiers.ts";
  * to the appservice's sender_localpart-based user ID.
  */
 export const requireAppserviceAuth =
-	(
-		registrations: AppserviceRegistration[],
-		serverName: string,
-	): Middleware =>
+	(registrations: AppserviceRegistration[], serverName: string): Middleware =>
 	async (req, next) => {
 		const token = extractAccessToken(req);
 
@@ -36,9 +33,7 @@ export const requireAppserviceAuth =
 			);
 
 			if (masqueradeUserId !== senderUser && !inNamespace) {
-				throw forbidden(
-					"Application service cannot masquerade as this user",
-				);
+				throw forbidden("Application service cannot masquerade as this user");
 			}
 
 			req.userId = masqueradeUserId as UserId;

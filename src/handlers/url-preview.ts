@@ -13,7 +13,8 @@ import type { StoredMedia } from "../types/internal.ts";
  */
 function isPrivateIp(ip: string): boolean {
 	// IPv4 private ranges
-	if (ip.startsWith("10.") || ip.startsWith("127.") || ip === "0.0.0.0") return true;
+	if (ip.startsWith("10.") || ip.startsWith("127.") || ip === "0.0.0.0")
+		return true;
 	if (ip.startsWith("172.")) {
 		const second = parseInt(ip.split(".")[1] ?? "0", 10);
 		if (second >= 16 && second <= 31) return true;
@@ -22,7 +23,8 @@ function isPrivateIp(ip: string): boolean {
 	if (ip.startsWith("169.254.")) return true;
 	// IPv6 loopback and private
 	if (ip === "::1" || ip === "::") return true;
-	if (ip.startsWith("fc") || ip.startsWith("fd") || ip.startsWith("fe80")) return true;
+	if (ip.startsWith("fc") || ip.startsWith("fd") || ip.startsWith("fe80"))
+		return true;
 	return false;
 }
 
@@ -129,10 +131,7 @@ function fetchUrlRaw(
 					return;
 				}
 
-				if (
-					res.statusCode &&
-					(res.statusCode < 200 || res.statusCode >= 400)
-				) {
+				if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 400)) {
 					res.resume();
 					reject(new Error(`HTTP error: ${res.statusCode.toString()}`));
 					return;
@@ -318,24 +317,13 @@ export const getUrlPreview =
 			const ogImage = ogTags["og:image"];
 			if (ogImage && storage && serverName) {
 				try {
-					const imageUrl = new URL(
-						decodeHtmlEntities(ogImage),
-						url,
-					);
-					if (
-						imageUrl.protocol === "http:" ||
-						imageUrl.protocol === "https:"
-					) {
+					const imageUrl = new URL(decodeHtmlEntities(ogImage), url);
+					if (imageUrl.protocol === "http:" || imageUrl.protocol === "https:") {
 						await assertPublicHost(imageUrl.hostname);
-						const img = await fetchUrlRaw(
-							imageUrl.toString(),
-							MAX_IMAGE_SIZE,
-						);
+						const img = await fetchUrlRaw(imageUrl.toString(), MAX_IMAGE_SIZE);
 
 						const mediaId = randomBytes(18).toString("base64url");
-						const hash = createHash("sha256")
-							.update(img.body)
-							.digest("base64");
+						const hash = createHash("sha256").update(img.body).digest("base64");
 						const media: StoredMedia = {
 							media_id: mediaId,
 							origin: serverName as ServerName,

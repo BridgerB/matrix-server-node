@@ -2266,9 +2266,7 @@ export class PostgresStorage extends EphemeralMixin implements Storage {
 	private partialStateWaiters = new Map<string, Set<() => void>>();
 	private unPartialStatedAt = new Map<string, number>();
 
-	async getRoomUnPartialStatedAt(
-		roomId: RoomId,
-	): Promise<number | undefined> {
+	async getRoomUnPartialStatedAt(roomId: RoomId): Promise<number | undefined> {
 		return this.unPartialStatedAt.get(roomId);
 	}
 

@@ -26,8 +26,10 @@ const anyAsync = async <T>(
 	return false;
 };
 
-const stateContent = <T>(room: { state_events: Map<string, PDU> } | undefined, key: string) =>
-	room?.state_events.get(key)?.content as T | undefined;
+const stateContent = <T>(
+	room: { state_events: Map<string, PDU> } | undefined,
+	key: string,
+) => room?.state_events.get(key)?.content as T | undefined;
 
 export const postUserDirectorySearch =
 	(storage: Storage): Handler =>
@@ -65,7 +67,8 @@ export const postUserDirectorySearch =
 				room,
 				"m.room.history_visibility\x1f",
 			)?.history_visibility;
-			const pub = joinRule === "public" || historyVisibility === "world_readable";
+			const pub =
+				joinRule === "public" || historyVisibility === "world_readable";
 			publicnessCache.set(roomId, pub);
 			return pub;
 		};

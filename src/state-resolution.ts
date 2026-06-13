@@ -32,8 +32,9 @@ const isPowerEvent = (event: PDU): boolean => {
 		}
 	}
 	if (event.type === "m.room.member") {
-		const membership = (event.content as Record<string, unknown>)
-			.membership as string | undefined;
+		const membership = (event.content as Record<string, unknown>).membership as
+			| string
+			| undefined;
 		if (membership === "leave" || membership === "ban") {
 			return event.sender !== event.state_key;
 		}
@@ -169,7 +170,9 @@ const reverseTopologicalPowerSort = (
 		const ev = authEventMap.get(id);
 		powerLevel.set(
 			id,
-			ev ? getPowerLevelForSender(ev, authEventMap, roomVersion, createEvent) : 0,
+			ev
+				? getPowerLevelForSender(ev, authEventMap, roomVersion, createEvent)
+				: 0,
 		);
 	}
 
@@ -296,11 +299,7 @@ const mainlineSort = (
 	const order = new Map<EventId, [number, number, EventId]>();
 	for (const id of eventIds) {
 		const ev = authEventMap.get(id);
-		order.set(id, [
-			ev ? mainlineDepth(ev) : 0,
-			ev?.origin_server_ts ?? 0,
-			id,
-		]);
+		order.set(id, [ev ? mainlineDepth(ev) : 0, ev?.origin_server_ts ?? 0, id]);
 	}
 
 	return [...eventIds].sort((a, b) => {
@@ -400,9 +399,7 @@ const computeConflictedSubgraph = (
 		const stack: Frame[] = [
 			{
 				eventId: start,
-				remaining: startEvent
-					? [...(startEvent.auth_events as EventId[])]
-					: [],
+				remaining: startEvent ? [...(startEvent.auth_events as EventId[])] : [],
 			},
 		];
 
@@ -568,9 +565,7 @@ export const resolveState = (
 	);
 
 	// v2.0: start with unconflicted state; v2.1: start with empty map.
-	const resolvedState = useV21
-		? new Map<string, PDU>()
-		: new Map(unconflicted);
+	const resolvedState = useV21 ? new Map<string, PDU>() : new Map(unconflicted);
 
 	applyEvents(
 		sortedPower,

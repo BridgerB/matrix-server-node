@@ -89,8 +89,11 @@ const registry = new Map<string, DelayedEvent>();
  */
 const stateKeyIndex = new Map<string, string>(); // stateTriple -> delayId
 
-const stateTripleOf = (roomId: string, type: string, stateKey: string): string =>
-	`${roomId}${KEY_SEP}${type}${KEY_SEP}${stateKey}`;
+const stateTripleOf = (
+	roomId: string,
+	type: string,
+	stateKey: string,
+): string => `${roomId}${KEY_SEP}${type}${KEY_SEP}${stateKey}`;
 
 let delayCounter = 0;
 const newDelayId = (): string =>
@@ -106,7 +109,10 @@ const loadPersisted = async (
 	storage: Storage,
 	userId: string,
 ): Promise<Record<string, PersistedDelayedEvent>> => {
-	const data = await storage.getGlobalAccountData(userId as UserId, ACCOUNT_DATA_TYPE);
+	const data = await storage.getGlobalAccountData(
+		userId as UserId,
+		ACCOUNT_DATA_TYPE,
+	);
 	if (!data || typeof data !== "object") return {};
 	const events = (data as JsonObject).events;
 	if (!events || typeof events !== "object" || Array.isArray(events)) return {};
@@ -278,7 +284,11 @@ const parseDelayMs = (raw: string | null): number | undefined => {
 
 const requireObjectBody = (body: unknown): JsonObject => {
 	const content = body ?? {};
-	if (typeof content !== "object" || content === null || Array.isArray(content)) {
+	if (
+		typeof content !== "object" ||
+		content === null ||
+		Array.isArray(content)
+	) {
 		throw badJson("Event content must be a JSON object");
 	}
 	return content as JsonObject;

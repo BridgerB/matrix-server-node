@@ -21,14 +21,14 @@ export const getSmtpConfig = (): SmtpConfig | undefined => {
 		secure: process.env.SMTP_SECURE === "true",
 		username: process.env.SMTP_USERNAME,
 		password: process.env.SMTP_PASSWORD,
-		from: process.env.SMTP_FROM ?? `noreply@${process.env.SERVER_NAME ?? "localhost"}`,
+		from:
+			process.env.SMTP_FROM ??
+			`noreply@${process.env.SERVER_NAME ?? "localhost"}`,
 	};
 };
 
 /** Read a line (ending with \r\n) from the socket. Returns the full line including status code. */
-const readResponse = (
-	socket: net.Socket | tls.TLSSocket,
-): Promise<string> => {
+const readResponse = (socket: net.Socket | tls.TLSSocket): Promise<string> => {
 	return new Promise<string>((resolve, reject) => {
 		let buffer = "";
 		const onData = (chunk: Buffer) => {
@@ -112,9 +112,12 @@ const connectPlain = (host: string, port: number): Promise<net.Socket> => {
 /** Connect a TLS socket directly (for SMTPS / port 465). */
 const connectTls = (host: string, port: number): Promise<tls.TLSSocket> => {
 	return new Promise((resolve, reject) => {
-		const socket = tls.connect({ host, port, rejectUnauthorized: false }, () => {
-			resolve(socket);
-		});
+		const socket = tls.connect(
+			{ host, port, rejectUnauthorized: false },
+			() => {
+				resolve(socket);
+			},
+		);
 		socket.on("error", reject);
 		socket.setTimeout(30_000);
 		socket.on("timeout", () => {

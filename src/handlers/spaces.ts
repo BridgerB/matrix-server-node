@@ -244,8 +244,7 @@ export const getSpaceHierarchy =
 			visited.add(roomId);
 
 			const roomServer = domainOf(roomId);
-			const isLocal =
-				localServer === undefined || roomServer === localServer;
+			const isLocal = localServer === undefined || roomServer === localServer;
 
 			let entry: HierarchyRoom | undefined;
 			let childItems: { roomId: RoomId; via: ServerName[] }[] = [];

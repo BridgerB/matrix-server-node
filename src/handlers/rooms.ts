@@ -77,8 +77,9 @@ const findAuthorisingLocalUser = (
 
 	for (const [key, event] of room.state_events) {
 		if (!key.startsWith("m.room.member\x1f")) continue;
-		const membership = (event.content as Record<string, unknown>)
-			.membership as string | undefined;
+		const membership = (event.content as Record<string, unknown>).membership as
+			| string
+			| undefined;
 		if (membership !== "join") continue;
 
 		const memberId = key.slice("m.room.member\x1f".length) as UserId;
@@ -91,7 +92,10 @@ const findAuthorisingLocalUser = (
 		// Prefer the highest power level; break ties deterministically by the
 		// lexicographically smallest user ID so the same authoriser is chosen on
 		// every invocation regardless of Map iteration order.
-		if (memberPl > bestPl || (memberPl === bestPl && (!best || memberId < best))) {
+		if (
+			memberPl > bestPl ||
+			(memberPl === bestPl && (!best || memberId < best))
+		) {
 			best = memberId;
 			bestPl = memberPl;
 		}
@@ -120,8 +124,9 @@ const serversThatCanIssueInvite = (
 	const servers: ServerName[] = [];
 	for (const [key, event] of room.state_events) {
 		if (!key.startsWith("m.room.member\x1f")) continue;
-		const membership = (event.content as Record<string, unknown>)
-			.membership as string | undefined;
+		const membership = (event.content as Record<string, unknown>).membership as
+			| string
+			| undefined;
 		if (membership !== "join") continue;
 
 		const memberId = key.slice("m.room.member\x1f".length) as UserId;
@@ -157,8 +162,9 @@ const isServerResidentInRoom = (
 
 	for (const [key, event] of room.state_events) {
 		if (!key.startsWith("m.room.member\x1f")) continue;
-		const membership = (event.content as Record<string, unknown>)
-			.membership as string | undefined;
+		const membership = (event.content as Record<string, unknown>).membership as
+			| string
+			| undefined;
 		if (membership !== "join") continue;
 		const memberId = key.slice("m.room.member\x1f".length);
 		const memberServer = domainOf(memberId);
@@ -299,7 +305,18 @@ export const postCreateRoom =
 
 		// Validate room_version is a known version
 		const KNOWN_ROOM_VERSIONS = new Set([
-			"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12",
+			"1",
+			"2",
+			"3",
+			"4",
+			"5",
+			"6",
+			"7",
+			"8",
+			"9",
+			"10",
+			"11",
+			"12",
 			// MSC3757 (owned state events) unstable room version
 			"org.matrix.msc3757.10",
 		]);
@@ -309,7 +326,10 @@ export const postCreateRoom =
 		) {
 			throw badJson("room_version must be a string");
 		}
-		if (body.room_version !== undefined && !KNOWN_ROOM_VERSIONS.has(body.room_version)) {
+		if (
+			body.room_version !== undefined &&
+			!KNOWN_ROOM_VERSIONS.has(body.room_version)
+		) {
 			throw new MatrixError(
 				"M_UNSUPPORTED_ROOM_VERSION",
 				`Unsupported room version: ${body.room_version}`,
@@ -378,8 +398,7 @@ export const postCreateRoom =
 			// explicitly-supplied ones, instead of being written to
 			// power_levels.users.
 			if (preset === "trusted_private_chat" && body.invite) {
-				const existing = (createContent.additional_creators ??
-					[]) as string[];
+				const existing = (createContent.additional_creators ?? []) as string[];
 				const merged = [...existing];
 				for (const invitee of body.invite) {
 					if (invitee !== userId && !merged.includes(invitee)) {
@@ -766,9 +785,7 @@ const sendMembershipEvent = async (
 		const postServers = new Set(
 			await storage.getServersInRoom(roomId as RoomId),
 		);
-		const extra = destinations.filter(
-			(d) => !postServers.has(d as ServerName),
-		);
+		const extra = destinations.filter((d) => !postServers.has(d as ServerName));
 		if (extra.length > 0) {
 			const stored = await storage.getEvent(eventId as EventId);
 			if (stored) {
@@ -885,9 +902,7 @@ export const postJoin =
 			} else {
 				// A remote alias must be resolved over federation via the alias's
 				// home server (GET /_matrix/federation/v1/query/directory).
-				const aliasDomain = roomIdOrAlias.slice(
-					roomIdOrAlias.indexOf(":") + 1,
-				);
+				const aliasDomain = roomIdOrAlias.slice(roomIdOrAlias.indexOf(":") + 1);
 				if (aliasDomain && aliasDomain !== serverName && federationClient) {
 					const dirRes = await federationClient.request(
 						aliasDomain as ServerName,
@@ -966,9 +981,7 @@ export const postJoin =
 			//     remote server lets us join via that server, per dendrite). Derived
 			//     from actual room state, so safe to keep regardless.
 			const serverNameParams = req.query.getAll("server_name");
-			const roomServer = roomId.includes(":")
-				? domainOf(roomId)
-				: undefined;
+			const roomServer = roomId.includes(":") ? domainOf(roomId) : undefined;
 
 			const serversToTry: string[] = [];
 			for (const s of priorityServers) {
@@ -1134,7 +1147,11 @@ export const postJoin =
 						roomId as RoomId,
 						userId as UserId,
 					).catch(() => {});
-					await copyPredecessorPushRulesOnJoin(storage, userId as UserId, roomId as RoomId);
+					await copyPredecessorPushRulesOnJoin(
+						storage,
+						userId as UserId,
+						roomId as RoomId,
+					);
 					return { status: 200, body: { room_id: roomId } };
 				}
 			} else {
@@ -1160,7 +1177,11 @@ export const postJoin =
 					roomId as RoomId,
 					userId as UserId,
 				).catch(() => {});
-				await copyPredecessorPushRulesOnJoin(storage, userId as UserId, roomId as RoomId);
+				await copyPredecessorPushRulesOnJoin(
+					storage,
+					userId as UserId,
+					roomId as RoomId,
+				);
 				return { status: 200, body: { room_id: roomId } };
 			}
 		}
@@ -1274,9 +1295,7 @@ const performFederationJoin = async (
 	// because those are computed over the redacted event, and for v12 create
 	// events `room_id` is not part of the redacted/reference form.
 	const ensureRoomId = (events: PDU[]): PDU[] =>
-		events.map((e) =>
-			e.room_id ? e : ({ ...e, room_id: roomId } as PDU),
-		);
+		events.map((e) => (e.room_id ? e : ({ ...e, room_id: roomId } as PDU)));
 
 	// Are we joining a room we ALREADY hold? The cached room handed out by getRoom
 	// is by-reference and importRoomState does not refresh it, so without help the
@@ -1292,9 +1311,7 @@ const performFederationJoin = async (
 		? getMembership(priorRoom, userId)
 		: undefined;
 	const wasDeparted =
-		!!priorRoom &&
-		priorMembership !== "join" &&
-		priorMembership !== "invite";
+		!!priorRoom && priorMembership !== "join" && priorMembership !== "invite";
 
 	await storage.importRoomState(
 		roomId,
@@ -1346,7 +1363,10 @@ const performFederationJoin = async (
 	// is still running, or another local user joining mid-resync), the in-flight
 	// resync already covers it — do not start a second one (which would issue a
 	// duplicate /state_ids the resident no longer expects).
-	if (sendJoinBody.members_omitted && !(await storage.getRoomPartialState(roomId))) {
+	if (
+		sendJoinBody.members_omitted &&
+		!(await storage.getRoomPartialState(roomId))
+	) {
 		// Servers to try for the resync, in order: the server we joined THROUGH
 		// (synapse's `joined_via` — it gave us the partial state and is the
 		// authoritative source for the state at our join), then the others it named
@@ -1616,9 +1636,7 @@ const resyncPartialStateRoom = async (
 							const key = `${event.type}\x1f${event.state_key}`;
 							const supersededByNewer = (psByKey.get(key) ?? []).some(
 								(c) =>
-									c.id !== evId &&
-									!c.rejected &&
-									c.event.depth > event.depth,
+									c.id !== evId && !c.rejected && c.event.depth > event.depth,
 							);
 							if (!supersededByNewer) {
 								await storage.setStateEventHistorical(roomId, event, evId);
@@ -1648,9 +1666,7 @@ const resyncPartialStateRoom = async (
 							const prior = (psByKey.get(key) ?? [])
 								.filter(
 									(c) =>
-										c.id !== evId &&
-										!c.rejected &&
-										c.event.depth < event.depth,
+										c.id !== evId && !c.rejected && c.event.depth < event.depth,
 								)
 								.sort((a, b) => b.event.depth - a.event.depth)[0];
 							if (prior) {
@@ -1692,10 +1708,7 @@ const resyncPartialStateRoom = async (
 			const joinMembership = new Map<string, string | undefined>();
 			for (const ev of stateEvents) {
 				if (ev.type === "m.room.member") {
-					joinMembership.set(
-						ev.state_key ?? "",
-						membershipOf(ev),
-					);
+					joinMembership.set(ev.state_key ?? "", membershipOf(ev));
 				}
 			}
 			// Current membership (after reconciliation): collect currently-joined
@@ -1796,9 +1809,7 @@ export const postLeave =
 		// because even when a local user is the only member we know about, the
 		// authoritative copy of the room lives on the owning server and must be
 		// told. This mirrors how dendrite/synapse distribute membership changes.
-		const roomServer = roomId.includes(":")
-			? domainOf(roomId)
-			: undefined;
+		const roomServer = roomId.includes(":") ? domainOf(roomId) : undefined;
 		// If we are resident (hold the room's state with a joined local user) we can
 		// build the leave event ourselves and fan it out as a normal PDU — including
 		// to the owning server — rather than round-tripping make_leave/send_leave.
@@ -1997,11 +2008,7 @@ export const postInvite =
 		// invitee's server learns about (and co-signs) the invite. Mirrors
 		// synapse's FederationHandler.send_invite / the inbound putFederationInvite
 		// we already implement on the receiving side.
-		if (
-			signingKey &&
-			federationClient &&
-			inviteeServer !== serverName
-		) {
+		if (signingKey && federationClient && inviteeServer !== serverName) {
 			await performOutboundInvite(
 				storage,
 				serverName,
@@ -2168,9 +2175,7 @@ export const postKnock =
 		// federation (make_knock/send_knock) so the resident servers learn of the
 		// knock. Candidate servers come from ?server_name= and the room ID, plus
 		// any server we already know holds this room.
-		const roomServer = roomId.includes(":")
-			? domainOf(roomId)
-			: undefined;
+		const roomServer = roomId.includes(":") ? domainOf(roomId) : undefined;
 		const needsFederation =
 			signingKey !== undefined &&
 			federationClient !== undefined &&

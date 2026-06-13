@@ -55,7 +55,9 @@ const parseRoomVersionNumber = (
 };
 
 /** Check whether a room version is v12 or later */
-export const isRoomVersion12Plus = (roomVersion: string | undefined): boolean => {
+export const isRoomVersion12Plus = (
+	roomVersion: string | undefined,
+): boolean => {
 	const num = parseRoomVersionNumber(roomVersion);
 	return num !== undefined && num >= 12;
 };
@@ -524,9 +526,9 @@ export const selectAuthEvents = (
 		// content rather than the live join_rules so the auth chain is stable
 		// regardless of later join-rule changes.
 		if (content?.["membership"] === "join") {
-			const authorisingUser = content[
-				"join_authorised_via_users_server"
-			] as string | undefined;
+			const authorisingUser = content["join_authorised_via_users_server"] as
+				| string
+				| undefined;
 			if (authorisingUser && authorisingUser !== stateKey) {
 				const authUserMemberId = getStateEventId(
 					roomState,
@@ -567,7 +569,10 @@ export const getUserPowerLevel = (
 	roomState: RoomState,
 ): number => {
 	// In room version 12+, room creators have infinite power level (MSC4289).
-	if (isRoomVersion12Plus(roomState.room_version) && isRoomCreator(userId, roomState)) {
+	if (
+		isRoomVersion12Plus(roomState.room_version) &&
+		isRoomCreator(userId, roomState)
+	) {
 		return CREATOR_POWER_LEVEL;
 	}
 
@@ -642,7 +647,9 @@ const checkMembershipAuth = (event: PDU, roomState: RoomState): void => {
 				return;
 			}
 
-			const joinRulesEvent = roomState.state_events.get("m.room.join_rules\x1f");
+			const joinRulesEvent = roomState.state_events.get(
+				"m.room.join_rules\x1f",
+			);
 			const joinRule = joinRulesEvent
 				? ((joinRulesEvent.content as Record<string, unknown>)
 						.join_rule as string)
@@ -657,9 +664,7 @@ const checkMembershipAuth = (event: PDU, roomState: RoomState): void => {
 					// Verify the authorizing user is actually joined to this room
 					const authUserMembership = getMembership(roomState, joinAuth);
 					if (authUserMembership !== "join") {
-						throw forbidden(
-							"Authorizing user is not a member of the room",
-						);
+						throw forbidden("Authorizing user is not a member of the room");
 					}
 					return;
 				}
@@ -788,9 +793,7 @@ const checkMembershipAuth = (event: PDU, roomState: RoomState): void => {
 				: "invite";
 
 			if (knockJoinRule !== "knock" && knockJoinRule !== "knock_restricted") {
-				throw forbidden(
-					"Room join rules do not allow knocking",
-				);
+				throw forbidden("Room join rules do not allow knocking");
 			}
 			return;
 		}
@@ -966,7 +969,11 @@ export const checkEventAuth = (
 	// by another user ID (normal power levels still apply, so this is a stricter
 	// gate, never a looser one).
 	const stateKey = event.state_key;
-	if (stateKey !== undefined && stateKey.startsWith("@") && stateKey !== event.sender) {
+	if (
+		stateKey !== undefined &&
+		stateKey.startsWith("@") &&
+		stateKey !== event.sender
+	) {
 		if (isMsc3757Enabled(roomState.room_version)) {
 			// Parse the owning user ID out of the state key: it is the state key
 			// up to (but excluding) the first "_" that appears after the domain's
@@ -1024,9 +1031,7 @@ export const requireJoinedRoom = async (
 };
 
 export const isWorldReadable = (roomState: RoomState): boolean => {
-	const hvEvent = roomState.state_events.get(
-		"m.room.history_visibility\x1f",
-	);
+	const hvEvent = roomState.state_events.get("m.room.history_visibility\x1f");
 	if (!hvEvent) return false;
 	return (
 		(hvEvent.content as Record<string, unknown>).history_visibility ===

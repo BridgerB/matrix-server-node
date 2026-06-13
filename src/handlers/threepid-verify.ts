@@ -12,10 +12,7 @@ const generateVerificationToken = (): string => {
 };
 
 /** Build the HTML email body for verification. */
-const buildVerificationEmail = (
-	token: string,
-	serverName: string,
-): string => {
+const buildVerificationEmail = (token: string, serverName: string): string => {
 	return `<!DOCTYPE html>
 <html>
 <head><title>Email Verification</title></head>
@@ -46,8 +43,7 @@ const handleEmailRequestToken = async (
 ): Promise<{ status: number; body: { sid: string } }> => {
 	if (!body.client_secret) throw badJson("Missing 'client_secret'");
 	if (!body.email) throw badJson("Missing 'email'");
-	if (body.send_attempt === undefined)
-		throw badJson("Missing 'send_attempt'");
+	if (body.send_attempt === undefined) throw badJson("Missing 'send_attempt'");
 
 	const sessionId = generateSessionId();
 	const token = generateVerificationToken();
@@ -86,7 +82,10 @@ const handleEmailRequestToken = async (
 };
 
 /** Return M_THREEPID_DENIED for unsupported MSISDN (phone) verification. */
-const msisdnDenied = (): { status: number; body: { errcode: string; error: string } } => ({
+const msisdnDenied = (): {
+	status: number;
+	body: { errcode: string; error: string };
+} => ({
 	status: 403,
 	body: {
 		errcode: "M_THREEPID_DENIED",
@@ -118,11 +117,9 @@ export const postRegisterEmailRequestToken =
 	};
 
 /** POST /_matrix/client/v3/register/msisdn/requestToken */
-export const postRegisterMsisdnRequestToken =
-	(): Handler =>
-	async (_req) => {
-		return msisdnDenied();
-	};
+export const postRegisterMsisdnRequestToken = (): Handler => async (_req) => {
+	return msisdnDenied();
+};
 
 /** POST /_matrix/client/v3/account/3pid/email/requestToken */
 export const postAccount3pidEmailRequestToken =
@@ -139,8 +136,7 @@ export const postAccount3pidEmailRequestToken =
 
 /** POST /_matrix/client/v3/account/3pid/msisdn/requestToken */
 export const postAccount3pidMsisdnRequestToken =
-	(): Handler =>
-	async (_req) => {
+	(): Handler => async (_req) => {
 		return msisdnDenied();
 	};
 
@@ -158,33 +154,25 @@ export const postPasswordEmailRequestToken =
 	};
 
 /** POST /_matrix/client/v3/account/password/msisdn/requestToken */
-export const postPasswordMsisdnRequestToken =
-	(): Handler =>
-	async (_req) => {
-		return msisdnDenied();
-	};
+export const postPasswordMsisdnRequestToken = (): Handler => async (_req) => {
+	return msisdnDenied();
+};
 
 /** POST /_matrix/client/v3/account/3pid/bind — stub (no identity server integration) */
-export const postThreePidBind =
-	(): Handler =>
-	async (_req) => {
-		return { status: 200, body: {} };
-	};
+export const postThreePidBind = (): Handler => async (_req) => {
+	return { status: 200, body: {} };
+};
 
 /** POST /_matrix/client/v3/account/3pid/unbind — stub (no identity server integration) */
-export const postThreePidUnbind =
-	(): Handler =>
-	async (_req) => {
-		return { status: 200, body: { id_server_unbind_result: "no-support" } };
-	};
+export const postThreePidUnbind = (): Handler => async (_req) => {
+	return { status: 200, body: { id_server_unbind_result: "no-support" } };
+};
 
 /** GET /_matrix/client/v1/register/m.login.registration_token/validity */
-export const getRegistrationTokenValidity =
-	(): Handler =>
-	async (_req) => {
-		// We don't support registration tokens, so always return invalid
-		return { status: 200, body: { valid: false } };
-	};
+export const getRegistrationTokenValidity = (): Handler => async (_req) => {
+	// We don't support registration tokens, so always return invalid
+	return { status: 200, body: { valid: false } };
+};
 
 const USERNAME_RE = /^[a-z0-9._=\-/]+$/;
 
@@ -301,7 +289,11 @@ export const postKnock =
 		if (roomIdOrAlias.startsWith("#")) {
 			const resolved = await storage.getRoomByAlias(roomIdOrAlias);
 			if (!resolved) {
-				throw new MatrixError("M_NOT_FOUND", `Room alias ${roomIdOrAlias} not found`, 404);
+				throw new MatrixError(
+					"M_NOT_FOUND",
+					`Room alias ${roomIdOrAlias} not found`,
+					404,
+				);
 			}
 			roomId = resolved.room_id;
 		} else {

@@ -239,11 +239,7 @@ export const deleteKeyBackupRoom =
 		const roomId = req.params.roomId as RoomId;
 		const version = getVersionParam(req);
 
-		const result = await storage.deleteKeyBackupKeys(
-			userId,
-			version,
-			roomId,
-		);
+		const result = await storage.deleteKeyBackupKeys(userId, version, roomId);
 		if (!result) throw notFound("Backup version not found");
 
 		return { status: 200, body: result };
@@ -256,10 +252,7 @@ export const putKeyBackupAll =
 		const userId = req.userId as UserId;
 		const version = getVersionParam(req);
 		const body = req.body as {
-			rooms: Record<
-				RoomId,
-				{ sessions: Record<string, KeyBackupData> }
-			>;
+			rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
 		};
 
 		const result = await storage.putKeyBackupKeys(

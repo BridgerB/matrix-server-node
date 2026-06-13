@@ -14,10 +14,7 @@ export const getIgnoredInviteSenders = async (
 	storage: Storage,
 	userId: UserId,
 ): Promise<Set<UserId>> => {
-	const data = await storage.getGlobalAccountData(
-		userId,
-		"m.ignored_invites",
-	);
+	const data = await storage.getGlobalAccountData(userId, "m.ignored_invites");
 	if (!data) return new Set();
 	const content = data as Record<string, unknown>;
 	const senders = content.senders as Record<string, unknown> | undefined;

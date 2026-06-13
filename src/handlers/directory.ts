@@ -168,9 +168,7 @@ export const getDirectoryRoom =
 		const roomServers = await storage.getServersInRoom(
 			result.room_id as RoomId,
 		);
-		const servers = [
-			...new Set([...(result.servers ?? []), ...roomServers]),
-		];
+		const servers = [...new Set([...(result.servers ?? []), ...roomServers])];
 		return {
 			status: 200,
 			body: { room_id: result.room_id, servers },

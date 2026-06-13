@@ -44,9 +44,7 @@ export const eventMatchesSearchTerm = (
  * after `from` (a stream position) and report the total match count and the
  * next pagination token.
  */
-export const paginateSearchMatches = <
-	T extends { streamPos: number },
->(
+export const paginateSearchMatches = <T extends { streamPos: number }>(
 	allMatches: T[],
 	limit: number,
 	from?: string,

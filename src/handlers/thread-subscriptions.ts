@@ -66,8 +66,11 @@ const nextBumpStamp = (streamPosition: number): number => {
 	return bumpCounter;
 };
 
-const stateKey = (userId: string, roomId: string, threadRootId: string): string =>
-	`${userId}${KEY_SEP}${roomId}${KEY_SEP}${threadRootId}`;
+const stateKey = (
+	userId: string,
+	roomId: string,
+	threadRootId: string,
+): string => `${userId}${KEY_SEP}${roomId}${KEY_SEP}${threadRootId}`;
 
 const matrixError = (
 	errcode: string,
@@ -160,15 +163,8 @@ export const putThreadSubscription =
 			// If the user explicitly unsubscribed after this cause event was
 			// sent, refuse to (re-)create an automatic subscription for it.
 			if (existing.unsubscribedAtOrdinal !== undefined) {
-				const { ordinal } = await getRoomTimelineInfo(
-					storage,
-					roomId,
-					causeId,
-				);
-				if (
-					ordinal !== undefined &&
-					ordinal < existing.unsubscribedAtOrdinal
-				) {
+				const { ordinal } = await getRoomTimelineInfo(storage, roomId, causeId);
+				if (ordinal !== undefined && ordinal < existing.unsubscribedAtOrdinal) {
 					throw matrixError(
 						"IO.ELEMENT.MSC4306.M_CONFLICTING_UNSUBSCRIPTION",
 						"A more recent unsubscription conflicts with this automatic subscription",
@@ -253,7 +249,10 @@ export const deleteThreadSubscription =
 export const getThreadSubscriptionsForSync = (
 	userId: UserId,
 	since?: number,
-): Record<string, Record<string, { automatic: boolean; bump_stamp: number }>> => {
+): Record<
+	string,
+	Record<string, { automatic: boolean; bump_stamp: number }>
+> => {
 	const prefix = `${userId}${KEY_SEP}`;
 	const result: Record<
 		string,
