@@ -1715,7 +1715,7 @@ export const getSync =
 		const userId = req.userId as UserId;
 		const deviceId = req.deviceId as DeviceId;
 		const sinceStr = req.query.get("since");
-		const since = sinceStr !== null ? parseInt(sinceStr, 10) : undefined;
+		let since = sinceStr !== null ? parseInt(sinceStr, 10) : undefined;
 		const timeout = Math.min(
 			Math.max(parseInt(req.query.get("timeout") ?? "0", 10), 0),
 			MAX_TIMEOUT,
@@ -1743,8 +1743,16 @@ export const getSync =
 		// Validate since token
 		if (since !== undefined) {
 			const currentPos = await storage.getStreamPosition();
-			if (since < 0 || since > currentPos) {
+			if (since < 0) {
 				throw new MatrixError("M_UNKNOWN_POS", "Invalid sync token", 400);
+			}
+			// A `since` ahead of our current position is legitimate after a server
+			// restart: the client holds a token issued before the restart, and our
+			// restored stream counter can land slightly behind it. Clamp to the
+			// current position and proceed rather than rejecting — mirrors dendrite's
+			// requestpool, which sets Since = currentPos instead of erroring.
+			if (since > currentPos) {
+				since = currentPos;
 			}
 		}
 
