@@ -17,6 +17,7 @@ import { isServerAllowedByAcl } from "../../federation/acl.ts";
 import type { FederationClient } from "../../federation/client.ts";
 import { fanoutEvent } from "../../federation/outbound.ts";
 import { verifyOriginSignature } from "../../federation/verify.ts";
+import { domainOf } from "../../ids.ts";
 import { getInviteRuleForTarget } from "../../invite-filter.ts";
 import type { Handler } from "../../router.ts";
 import type { SigningKey } from "../../signing.ts";
@@ -26,16 +27,6 @@ import type { PDU, StrippedStateEvent } from "../../types/events.ts";
 import type { EventId, RoomId, ServerName, UserId } from "../../types/index.ts";
 import type { RoomState } from "../../types/internal.ts";
 import type { RoomVersion } from "../../types/room-versions.ts";
-
-/**
- * Domain (server name) portion of a Matrix identifier such as a user ID
- * (`@alice:example.com`) or room ID (`!abc:example.com`) — everything after the
- * first colon.
- */
-const domainOf = (id: string): string => {
-	const idx = id.indexOf(":");
-	return idx === -1 ? "" : id.slice(idx + 1);
-};
 
 /**
  * Strict structural validation shared by send_join / send_leave / send_knock,
@@ -141,7 +132,7 @@ const findAuthorisingLocalUser = (
 
 		const memberId = key.slice("m.room.member\x1f".length) as UserId;
 		// Only local users can authorise a local-style join on this server.
-		const memberServer = memberId.split(":").slice(1).join(":");
+		const memberServer = domainOf(memberId);
 		if (memberServer !== localServerName) continue;
 
 		if (getUserPowerLevel(memberId, room) >= invitePl) {
@@ -163,7 +154,7 @@ const serverHasJoinedMember = (room: RoomState, serverName: string): boolean => 
 		if ((event.content as Record<string, unknown>).membership !== "join")
 			continue;
 		const memberId = key.slice("m.room.member\x1f".length);
-		if (memberId.split(":").slice(1).join(":") === serverName) return true;
+		if (domainOf(memberId) === serverName) return true;
 	}
 	return false;
 };
@@ -491,7 +482,7 @@ export const putSendJoin =
 		// cached keys so the next /keys/query re-fetches fresh ones rather than
 		// serving a stale cache (TestDeviceListUpdates when_remote_user_rejoins).
 		const joiner = event.state_key as UserId;
-		if (joiner.split(":").slice(1).join(":") !== serverName) {
+		if (domainOf(joiner) !== serverName) {
 			await storage.deleteDeviceKeys(joiner);
 		}
 
@@ -563,7 +554,7 @@ export const putSendJoin =
 		// include the joining server itself (its join was just stored above, so
 		// getServersInRoom now sees it) — TestSendJoinPartialStateResponse expects
 		// only the resident server(s).
-		const joiningServer = (event.state_key as string).split(":").slice(1).join(":");
+		const joiningServer = domainOf(event.state_key as string);
 		servers = servers.filter((s) => s !== joiningServer);
 
 		// Distribute the new join to the OTHER servers participating in the room.
@@ -934,7 +925,7 @@ export const getMakeKnock =
 
 		// The knocking user must belong to the requesting (verified) origin server
 		// (synapse on_make_knock_request).
-		const userServer = userId.split(":").slice(1).join(":");
+		const userServer = domainOf(userId);
 		if (userServer !== req.origin)
 			throw forbidden("User does not belong to the requesting server");
 

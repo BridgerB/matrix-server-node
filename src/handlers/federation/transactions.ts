@@ -7,6 +7,7 @@ import {
 import { isServerAllowedByAcl } from "../../federation/acl.ts";
 import type { FederationClient } from "../../federation/client.ts";
 import { verifyOriginSignature } from "../../federation/verify.ts";
+import { domainOf } from "../../ids.ts";
 import { resolveState } from "../../state-resolution.ts";
 import type { Handler } from "../../router.ts";
 import type { SigningKey } from "../../signing.ts";
@@ -1195,206 +1196,200 @@ const processPdu = async (
 	];
 };
 
-const processEdu = async (
+/**
+ * Room-scoped EDUs from a server denied by that room's m.room.server_acl must be
+ * dropped (MSC4163 / TestACLsForEDUs). True when the EDU should be ignored.
+ */
+const aclDeniesRoom = async (
+	storage: Storage,
+	origin: ServerName,
+	roomId: RoomId,
+): Promise<boolean> => {
+	const room = await storage.getRoom(roomId);
+	return room ? !isServerAllowedByAcl(origin, room) : false;
+};
+
+const handleTypingEdu = async (
+	storage: Storage,
+	origin: ServerName,
+	content: Record<string, unknown>,
+): Promise<void> => {
+	const { room_id, user_id, typing } = content as {
+		room_id: RoomId;
+		user_id: UserId;
+		typing: boolean;
+	};
+	if (!room_id || !user_id) return;
+	if (await aclDeniesRoom(storage, origin, room_id)) return;
+	await storage.setTyping(room_id, user_id, typing, 30000);
+};
+
+const handlePresenceEdu = async (
+	storage: Storage,
+	origin: ServerName,
+	content: Record<string, unknown>,
+): Promise<void> => {
+	// Inbound presence EDUs carry a `push` array of per-user updates (NOT flat
+	// top-level fields). Spec: server-server-api m.presence. Synapse
+	// handlers/presence.py iterates `content["push"]`, validates the user's
+	// domain == origin, and updates each user's presence — mirrored here so
+	// remote presence shows up in local /sync (TestRemotePresence).
+	const push = (content.push ?? []) as Array<{
+		user_id?: UserId;
+		presence?: string;
+		status_msg?: string;
+	}>;
+	for (const { user_id, presence, status_msg } of push) {
+		// Only trust presence for users that live on the origin server.
+		if (!user_id || !presence || domainOf(user_id) !== origin) continue;
+		await storage.setPresence(
+			user_id,
+			presence as "online" | "offline" | "unavailable",
+			status_msg,
+		);
+	}
+};
+
+const handleReceiptEdu = async (
+	storage: Storage,
+	origin: ServerName,
+	content: Record<string, unknown>,
+): Promise<void> => {
+	// The federation m.receipt EDU content is keyed room_id -> receipt_type ->
+	// user_id -> { data: { ts }, event_ids: [...] } (server-server-api
+	// m.receipt), NOT a flat { room_id, receipts }.
+	const byRoom = content as Record<
+		string,
+		Record<
+			string,
+			Record<string, { data?: { ts?: number }; event_ids?: string[] }>
+		>
+	>;
+	for (const [roomId, receiptTypes] of Object.entries(byRoom)) {
+		if (await aclDeniesRoom(storage, origin, roomId as RoomId)) continue;
+		for (const [receiptType, users] of Object.entries(receiptTypes)) {
+			for (const [userId, receipt] of Object.entries(users)) {
+				const ts = receipt.data?.ts ?? Date.now();
+				for (const eventId of receipt.event_ids ?? []) {
+					await storage.setReceipt(
+						roomId as RoomId,
+						userId as UserId,
+						eventId as EventId,
+						receiptType,
+						ts,
+					);
+				}
+			}
+		}
+	}
+};
+
+const handleDeviceListUpdateEdu = async (
+	storage: Storage,
+	origin: ServerName,
+	content: Record<string, unknown>,
+): Promise<void> => {
+	// A remote server is telling us one of its users' device list changed. Spec
+	// content: { user_id, device_id, stream_id, prev_id?, deleted?,
+	//   device_display_name?, keys? }. We need only user_id and device_id; the
+	//   keys/display name embedded in the EDU are deliberately ignored (below).
+	const { user_id, device_id } = content as {
+		user_id?: UserId;
+		device_id?: DeviceId;
+	};
+	if (!user_id || !device_id) return;
+
+	// Only trust updates for users that live on the origin server — a server may
+	// not speak for users on other servers.
+	if (domainOf(user_id) !== origin) return;
+
+	// A device-list update means our cached copy of this user's device list (if
+	// any) is now stale. Rather than trust the keys embedded in the EDU, evict the
+	// cache so the next /keys/query triggers a full device-list resync via GET
+	// /user/devices/{userId} — synapse's "stale device list" model. This re-fetches
+	// a tracked user's keys after they rotate them, while an unchanged user keeps
+	// serving from cache.
+	await storage.deleteDeviceKeys(user_id);
+
+	// Record the change on the device-key-change stream so the user shows up in
+	// `device_lists.changed` and local syncers refetch their keys.
+	await storage.recordDeviceKeyChange(user_id);
+};
+
+const handleDirectToDeviceEdu = async (
+	storage: Storage,
+	origin: ServerName,
+	serverName: ServerName,
+	content: Record<string, unknown>,
+): Promise<void> => {
+	// A remote server is delivering to-device messages addressed to our local
+	// users. Spec content: { sender, type, message_id, messages: { user_id: {
+	//   device_id: content } } }. Store each into the target's to-device inbox so
+	//   it surfaces in their /sync to_device.
+	//
+	// Mirrors Synapse handlers/devicemessage.py on_direct_to_device_edu: validate
+	// the sender's domain == origin, build per-device {content,type,sender}, and
+	// persist via add_messages_from_remote_to_device_inbox(origin, message_id, ...)
+	// which dedups by (origin, message_id).
+	const { sender, type, message_id, messages } = content as {
+		sender?: UserId;
+		type?: string;
+		message_id?: string;
+		messages?: Record<UserId, Record<DeviceId, JsonObject>>;
+	};
+	if (!sender || !type || !messages) return;
+
+	// The sending server may only speak for users on its own domain.
+	if (domainOf(sender) !== origin) return;
+
+	// Dedup retried transactions by (origin, message_id): reuse the federation-txn
+	// store keyed by a message-scoped pseudo txn id so a resend of the same
+	// message_id is ignored. With no message_id we skip dedup and process anyway.
+	if (message_id) {
+		const dedupKey = `d2d:${message_id}`;
+		if (await storage.getFederationTxn(origin, dedupKey)) return;
+		await storage.setFederationTxn(origin, dedupKey);
+	}
+
+	for (const [targetUserId, byDevice] of Object.entries(messages)) {
+		// Only accept messages addressed to users on our own server.
+		if (domainOf(targetUserId) !== serverName || !byDevice) continue;
+
+		for (const [targetDeviceId, msgContent] of Object.entries(byDevice)) {
+			const message = { type, sender, content: msgContent };
+			const deviceIds =
+				targetDeviceId === "*"
+					? (await storage.getAllDevices(targetUserId as UserId)).map(
+							(d) => d.device_id,
+						)
+					: [targetDeviceId as DeviceId];
+			for (const deviceId of deviceIds) {
+				await storage.sendToDevice(targetUserId as UserId, deviceId, message);
+			}
+		}
+	}
+};
+
+const processEdu = (
 	storage: Storage,
 	edu: EDU,
 	origin: ServerName,
 	serverName: ServerName,
 ): Promise<void> => {
 	const content = edu.content as Record<string, unknown>;
-
-	// Room-scoped EDUs from a server denied by that room's m.room.server_acl
-	// must be dropped (MSC4163 / TestACLsForEDUs). Returns true if the EDU
-	// should be ignored.
-	const aclDeniesRoom = async (roomId: RoomId): Promise<boolean> => {
-		const room = await storage.getRoom(roomId);
-		if (!room) return false;
-		return !isServerAllowedByAcl(origin, room);
-	};
-
 	switch (edu.edu_type) {
-		case "m.typing": {
-			const { room_id, user_id, typing } = content as {
-				room_id: RoomId;
-				user_id: UserId;
-				typing: boolean;
-			};
-			if (room_id && user_id) {
-				if (await aclDeniesRoom(room_id)) break;
-				await storage.setTyping(room_id, user_id, typing, 30000);
-			}
-			break;
-		}
-		case "m.presence": {
-			// Inbound presence EDUs carry a `push` array of per-user updates
-			// (NOT flat top-level fields). Spec: server-server-api m.presence.
-			// Synapse: handlers/presence.py incoming_presence iterates
-			// `content["push"]`, validates the user's domain == origin, and
-			// updates each user's presence. We mirror that so remote presence
-			// shows up in local /sync (TestRemotePresence).
-			const push = (content.push ?? []) as Array<{
-				user_id?: UserId;
-				presence?: string;
-				status_msg?: string;
-			}>;
-			for (const update of push) {
-				const { user_id, presence, status_msg } = update;
-				if (!user_id || !presence) continue;
-				// Only trust presence for users that live on the origin server.
-				const userServer = user_id.split(":").slice(1).join(":");
-				if (userServer !== origin) continue;
-				await storage.setPresence(
-					user_id,
-					presence as "online" | "offline" | "unavailable",
-					status_msg,
-				);
-			}
-			break;
-		}
-		case "m.receipt": {
-			// The federation m.receipt EDU content is keyed room_id ->
-			// receipt_type -> user_id -> { data: { ts }, event_ids: [...] }
-			// (server-server-api m.receipt), NOT a flat { room_id, receipts }.
-			const byRoom = content as Record<
-				string,
-				Record<
-					string,
-					Record<string, { data?: { ts?: number }; event_ids?: string[] }>
-				>
-			>;
-			for (const [roomId, receiptTypes] of Object.entries(byRoom)) {
-				if (await aclDeniesRoom(roomId as RoomId)) continue;
-				for (const [receiptType, users] of Object.entries(receiptTypes)) {
-					for (const [userId, receipt] of Object.entries(users)) {
-						const ts = receipt.data?.ts ?? Date.now();
-						for (const eventId of receipt.event_ids ?? []) {
-							await storage.setReceipt(
-								roomId as RoomId,
-								userId as UserId,
-								eventId as EventId,
-								receiptType,
-								ts,
-							);
-						}
-					}
-				}
-			}
-			break;
-		}
-		case "m.device_list_update": {
-			// A remote server is telling us one of its users' device list
-			// changed. Record the change so local syncers sharing a room with
-			// that user see them in `device_lists.changed`, and cache the
-			// device keys so `/keys/query` returns them without a round-trip.
-			//
-			// Spec content: { user_id, device_id, stream_id, prev_id?,
-			//   deleted?, device_display_name?, keys? }. We only need user_id and
-			// device_id: the keys/display name embedded in the EDU are deliberately
-			// ignored (see below).
-			const { user_id, device_id } = content as {
-				user_id?: UserId;
-				device_id?: DeviceId;
-			};
-
-			if (!user_id || !device_id) break;
-
-			// Only trust updates for users that actually live on the origin
-			// server — a server may not speak for users on other servers.
-			const userServer = user_id.split(":").slice(1).join(":");
-			if (userServer !== origin) break;
-
-			// A device-list update means our cached copy of this user's device
-			// list (if any) is now stale. Rather than trust the keys embedded in
-			// the EDU, evict the cache so the next /keys/query triggers a full
-			// device-list resync via GET /user/devices/{userId} — synapse's
-			// "stale device list" model. This re-fetches a tracked user's keys
-			// after they rotate them, while an unchanged user keeps serving from
-			// cache.
-			await storage.deleteDeviceKeys(user_id);
-
-			// Record the change on the device-key-change stream so the user shows
-			// up in `device_lists.changed` and local syncers refetch their keys.
-			await storage.recordDeviceKeyChange(user_id);
-			break;
-		}
-		case "m.direct_to_device": {
-			// A remote server is delivering to-device messages addressed to our
-			// local users. Spec content: { sender, type, message_id, messages:
-			//   { user_id: { device_id: content } } }. We store each into the
-			// target's to-device inbox so it surfaces in their /sync to_device.
-			//
-			// Mirrors Synapse handlers/devicemessage.py on_direct_to_device_edu:
-			// it validates the sender's domain == origin, builds per-device
-			// {content,type,sender}, and persists via
-			// add_messages_from_remote_to_device_inbox(origin, message_id, ...)
-			// which dedups by (origin, message_id).
-			const {
-				sender,
-				type,
-				message_id,
-				messages,
-			} = content as {
-				sender?: UserId;
-				type?: string;
-				message_id?: string;
-				messages?: Record<UserId, Record<DeviceId, JsonObject>>;
-			};
-
-			if (!sender || !type || !messages) break;
-
-			// The sending server may only speak for users on its own domain.
-			const senderServer = sender.split(":").slice(1).join(":");
-			if (senderServer !== origin) break;
-
-			// Dedup retried transactions by (origin, message_id). We reuse the
-			// federation-txn store keyed by a message-scoped pseudo txn id so a
-			// resend of the same message_id is ignored. If no message_id is
-			// supplied we skip dedup and process anyway.
-			if (message_id) {
-				const dedupKey = `d2d:${message_id}`;
-				if (await storage.getFederationTxn(origin, dedupKey)) break;
-				await storage.setFederationTxn(origin, dedupKey);
-			}
-
-			for (const [targetUserId, byDevice] of Object.entries(messages)) {
-				// Only accept messages addressed to users on our own server.
-				const targetServer = targetUserId.split(":").slice(1).join(":");
-				if (targetServer !== serverName) continue;
-				if (!byDevice) continue;
-
-				for (const [targetDeviceId, msgContent] of Object.entries(
-					byDevice,
-				)) {
-					if (targetDeviceId === "*") {
-						const allDevices = await storage.getAllDevices(
-							targetUserId as UserId,
-						);
-						for (const device of allDevices) {
-							await storage.sendToDevice(
-								targetUserId as UserId,
-								device.device_id,
-								{
-									type,
-									sender,
-									content: msgContent,
-								},
-							);
-						}
-					} else {
-						await storage.sendToDevice(
-							targetUserId as UserId,
-							targetDeviceId as DeviceId,
-							{
-								type,
-								sender,
-								content: msgContent,
-							},
-						);
-					}
-				}
-			}
-			break;
-		}
+		case "m.typing":
+			return handleTypingEdu(storage, origin, content);
+		case "m.presence":
+			return handlePresenceEdu(storage, origin, content);
+		case "m.receipt":
+			return handleReceiptEdu(storage, origin, content);
+		case "m.device_list_update":
+			return handleDeviceListUpdateEdu(storage, origin, content);
+		case "m.direct_to_device":
+			return handleDirectToDeviceEdu(storage, origin, serverName, content);
+		default:
+			return Promise.resolve();
 	}
 };
 
