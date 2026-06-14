@@ -8,6 +8,22 @@ import type {
 } from "../types/index.ts";
 import type { StoredSession } from "./interface.ts";
 
+/**
+ * Content-derived etag for a key backup: a hash over every (room_id, session_id)
+ * pair, so the etag changes whenever a session is added, removed or replaced.
+ * Returns "0" for an empty backup.
+ */
+export const keyBackupEtag = (rows: Record<string, unknown>[]): string => {
+	if (rows.length === 0) return "0";
+	let hash = 0;
+	for (const r of rows) {
+		for (const c of `${r.room_id}${r.session_id}`) {
+			hash = ((hash << 5) - hash + c.charCodeAt(0)) | 0;
+		}
+	}
+	return String(Math.abs(hash));
+};
+
 export const rowToUser = (
 	row: Record<string, unknown>,
 	booleanAsInt = false,

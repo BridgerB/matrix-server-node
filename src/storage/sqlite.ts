@@ -48,7 +48,7 @@ import {
 	collapseReceiptsMsc4102,
 	PENDING_FEDERATION_EDU_CAP,
 } from "./interface.ts";
-import { rowToSession, rowToUser } from "./sql-helpers.ts";
+import { keyBackupEtag, rowToSession, rowToUser } from "./sql-helpers.ts";
 
 export const createSqliteStorage = (dbPath: string): Storage => {
 	const eph = createEphemeralStore();
@@ -1669,6 +1669,15 @@ export const createSqliteStorage = (dbPath: string): Storage => {
 		return row.version;
 	};
 
+	const keyBackupEtagFor = (userId: string, version: string): string =>
+		keyBackupEtag(
+			db
+				.prepare(
+					"SELECT room_id, session_id FROM key_backup_data WHERE user_id = ? AND version = ?",
+				)
+				.all(userId, version) as Record<string, unknown>[],
+		);
+
 	const getKeyBackupVersion = async (
 		userId: UserId,
 		version?: string,
@@ -1705,18 +1714,13 @@ export const createSqliteStorage = (dbPath: string): Storage => {
 				"SELECT COUNT(*) as c FROM key_backup_data WHERE user_id = ? AND version = ?",
 			)
 			.get(userId, row.version) as { c: number };
-		const etagRow = db
-			.prepare(
-				"SELECT COUNT(*) as c FROM key_backup_data WHERE user_id = ? AND version = ?",
-			)
-			.get(userId, row.version) as { c: number };
 
 		return {
 			version: row.version,
 			algorithm: row.algorithm,
 			auth_data: JSON.parse(row.auth_data),
 			count: countRow.c,
-			etag: String(etagRow.c),
+			etag: keyBackupEtagFor(userId, row.version),
 		};
 	};
 
@@ -1825,7 +1829,10 @@ export const createSqliteStorage = (dbPath: string): Storage => {
 				"SELECT COUNT(*) as c FROM key_backup_data WHERE user_id = ? AND version = ?",
 			)
 			.get(userId, version) as { c: number };
-		return { count: countRow.c, etag: String(countRow.c) };
+		return {
+			count: countRow.c,
+			etag: keyBackupEtagFor(userId, version),
+		};
 	};
 
 	const getKeyBackupKeys = async (
@@ -1920,7 +1927,10 @@ export const createSqliteStorage = (dbPath: string): Storage => {
 				"SELECT COUNT(*) as c FROM key_backup_data WHERE user_id = ? AND version = ?",
 			)
 			.get(userId, version) as { c: number };
-		return { count: countRow.c, etag: String(countRow.c) };
+		return {
+			count: countRow.c,
+			etag: keyBackupEtagFor(userId, version),
+		};
 	};
 
 	const sendToDevice = async (

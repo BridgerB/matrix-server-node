@@ -46,7 +46,7 @@ import {
 	collapseReceiptsMsc4102,
 	PENDING_FEDERATION_EDU_CAP,
 } from "./interface.ts";
-import { rowToSession, rowToUser } from "./sql-helpers.ts";
+import { keyBackupEtag, rowToSession, rowToUser } from "./sql-helpers.ts";
 
 export const createPostgresStorage = async (
 	connectionString: string,
@@ -1615,14 +1615,7 @@ export const createPostgresStorage = async (
 			"SELECT room_id, session_id FROM key_backup_data WHERE user_id = $1 AND version = $2",
 			[userId, version],
 		);
-		if (rows.length === 0) return "0";
-		let hash = 0;
-		for (const r of rows) {
-			for (const c of `${r.room_id}${r.session_id}`) {
-				hash = ((hash << 5) - hash + c.charCodeAt(0)) | 0;
-			}
-		}
-		return String(Math.abs(hash));
+		return keyBackupEtag(rows);
 	};
 
 	const updateKeyBackupVersion = async (
