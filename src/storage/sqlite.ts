@@ -54,6 +54,7 @@ import {
 	flattenKeyBackupEntries,
 	keyBackupEtag,
 	rowToSession,
+	rowToStoredMedia,
 	rowToUser,
 	shouldReplaceBackupKey,
 } from "./sql-helpers.ts";
@@ -1271,17 +1272,7 @@ export const createSqliteStorage = (dbPath: string): Storage => {
 			.get(serverName, mediaId) as Record<string, unknown> | undefined;
 		if (!row) return undefined;
 		return {
-			metadata: {
-				media_id: row.media_id as string,
-				origin: row.origin as ServerName,
-				user_id: (row.user_id as UserId) ?? undefined,
-				content_type: row.content_type as string,
-				upload_name: (row.upload_name as string) ?? undefined,
-				file_size: row.file_size as number,
-				content_hash: row.content_hash as string,
-				created_at: row.created_at as number,
-				quarantined: row.quarantined === 1,
-			},
+			metadata: rowToStoredMedia(row, true),
 			data: row.data as Buffer,
 		};
 	};

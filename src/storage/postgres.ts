@@ -52,6 +52,7 @@ import {
 	flattenKeyBackupEntries,
 	keyBackupEtag,
 	rowToSession,
+	rowToStoredMedia,
 	rowToUser,
 	shouldReplaceBackupKey,
 } from "./sql-helpers.ts";
@@ -1178,18 +1179,8 @@ export const createPostgresStorage = async (
 		if (!rows[0]) return undefined;
 		const row = rows[0];
 		return {
-			metadata: {
-				media_id: row.media_id,
-				origin: row.origin as ServerName,
-				user_id: row.user_id ?? undefined,
-				content_type: row.content_type,
-				upload_name: row.upload_name ?? undefined,
-				file_size: Number(row.file_size),
-				content_hash: row.content_hash,
-				created_at: Number(row.created_at),
-				quarantined: row.quarantined,
-			},
-			data: row.data,
+			metadata: rowToStoredMedia(row),
+			data: row.data as Buffer,
 		};
 	};
 

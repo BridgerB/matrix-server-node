@@ -8,7 +8,23 @@ import type {
 	UserAccount,
 	UserId,
 } from "../types/index.ts";
+import type { StoredMedia } from "../types/internal.ts";
 import type { StoredSession } from "./interface.ts";
+
+export const rowToStoredMedia = (
+	row: Record<string, unknown>,
+	booleanAsInt = false,
+): StoredMedia => ({
+	media_id: row.media_id as string,
+	origin: row.origin as ServerName,
+	user_id: (row.user_id as UserId) ?? undefined,
+	content_type: row.content_type as string,
+	upload_name: (row.upload_name as string) ?? undefined,
+	file_size: Number(row.file_size),
+	content_hash: row.content_hash as string,
+	created_at: Number(row.created_at),
+	quarantined: booleanAsInt ? row.quarantined === 1 : Boolean(row.quarantined),
+});
 
 /**
  * Flatten the three shapes accepted by PUT key backup keys (a single session, a

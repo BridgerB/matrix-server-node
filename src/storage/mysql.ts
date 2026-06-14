@@ -52,6 +52,7 @@ import {
 	flattenKeyBackupEntries,
 	keyBackupEtag,
 	rowToSession,
+	rowToStoredMedia,
 	rowToUser,
 	shouldReplaceBackupKey,
 } from "./sql-helpers.ts";
@@ -1264,17 +1265,7 @@ export const createMysqlStorage = async (
 		if (!rows[0]) return undefined;
 		const row = rows[0];
 		return {
-			metadata: {
-				media_id: row.media_id as string,
-				origin: row.origin as ServerName,
-				user_id: (row.user_id as string) ?? undefined,
-				content_type: row.content_type as string,
-				upload_name: (row.upload_name as string) ?? undefined,
-				file_size: Number(row.file_size),
-				content_hash: row.content_hash as string,
-				created_at: Number(row.created_at),
-				quarantined: Boolean(row.quarantined),
-			},
+			metadata: rowToStoredMedia(row),
 			data: row.data as Buffer,
 		};
 	};
