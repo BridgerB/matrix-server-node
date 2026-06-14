@@ -15,6 +15,7 @@ import {
 	computeRoomIdV12,
 	type EventContext,
 	findAuthorisingLocalUser,
+	getJoinRule,
 	getMembership,
 	getPowerLevels,
 	getUserPowerLevel,
@@ -24,6 +25,7 @@ import {
 	selectAuthEvents,
 	sendStateEvent,
 	serverHasMember,
+	userSatisfiesRestrictedAllow,
 	validateAdditionalCreators,
 } from "../events.ts";
 import type { FederationClient } from "../federation/client.ts";
@@ -119,35 +121,6 @@ const isServerResidentInRoom = (
 	if (!room.state_events.has("m.room.create\x1f")) return false;
 
 	return serverHasMember(room.state_events, localServerName, "join");
-};
-
-/**
- * Determine whether `userId` satisfies a restricted room's allow conditions,
- * i.e. they are joined to one of the rooms listed under
- * m.room.join_rules content.allow with type "m.room_membership".
- */
-const userSatisfiesRestrictedAllow = async (
-	storage: Storage,
-	room: RoomState,
-	userId: UserId,
-): Promise<boolean> => {
-	const joinRulesEvent = room.state_events.get("m.room.join_rules\x1f");
-	if (!joinRulesEvent) return false;
-	const allow = (joinRulesEvent.content as Record<string, unknown>).allow;
-	if (!Array.isArray(allow)) return false;
-
-	for (const entry of allow) {
-		if (!entry || typeof entry !== "object") continue;
-		const e = entry as Record<string, unknown>;
-		if (e.type !== "m.room_membership") continue;
-		const allowedRoomId = e.room_id;
-		if (typeof allowedRoomId !== "string") continue;
-
-		const allowedRoom = await storage.getRoom(allowedRoomId as RoomId);
-		if (!allowedRoom) continue;
-		if (getMembership(allowedRoom, userId) === "join") return true;
-	}
-	return false;
 };
 
 /**
@@ -1067,11 +1040,7 @@ export const postJoin =
 			// content.join_authorised_via_users_server. Without it the join event
 			// fails auth.
 			const joinContent: JsonObject = { ...extraJoinContent };
-			const joinRulesEvent = room.state_events.get("m.room.join_rules\x1f");
-			const joinRule = joinRulesEvent
-				? ((joinRulesEvent.content as Record<string, unknown>)
-						.join_rule as string)
-				: "invite";
+			const joinRule = getJoinRule(room);
 			const currentMembership = getMembership(room, userId);
 			if (
 				(joinRule === "restricted" || joinRule === "knock_restricted") &&

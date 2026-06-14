@@ -8,10 +8,11 @@ import {
 	checkEventAuth,
 	computeEventId,
 	findAuthorisingLocalUser,
+	getJoinRule,
 	getMembership,
 	selectAuthEvents,
-	serverHasMember,
 	stripV12CreateRoomId,
+	userSatisfiesRestrictedAllow,
 } from "../../events.ts";
 import { isServerAllowedByAcl } from "../../federation/acl.ts";
 import type { FederationClient } from "../../federation/client.ts";
@@ -109,42 +110,6 @@ const toStrippedState = (value: unknown): StrippedStateEvent[] => {
 	return out;
 };
 
-/**
- * Determine whether `userId` satisfies a restricted room's allow conditions,
- * i.e. they are joined to one of the rooms listed under
- * m.room.join_rules content.allow with type "m.room_membership".
- */
-const userSatisfiesRestrictedAllow = async (
-	storage: Storage,
-	room: RoomState,
-	userId: UserId,
-	localServerName: string,
-): Promise<boolean> => {
-	const joinRulesEvent = room.state_events.get("m.room.join_rules\x1f");
-	if (!joinRulesEvent) return false;
-	const allow = (joinRulesEvent.content as Record<string, unknown>).allow;
-	if (!Array.isArray(allow)) return false;
-
-	for (const entry of allow) {
-		if (!entry || typeof entry !== "object") continue;
-		const e = entry as Record<string, unknown>;
-		if (e.type !== "m.room_membership") continue;
-		const allowedRoomId = e.room_id;
-		if (typeof allowedRoomId !== "string") continue;
-
-		const allowedRoom = await storage.getRoom(allowedRoomId as RoomId);
-		if (!allowedRoom) continue;
-		// We may only vouch that the joiner is in the allow room if WE currently
-		// participate in that room — otherwise our view of it is stale and
-		// unreliable. MSC3083 / TestRestrictedRoomsRemoteJoinFailOver: once this
-		// server's last member leaves the allow room, it must stop authorising
-		// restricted joins and let the requester fail over to a server that can.
-		if (!serverHasMember(allowedRoom.state_events, localServerName, "join"))
-			continue;
-		if (getMembership(allowedRoom, userId) === "join") return true;
-	}
-	return false;
-};
 export const getMakeJoin =
 	(storage: Storage, serverName: string): Handler =>
 	async (req) => {
@@ -171,11 +136,7 @@ export const getMakeJoin =
 		if (!isServerAllowedByAcl(req.origin as ServerName, room))
 			throw forbidden("Server is denied by ACL");
 
-		const joinRulesEvent = room.state_events.get("m.room.join_rules\x1f");
-		const joinRule = joinRulesEvent
-			? ((joinRulesEvent.content as Record<string, unknown>)
-					.join_rule as string)
-			: "invite";
+		const joinRule = getJoinRule(room);
 
 		const currentMembership = getMembership(room, userId);
 		if (currentMembership === "ban") throw forbidden("User is banned");
@@ -897,11 +858,7 @@ export const getMakeKnock =
 		if (!isServerAllowedByAcl(req.origin as ServerName, room))
 			throw forbidden("Server is denied by ACL");
 
-		const joinRulesEvent = room.state_events.get("m.room.join_rules\x1f");
-		const joinRule = joinRulesEvent
-			? ((joinRulesEvent.content as Record<string, unknown>)
-					.join_rule as string)
-			: "invite";
+		const joinRule = getJoinRule(room);
 
 		const currentMembership = getMembership(room, userId);
 		if (currentMembership === "ban") throw forbidden("User is banned");
@@ -980,11 +937,7 @@ export const putSendKnock =
 		}
 
 		// The knocking room version must actually support knocking.
-		const joinRulesEvent = room.state_events.get("m.room.join_rules\x1f");
-		const joinRule = joinRulesEvent
-			? ((joinRulesEvent.content as Record<string, unknown>)
-					.join_rule as string)
-			: "invite";
+		const joinRule = getJoinRule(room);
 		if (joinRule !== "knock" && joinRule !== "knock_restricted") {
 			throw forbidden("Room does not support knocking");
 		}

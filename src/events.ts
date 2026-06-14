@@ -691,13 +691,7 @@ const checkMembershipAuth = (event: PDU, roomState: RoomState): void => {
 				return;
 			}
 
-			const joinRulesEvent = roomState.state_events.get(
-				"m.room.join_rules\x1f",
-			);
-			const joinRule = joinRulesEvent
-				? ((joinRulesEvent.content as Record<string, unknown>)
-						.join_rule as string)
-				: "invite";
+			const joinRule = getJoinRule(roomState);
 
 			if (joinRule === "public") return;
 
@@ -828,13 +822,7 @@ const checkMembershipAuth = (event: PDU, roomState: RoomState): void => {
 				throw forbidden("User is already invited");
 			}
 
-			const joinRulesEvent = roomState.state_events.get(
-				"m.room.join_rules\x1f",
-			);
-			const knockJoinRule = joinRulesEvent
-				? ((joinRulesEvent.content as Record<string, unknown>)
-						.join_rule as string)
-				: "invite";
+			const knockJoinRule = getJoinRule(roomState);
 
 			if (knockJoinRule !== "knock" && knockJoinRule !== "knock_restricted") {
 				throw forbidden("Room join rules do not allow knocking");
@@ -1220,6 +1208,51 @@ export const toStripped = (
 	state_key: event.state_key ?? fallbackStateKey,
 	type: event.type,
 });
+
+/**
+ * Whether `userId` satisfies a restricted room's allow conditions (MSC3083):
+ * joined to one of the rooms listed under m.room.join_rules content.allow with
+ * type "m.room_membership". When `requireServerInAllowRoom` is set, an allow room
+ * only counts if that server currently has a joined member there — the rule a
+ * server applies before vouching for a remote join (so it can fail over when its
+ * view of the allow room is stale).
+ */
+export const userSatisfiesRestrictedAllow = async (
+	storage: Storage,
+	room: RoomState,
+	userId: UserId,
+	requireServerInAllowRoom?: string,
+): Promise<boolean> => {
+	const joinRulesEvent = room.state_events.get(
+		makeStateKey("m.room.join_rules"),
+	);
+	if (!joinRulesEvent) return false;
+	const allow = (joinRulesEvent.content as Record<string, unknown>).allow;
+	if (!Array.isArray(allow)) return false;
+
+	for (const entry of allow) {
+		if (!entry || typeof entry !== "object") continue;
+		const e = entry as Record<string, unknown>;
+		if (e.type !== "m.room_membership") continue;
+		const allowedRoomId = e.room_id;
+		if (typeof allowedRoomId !== "string") continue;
+
+		const allowedRoom = await storage.getRoom(allowedRoomId as RoomId);
+		if (!allowedRoom) continue;
+		if (
+			requireServerInAllowRoom &&
+			!serverHasMember(
+				allowedRoom.state_events,
+				requireServerInAllowRoom,
+				"join",
+			)
+		) {
+			continue;
+		}
+		if (getMembership(allowedRoom, userId) === "join") return true;
+	}
+	return false;
+};
 
 export interface EventContext {
 	roomState: RoomState;
