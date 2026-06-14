@@ -13,6 +13,7 @@ import type { SpaceHierarchyRoom } from "../types/directory.ts";
 import type { PDU, StrippedStateEvent } from "../types/events.ts";
 import type { RoomId, ServerName, UserId } from "../types/index.ts";
 import { getAllowedRoomIds } from "./federation/spaces.ts";
+import { parseLimit } from "./query-params.ts";
 
 const MAX_ROOMS = 50;
 
@@ -166,11 +167,7 @@ export const getSpaceHierarchy =
 		const rootRoomId = req.params.roomId as RoomId;
 		const userId = req.userId as UserId;
 
-		const limitStr = req.query.get("limit");
-		const limit = Math.min(
-			Math.max(parseInt(limitStr ?? String(MAX_ROOMS), 10), 1),
-			MAX_ROOMS,
-		);
+		const limit = parseLimit(req.query.get("limit"), MAX_ROOMS, MAX_ROOMS);
 		const maxDepth = Math.max(
 			parseInt(req.query.get("max_depth") ?? "50", 10),
 			0,

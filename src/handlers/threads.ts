@@ -3,6 +3,7 @@ import { bundleAggregations } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { RoomId } from "../types/index.ts";
+import { parseLimit } from "./query-params.ts";
 
 export const getThreads =
 	(storage: Storage): Handler =>
@@ -16,7 +17,7 @@ export const getThreads =
 			| "all"
 			| "participated";
 		const limitStr = req.query.get("limit");
-		const limit = Math.min(Math.max(parseInt(limitStr ?? "20", 10), 1), 100);
+		const limit = parseLimit(limitStr, 20);
 		const from = req.query.get("from") ?? undefined;
 
 		const result = await storage.getThreadRoots(
