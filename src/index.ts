@@ -57,9 +57,7 @@ registerRoutes(router, storage, SERVER_NAME, signingKey);
 const server = createServer((req, res) => router.handle(req, res));
 
 server.listen(PORT, () => {
-	console.log(
-		`matrix-server-node listening on :${PORT} (server_name: ${SERVER_NAME})`,
-	);
+	console.log(`strix listening on :${PORT} (server_name: ${SERVER_NAME})`);
 });
 
 // Optional: TLS federation listener (for Complement / production federation)

@@ -1,4 +1,4 @@
-# matrix-server-node
+# strix
 
 A Matrix homeserver written in TypeScript, running on Node.js with no frameworks.
 
@@ -32,11 +32,11 @@ All servers run in Docker with 2 CPU / 4 GB limits.
 
 | Server | Language | Storage | Sequential (msg/s) | Concurrent (msg/s) |
 |---|---|---|---|---|
-| **matrix-server-node** | TypeScript | SQLite | 1,133 | 3,263 |
+| **strix** | TypeScript | SQLite | 1,133 | 3,263 |
 | Conduit | Rust | RocksDB | 1,177 | 2,498 |
 | Tuwunel | Rust | RocksDB | 869 | 1,826 |
 | Continuwuity | Rust | RocksDB | 845 | 1,456 |
-| **matrix-server-node** | TypeScript | PostgreSQL | 574 | 2,397 |
-| **matrix-server-node** | TypeScript | MariaDB | 193 | 668 |
+| **strix** | TypeScript | PostgreSQL | 574 | 2,397 |
+| **strix** | TypeScript | MariaDB | 193 | 668 |
 | Dendrite | Go | Postgres | 92 | 102 |
 | Synapse | Python | Postgres | 52 | 108 |
