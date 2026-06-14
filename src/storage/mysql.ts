@@ -49,6 +49,7 @@ import {
 import {
 	decodeDevicePoke,
 	encodeDevicePoke,
+	flattenKeyBackupEntries,
 	keyBackupEtag,
 	rowToSession,
 	rowToUser,
@@ -1775,24 +1776,7 @@ export const createMysqlStorage = async (
 		if (!latestRow || (latestRow.version as string) !== version)
 			return undefined;
 
-		const entries: [RoomId, string, KeyBackupData][] = [];
-		if (roomId && sessionId) {
-			entries.push([roomId, sessionId, keys as KeyBackupData]);
-		} else if (roomId) {
-			const roomKeys = keys as { sessions: Record<string, KeyBackupData> };
-			for (const [sid, data] of Object.entries(roomKeys.sessions)) {
-				entries.push([roomId, sid, data]);
-			}
-		} else {
-			const allKeys = keys as {
-				rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
-			};
-			for (const [rid, roomData] of Object.entries(allKeys.rooms)) {
-				for (const [sid, data] of Object.entries(roomData.sessions)) {
-					entries.push([rid as RoomId, sid, data]);
-				}
-			}
-		}
+		const entries = flattenKeyBackupEntries(roomId, sessionId, keys);
 
 		for (const [rid, sid, data] of entries) {
 			// Check existing for merge priority

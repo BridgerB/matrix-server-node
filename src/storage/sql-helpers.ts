@@ -1,12 +1,47 @@
+import type { KeyBackupData } from "../types/e2ee.ts";
 import type {
 	AccessToken,
 	DeviceId,
 	RefreshToken,
+	RoomId,
 	ServerName,
 	UserAccount,
 	UserId,
 } from "../types/index.ts";
 import type { StoredSession } from "./interface.ts";
+
+/**
+ * Flatten the three shapes accepted by PUT key backup keys (a single session, a
+ * room's sessions, or all rooms) into a list of [roomId, sessionId, data] tuples.
+ */
+export const flattenKeyBackupEntries = (
+	roomId: RoomId | undefined,
+	sessionId: string | undefined,
+	keys:
+		| KeyBackupData
+		| { sessions: Record<string, KeyBackupData> }
+		| { rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }> },
+): [RoomId, string, KeyBackupData][] => {
+	const entries: [RoomId, string, KeyBackupData][] = [];
+	if (roomId && sessionId) {
+		entries.push([roomId, sessionId, keys as KeyBackupData]);
+	} else if (roomId) {
+		const roomKeys = keys as { sessions: Record<string, KeyBackupData> };
+		for (const [sid, data] of Object.entries(roomKeys.sessions)) {
+			entries.push([roomId, sid, data]);
+		}
+	} else {
+		const allKeys = keys as {
+			rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
+		};
+		for (const [rid, roomData] of Object.entries(allKeys.rooms)) {
+			for (const [sid, data] of Object.entries(roomData.sessions)) {
+				entries.push([rid as RoomId, sid, data]);
+			}
+		}
+	}
+	return entries;
+};
 
 /**
  * Content-derived etag for a key backup: a hash over every (room_id, session_id)

@@ -51,6 +51,7 @@ import {
 import {
 	decodeDevicePoke,
 	encodeDevicePoke,
+	flattenKeyBackupEntries,
 	keyBackupEtag,
 	rowToSession,
 	rowToUser,
@@ -1784,26 +1785,7 @@ export const createSqliteStorage = (dbPath: string): Storage => {
 			"INSERT OR REPLACE INTO key_backup_data (user_id, version, room_id, session_id, key_json) VALUES (?, ?, ?, ?, ?)",
 		);
 
-		const entries: [RoomId, string, KeyBackupData][] = [];
-		if (roomId && sessionId) {
-			entries.push([roomId, sessionId, keys as KeyBackupData]);
-		} else if (roomId) {
-			const roomKeys = keys as {
-				sessions: Record<string, KeyBackupData>;
-			};
-			for (const [sid, data] of Object.entries(roomKeys.sessions)) {
-				entries.push([roomId, sid, data]);
-			}
-		} else {
-			const allKeys = keys as {
-				rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
-			};
-			for (const [rid, roomData] of Object.entries(allKeys.rooms)) {
-				for (const [sid, data] of Object.entries(roomData.sessions)) {
-					entries.push([rid as RoomId, sid, data]);
-				}
-			}
-		}
+		const entries = flattenKeyBackupEntries(roomId, sessionId, keys);
 
 		db.transaction(() => {
 			for (const [rid, sid, data] of entries) {
