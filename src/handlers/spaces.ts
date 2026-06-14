@@ -1,5 +1,10 @@
 import { notFound } from "../errors.ts";
-import { contentField, getMembership, roomSummaryFields } from "../events.ts";
+import {
+	contentField,
+	getMembership,
+	roomSummaryFields,
+	toStripped,
+} from "../events.ts";
 import type { FederationClient } from "../federation/client.ts";
 import { domainOf } from "../ids.ts";
 import type { Handler } from "../router.ts";
@@ -27,12 +32,7 @@ const extractChildren = (stateEvents: Map<string, PDU>): Child[] =>
 				Array.isArray((event.content as Record<string, unknown>).via),
 		)
 		.map(([, event]) => ({
-			state: {
-				content: event.content,
-				sender: event.sender,
-				state_key: event.state_key ?? "",
-				type: event.type,
-			},
+			state: toStripped(event),
 			roomId: (event.state_key ?? "") as RoomId,
 		}));
 

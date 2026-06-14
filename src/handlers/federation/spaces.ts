@@ -1,5 +1,10 @@
 import { forbidden, notFound } from "../../errors.ts";
-import { contentField, iterMembers, roomSummaryFields } from "../../events.ts";
+import {
+	contentField,
+	iterMembers,
+	roomSummaryFields,
+	toStripped,
+} from "../../events.ts";
 import { isServerAllowedByAcl } from "../../federation/acl.ts";
 import { domainOf } from "../../ids.ts";
 import type { Handler } from "../../router.ts";
@@ -110,12 +115,7 @@ export const buildFederationRoomEntry = (
 		const content = event.content as Record<string, unknown>;
 		if (!content.via || !Array.isArray(content.via)) continue;
 		if (suggestedOnly && !content.suggested) continue;
-		childrenState.push({
-			content: event.content,
-			sender: event.sender,
-			state_key: event.state_key ?? "",
-			type: event.type,
-		});
+		childrenState.push(toStripped(event));
 	}
 
 	return {
