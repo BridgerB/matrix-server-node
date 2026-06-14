@@ -2,10 +2,16 @@ import { createHash } from "node:crypto";
 import { badJson, forbidden, notJoined, roomNotFound } from "./errors.ts";
 import type { FederationClient } from "./federation/client.ts";
 import { fanoutEvent } from "./federation/outbound.ts";
+import { domainOf } from "./ids.ts";
 import type { SigningKey } from "./signing.ts";
 import { signEvent } from "./signing.ts";
 import type { Storage } from "./storage/interface.ts";
-import type { ClientEvent, PDU, UnsignedData } from "./types/events.ts";
+import type {
+	ClientEvent,
+	PDU,
+	StrippedStateEvent,
+	UnsignedData,
+} from "./types/events.ts";
 import type { EventId, RoomId, ServerName, UserId } from "./types/index.ts";
 import type { RoomState } from "./types/internal.ts";
 import type { JsonObject } from "./types/json.ts";
@@ -25,8 +31,8 @@ export const CREATOR_POWER_LEVEL = 2 ** 53;
  * `CANONICALJSON_MAX_INT`/`CANONICALJSON_MIN_INT`, i.e. `±(2**53 - 1)`).
  * Power-level values outside this range are rejected.
  */
-const CANONICALJSON_MAX_INT = 2 ** 53 - 1;
-const CANONICALJSON_MIN_INT = -(2 ** 53 - 1);
+export const CANONICALJSON_MAX_INT = 2 ** 53 - 1;
+export const CANONICALJSON_MIN_INT = -(2 ** 53 - 1);
 
 /**
  * Extract the numeric base version from a room-version string.
@@ -587,6 +593,44 @@ export const getUserPowerLevel = (
 	return pl.users?.[userId] ?? pl.users_default ?? 0;
 };
 
+/**
+ * Find the local user best able to authorise a restricted-room join (MSC3083):
+ * a currently-joined user on `localServerName` whose power level meets the
+ * room's invite threshold. Prefers the highest power level, breaking ties by the
+ * lexicographically smallest user ID so the same authoriser is chosen on every
+ * invocation regardless of Map iteration order. Returns undefined when no such
+ * local user exists (the join must then be performed over federation).
+ */
+export const findAuthorisingLocalUser = (
+	room: RoomState,
+	localServerName: string,
+): UserId | undefined => {
+	const pl = getPowerLevels(room);
+	const invitePl = pl.invite ?? 0;
+
+	let best: UserId | undefined;
+	let bestPl = -Infinity;
+
+	for (const { userId: memberId, membership } of iterMembers(
+		room.state_events,
+	)) {
+		if (membership !== "join") continue;
+		if (domainOf(memberId) !== localServerName) continue;
+
+		const memberPl = getUserPowerLevel(memberId, room);
+		if (memberPl < invitePl) continue;
+
+		if (
+			memberPl > bestPl ||
+			(memberPl === bestPl && (!best || memberId < best))
+		) {
+			best = memberId;
+			bestPl = memberPl;
+		}
+	}
+	return best;
+};
+
 const getEventPowerLevel = (
 	eventType: string,
 	isState: boolean,
@@ -647,13 +691,7 @@ const checkMembershipAuth = (event: PDU, roomState: RoomState): void => {
 				return;
 			}
 
-			const joinRulesEvent = roomState.state_events.get(
-				"m.room.join_rules\x1f",
-			);
-			const joinRule = joinRulesEvent
-				? ((joinRulesEvent.content as Record<string, unknown>)
-						.join_rule as string)
-				: "invite";
+			const joinRule = getJoinRule(roomState);
 
 			if (joinRule === "public") return;
 
@@ -784,13 +822,7 @@ const checkMembershipAuth = (event: PDU, roomState: RoomState): void => {
 				throw forbidden("User is already invited");
 			}
 
-			const joinRulesEvent = roomState.state_events.get(
-				"m.room.join_rules\x1f",
-			);
-			const knockJoinRule = joinRulesEvent
-				? ((joinRulesEvent.content as Record<string, unknown>)
-						.join_rule as string)
-				: "invite";
+			const knockJoinRule = getJoinRule(roomState);
 
 			if (knockJoinRule !== "knock" && knockJoinRule !== "knock_restricted") {
 				throw forbidden("Room join rules do not allow knocking");
@@ -1057,6 +1089,10 @@ export const requireJoinedOrWorldReadable = async (
 	throw notJoined();
 };
 
+/** Read a single field from an event's content, tolerating a missing event. */
+export const contentField = (event: PDU | undefined, field: string): unknown =>
+	event ? (event.content as Record<string, unknown>)[field] : undefined;
+
 export const countJoinedMembers = (
 	stateEvents: Map<string, { content: unknown }>,
 ): number =>
@@ -1077,6 +1113,39 @@ export const getStateContent = (
 		: undefined;
 };
 
+export interface RoomSummaryFields {
+	name?: string;
+	topic?: string;
+	avatar_url?: string;
+	canonical_alias?: string;
+	num_joined_members: number;
+	world_readable: boolean;
+	guest_can_join: boolean;
+	join_rule?: string;
+	room_type?: string;
+}
+
+/** The common room-summary projection shared by the space-hierarchy endpoints. */
+export const roomSummaryFields = (room: RoomState): RoomSummaryFields => {
+	const get = (type: string, field: string): string | undefined =>
+		contentField(room.state_events.get(makeStateKey(type)), field) as
+			| string
+			| undefined;
+	return {
+		name: get("m.room.name", "name"),
+		topic: get("m.room.topic", "topic"),
+		avatar_url: get("m.room.avatar", "url"),
+		canonical_alias: get("m.room.canonical_alias", "alias"),
+		num_joined_members: countJoinedMembers(room.state_events),
+		world_readable:
+			get("m.room.history_visibility", "history_visibility") ===
+			"world_readable",
+		guest_can_join: get("m.room.guest_access", "guest_access") === "can_join",
+		join_rule: get("m.room.join_rules", "join_rule"),
+		room_type: get("m.room.create", "type"),
+	};
+};
+
 /**
  * Separator for packing several identifiers into one composite string key
  * (state-event map keys, txn-idempotency keys, the various in-memory index
@@ -1089,6 +1158,101 @@ export const KEY_SEP = "\x1f";
 
 export const makeStateKey = (type: string, stateKey = ""): string =>
 	`${type}${KEY_SEP}${stateKey}`;
+
+const MEMBER_KEY_PREFIX = `m.room.member${KEY_SEP}`;
+
+/** Iterate the m.room.member entries of a room's state. */
+export function* iterMembers(
+	state: Map<string, PDU>,
+): Generator<{ userId: UserId; membership: string | undefined; event: PDU }> {
+	for (const [key, event] of state) {
+		if (!key.startsWith(MEMBER_KEY_PREFIX)) continue;
+		yield {
+			userId: key.slice(MEMBER_KEY_PREFIX.length) as UserId,
+			membership: membershipOf(event),
+			event,
+		};
+	}
+}
+
+/** Whether `server` has at least one member of the given membership in `state`. */
+export const serverHasMember = (
+	state: Map<string, PDU>,
+	server: string,
+	membership: string,
+): boolean => {
+	for (const m of iterMembers(state)) {
+		if (m.membership === membership && domainOf(m.userId) === server) {
+			return true;
+		}
+	}
+	return false;
+};
+
+/** A room's join rule, defaulting to "invite" when no join_rules event exists. */
+export const getJoinRule = (room: RoomState): string => {
+	const event = room.state_events.get(makeStateKey("m.room.join_rules"));
+	return event
+		? (((event.content as Record<string, unknown>).join_rule as string) ??
+				"invite")
+		: "invite";
+};
+
+/** Project an event down to the stripped-state shape used in invites/summaries. */
+export const toStripped = (
+	event: { content: unknown; sender: string; state_key?: string; type: string },
+	fallbackStateKey = "",
+): StrippedStateEvent => ({
+	content: event.content as StrippedStateEvent["content"],
+	sender: event.sender as StrippedStateEvent["sender"],
+	state_key: event.state_key ?? fallbackStateKey,
+	type: event.type,
+});
+
+/**
+ * Whether `userId` satisfies a restricted room's allow conditions (MSC3083):
+ * joined to one of the rooms listed under m.room.join_rules content.allow with
+ * type "m.room_membership". When `requireServerInAllowRoom` is set, an allow room
+ * only counts if that server currently has a joined member there — the rule a
+ * server applies before vouching for a remote join (so it can fail over when its
+ * view of the allow room is stale).
+ */
+export const userSatisfiesRestrictedAllow = async (
+	storage: Storage,
+	room: RoomState,
+	userId: UserId,
+	requireServerInAllowRoom?: string,
+): Promise<boolean> => {
+	const joinRulesEvent = room.state_events.get(
+		makeStateKey("m.room.join_rules"),
+	);
+	if (!joinRulesEvent) return false;
+	const allow = (joinRulesEvent.content as Record<string, unknown>).allow;
+	if (!Array.isArray(allow)) return false;
+
+	for (const entry of allow) {
+		if (!entry || typeof entry !== "object") continue;
+		const e = entry as Record<string, unknown>;
+		if (e.type !== "m.room_membership") continue;
+		const allowedRoomId = e.room_id;
+		if (typeof allowedRoomId !== "string") continue;
+
+		const allowedRoom = await storage.getRoom(allowedRoomId as RoomId);
+		if (!allowedRoom) continue;
+		if (
+			requireServerInAllowRoom &&
+			!serverHasMember(
+				allowedRoom.state_events,
+				requireServerInAllowRoom,
+				"join",
+			)
+		) {
+			continue;
+		}
+		if (getMembership(allowedRoom, userId) === "join") return true;
+	}
+	return false;
+};
 
 export interface EventContext {
 	roomState: RoomState;

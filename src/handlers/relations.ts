@@ -12,6 +12,7 @@ import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { ClientEvent, PDU } from "../types/events.ts";
 import type { EventId, RoomId, ServerName } from "../types/identifiers.ts";
+import { parseLimit } from "./query-params.ts";
 
 export const getRelations =
 	(storage: Storage): Handler =>
@@ -29,7 +30,7 @@ export const getRelations =
 			throw notFound("Event not found");
 
 		const limitStr = req.query.get("limit");
-		const limit = Math.min(Math.max(parseInt(limitStr ?? "50", 10), 1), 100);
+		const limit = parseLimit(limitStr, 50);
 		const from = req.query.get("from") ?? undefined;
 		const dir = (req.query.get("dir") ?? "b") as "b" | "f";
 

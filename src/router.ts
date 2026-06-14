@@ -84,46 +84,96 @@ const matchRoute = (
 	return matched ? params : null;
 };
 
-export class Router {
-	private routes: Route[] = [];
-	private globalMiddleware: Middleware[] = [];
-
-	use(mw: Middleware): void {
-		this.globalMiddleware.push(mw);
-	}
-
+export interface Router {
+	use(mw: Middleware): void;
 	add(
 		method: string,
 		pattern: string,
 		handler: Handler,
 		...middleware: Middleware[]
-	): void {
-		this.routes.push({
+	): void;
+	get(pattern: string, handler: Handler, ...middleware: Middleware[]): void;
+	post(pattern: string, handler: Handler, ...middleware: Middleware[]): void;
+	put(pattern: string, handler: Handler, ...middleware: Middleware[]): void;
+	delete(pattern: string, handler: Handler, ...middleware: Middleware[]): void;
+	handle(req: IncomingMessage, res: ServerResponse): Promise<void>;
+}
+
+export const createRouter = (): Router => {
+	const routes: Route[] = [];
+	const globalMiddleware: Middleware[] = [];
+
+	const compose = (middleware: Middleware[], handler: Handler): Handler =>
+		middleware.reduceRight<Handler>(
+			(next, mw) => (req) => mw(req, next),
+			handler,
+		);
+
+	const respond = (res: ServerResponse, response: RouterResponse): void => {
+		if (Buffer.isBuffer(response.body)) {
+			res.writeHead(response.status, response.headers);
+			res.end(response.body);
+			return;
+		}
+		respondJson(res, response.status, response.body, response.headers);
+	};
+
+	const handleError = (res: ServerResponse, err: unknown): void => {
+		if (err instanceof MatrixError) {
+			respondJson(res, err.statusCode, err.toJSON());
+			return;
+		}
+		console.error("Unhandled error:", err);
+		respondJson(res, 500, {
+			errcode: "M_UNKNOWN",
+			error: "Internal server error",
+		});
+	};
+
+	const use = (mw: Middleware): void => {
+		globalMiddleware.push(mw);
+	};
+
+	const add = (
+		method: string,
+		pattern: string,
+		handler: Handler,
+		...middleware: Middleware[]
+	): void => {
+		routes.push({
 			method: method.toUpperCase(),
 			pattern,
 			segments: pattern.split("/").filter(Boolean),
 			handler,
 			middleware,
 		});
-	}
+	};
 
-	get(pattern: string, handler: Handler, ...middleware: Middleware[]): void {
-		this.add("GET", pattern, handler, ...middleware);
-	}
+	const get = (
+		pattern: string,
+		handler: Handler,
+		...middleware: Middleware[]
+	): void => add("GET", pattern, handler, ...middleware);
+	const post = (
+		pattern: string,
+		handler: Handler,
+		...middleware: Middleware[]
+	): void => add("POST", pattern, handler, ...middleware);
+	const put = (
+		pattern: string,
+		handler: Handler,
+		...middleware: Middleware[]
+	): void => add("PUT", pattern, handler, ...middleware);
+	const del = (
+		pattern: string,
+		handler: Handler,
+		...middleware: Middleware[]
+	): void => add("DELETE", pattern, handler, ...middleware);
 
-	post(pattern: string, handler: Handler, ...middleware: Middleware[]): void {
-		this.add("POST", pattern, handler, ...middleware);
-	}
-
-	put(pattern: string, handler: Handler, ...middleware: Middleware[]): void {
-		this.add("PUT", pattern, handler, ...middleware);
-	}
-
-	delete(pattern: string, handler: Handler, ...middleware: Middleware[]): void {
-		this.add("DELETE", pattern, handler, ...middleware);
-	}
-
-	async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+	const handle = async (
+		req: IncomingMessage,
+		res: ServerResponse,
+	): Promise<void> => {
 		const url = new URL(
 			req.url ?? "/",
 			`http://${req.headers.host ?? "localhost"}`,
@@ -134,7 +184,7 @@ export class Router {
 		let matchedRoute: Route | undefined;
 		let params: Record<string, string> = {};
 
-		for (const route of this.routes) {
+		for (const route of routes) {
 			if (route.method !== method) continue;
 			const m = matchRoute(route.segments, pathSegments);
 			if (m) {
@@ -206,7 +256,7 @@ export class Router {
 			// Distinguish "path exists but wrong method" (405) from "unknown path"
 			// (404). If any registered route matches the path segments regardless
 			// of method, the endpoint is known but the method is not allowed.
-			const pathKnown = this.routes.some(
+			const pathKnown = routes.some(
 				(route) => matchRoute(route.segments, pathSegments) !== null,
 			);
 			const status = pathKnown ? 405 : 404;
@@ -217,57 +267,28 @@ export class Router {
 			});
 
 			try {
-				const response = await this.compose(
-					this.globalMiddleware,
+				const response = await compose(
+					globalMiddleware,
 					fallbackHandler,
 				)(routerReq);
-				this.respond(res, response);
+				respond(res, response);
 			} catch (err) {
-				this.handleError(res, err);
+				handleError(res, err);
 			}
 			return;
 		}
 
-		const allMiddleware = [
-			...this.globalMiddleware,
-			...matchedRoute.middleware,
-		];
+		const allMiddleware = [...globalMiddleware, ...matchedRoute.middleware];
 		try {
-			const response = await this.compose(
+			const response = await compose(
 				allMiddleware,
 				matchedRoute.handler,
 			)(routerReq);
-			this.respond(res, response);
+			respond(res, response);
 		} catch (err) {
-			this.handleError(res, err);
+			handleError(res, err);
 		}
-	}
+	};
 
-	private compose(middleware: Middleware[], handler: Handler): Handler {
-		return middleware.reduceRight<Handler>(
-			(next, mw) => (req) => mw(req, next),
-			handler,
-		);
-	}
-
-	private respond(res: ServerResponse, response: RouterResponse): void {
-		if (Buffer.isBuffer(response.body)) {
-			res.writeHead(response.status, response.headers);
-			res.end(response.body);
-			return;
-		}
-		respondJson(res, response.status, response.body, response.headers);
-	}
-
-	private handleError(res: ServerResponse, err: unknown): void {
-		if (err instanceof MatrixError) {
-			respondJson(res, err.statusCode, err.toJSON());
-			return;
-		}
-		console.error("Unhandled error:", err);
-		respondJson(res, 500, {
-			errcode: "M_UNKNOWN",
-			error: "Internal server error",
-		});
-	}
-}
+	return { use, add, get, post, put, delete: del, handle };
+};

@@ -1,10 +1,15 @@
 import { forbidden, notFound } from "../../errors.ts";
-import { countJoinedMembers } from "../../events.ts";
+import {
+	contentField,
+	iterMembers,
+	roomSummaryFields,
+	toStripped,
+} from "../../events.ts";
 import { isServerAllowedByAcl } from "../../federation/acl.ts";
 import { domainOf } from "../../ids.ts";
 import type { Handler } from "../../router.ts";
 import type { Storage } from "../../storage/interface.ts";
-import type { PDU, StrippedStateEvent } from "../../types/events.ts";
+import type { StrippedStateEvent } from "../../types/events.ts";
 import type { RoomId, ServerName } from "../../types/index.ts";
 
 type RoomState = NonNullable<Awaited<ReturnType<Storage["getRoom"]>>>;
@@ -23,9 +28,6 @@ interface FederationRoomEntry {
 	children_state: StrippedStateEvent[];
 	allowed_room_ids: string[];
 }
-
-const contentField = (event: PDU | undefined, field: string): unknown =>
-	event ? (event.content as Record<string, unknown>)[field] : undefined;
 
 /**
  * The list of room IDs whose membership grants access to `room` via a
@@ -55,13 +57,9 @@ export const getAllowedRoomIds = (room: RoomState): string[] => {
 
 /** True if any user from `origin` is joined to `room`. */
 const isHostInRoom = (room: RoomState, origin: ServerName): boolean => {
-	for (const [key, event] of room.state_events) {
-		if (!key.startsWith("m.room.member\x1f")) continue;
-		const membership = (event.content as Record<string, unknown>).membership;
+	for (const { userId, membership } of iterMembers(room.state_events)) {
 		if (membership !== "join" && membership !== "invite") continue;
-		const userId = event.state_key ?? "";
-		const userServer = domainOf(userId);
-		if (userServer === origin) return true;
+		if (domainOf(userId) === origin) return true;
 	}
 	return false;
 };
@@ -117,50 +115,12 @@ export const buildFederationRoomEntry = (
 		const content = event.content as Record<string, unknown>;
 		if (!content.via || !Array.isArray(content.via)) continue;
 		if (suggestedOnly && !content.suggested) continue;
-		childrenState.push({
-			content: event.content,
-			sender: event.sender,
-			state_key: event.state_key ?? "",
-			type: event.type,
-		});
+		childrenState.push(toStripped(event));
 	}
-
-	const histVis = contentField(
-		room.state_events.get("m.room.history_visibility\x1f"),
-		"history_visibility",
-	);
-	const guestAccess = contentField(
-		room.state_events.get("m.room.guest_access\x1f"),
-		"guest_access",
-	);
 
 	return {
 		room_id: roomId,
-		name: contentField(room.state_events.get("m.room.name\x1f"), "name") as
-			| string
-			| undefined,
-		topic: contentField(room.state_events.get("m.room.topic\x1f"), "topic") as
-			| string
-			| undefined,
-		avatar_url: contentField(
-			room.state_events.get("m.room.avatar\x1f"),
-			"url",
-		) as string | undefined,
-		canonical_alias: contentField(
-			room.state_events.get("m.room.canonical_alias\x1f"),
-			"alias",
-		) as string | undefined,
-		num_joined_members: countJoinedMembers(room.state_events),
-		world_readable: histVis === "world_readable",
-		guest_can_join: guestAccess === "can_join",
-		join_rule: contentField(
-			room.state_events.get("m.room.join_rules\x1f"),
-			"join_rule",
-		) as string | undefined,
-		room_type: contentField(
-			room.state_events.get("m.room.create\x1f"),
-			"type",
-		) as string | undefined,
+		...roomSummaryFields(room),
 		children_state: childrenState,
 		allowed_room_ids: getAllowedRoomIds(room),
 	};

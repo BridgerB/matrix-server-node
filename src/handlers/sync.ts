@@ -1,6 +1,6 @@
 import { MatrixError } from "../errors.ts";
 import { matchesRoomEventFilter } from "../event-filter.ts";
-import { pduToClientEvent } from "../events.ts";
+import { pduToClientEvent, toStripped } from "../events.ts";
 import { getIgnoredInviteSenders } from "../ignored-invites.ts";
 import { getIgnoredUsers } from "../ignored-users.ts";
 import { evaluatePushRules, getOrInitRules } from "../push-rules.ts";
@@ -55,19 +55,13 @@ const buildKnockRoom = async (
 		memberEvt &&
 		!events.some((e) => e.type === "m.room.member" && e.state_key === userId)
 	) {
-		const pdu = memberEvt.event;
-		events.push({
-			content: pdu.content,
-			sender: pdu.sender,
-			state_key: pdu.state_key ?? userId,
-			type: pdu.type,
-		});
+		events.push(toStripped(memberEvt.event, userId));
 	}
 	return { knock_state: { events } };
 };
 
-const DEFAULT_TIMELINE_LIMIT = 20;
-const MAX_TIMEOUT = 30000;
+export const DEFAULT_TIMELINE_LIMIT = 20;
+export const MAX_TIMEOUT = 30000;
 
 interface ResolvedFilter {
 	timelineLimit: number;

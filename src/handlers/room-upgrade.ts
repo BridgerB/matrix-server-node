@@ -8,7 +8,7 @@ import {
 	type EventContext,
 	getUserPowerLevel,
 	isRoomVersion12Plus,
-	membershipOf,
+	iterMembers,
 	requireJoinedRoom,
 	selectAuthEvents,
 	sendStateEvent,
@@ -328,14 +328,9 @@ export async function migrateRoomPushRules(
 	newRoomId: RoomId,
 ): Promise<void> {
 	const suffix = `:${serverName}`;
-	const localJoinedMembers = [...oldRoom.state_events]
-		.filter(([key]) => key.startsWith("m.room.member\x1f"))
-		.map(([, event]) => event)
-		.filter(
-			(event) =>
-				event.state_key?.endsWith(suffix) && membershipOf(event) === "join",
-		)
-		.map((event) => event.state_key as UserId);
+	const localJoinedMembers = [...iterMembers(oldRoom.state_events)]
+		.filter((m) => m.membership === "join" && m.userId.endsWith(suffix))
+		.map((m) => m.userId);
 
 	for (const userId of localJoinedMembers) {
 		await copyRoomPushRule(storage, userId, oldRoomId, newRoomId);

@@ -39,7 +39,7 @@ import type { Pusher } from "../types/push.ts";
 import type { RoomVersion } from "../types/room-versions.ts";
 import type { Device, UserProfile } from "../types/user.ts";
 import {
-	EphemeralMixin,
+	createEphemeralStore,
 	eventToStrippedState,
 	INVITE_STATE_TYPES,
 } from "./ephemeral.ts";
@@ -48,15 +48,26 @@ import {
 	collapseReceiptsMsc4102,
 	PENDING_FEDERATION_EDU_CAP,
 } from "./interface.ts";
-import { rowToSession, rowToUser } from "./sql-helpers.ts";
+import {
+	decodeDevicePoke,
+	encodeDevicePoke,
+	flattenKeyBackupEntries,
+	keyBackupEtag,
+	rowsToCrossSigningKeys,
+	rowToSession,
+	rowToStoredMedia,
+	rowToUser,
+	shouldReplaceBackupKey,
+} from "./sql-helpers.ts";
 
-export class SqliteStorage extends EphemeralMixin implements Storage {
-	private db: Database.Database;
+export const createSqliteStorage = (dbPath: string): Storage => {
+	const eph = createEphemeralStore();
+	let db: Database.Database;
 
 	// Room state cache — the handler relies on setStateEvent mutating
 	// the same RoomState reference that ctx.roomState holds
 
-	private stmts!: {
+	let stmts!: {
 		insertEvent: Database.Statement;
 		getEvent: Database.Statement;
 		insertTimelineEntry: Database.Statement;
@@ -68,22 +79,8 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		setTxn: Database.Statement;
 	};
 
-	constructor(dbPath: string) {
-		super();
-		mkdirSync(dirname(dbPath), { recursive: true });
-		this.db = new Database(dbPath);
-		this.db.pragma("journal_mode = WAL");
-		// Durability is configurable: NORMAL (default) fsyncs at WAL checkpoints
-		// (~fast, can lose the last few txns on power loss); FULL fsyncs every
-		// commit (fully durable). Override with SQLITE_SYNCHRONOUS=FULL.
-		const sync = process.env.SQLITE_SYNCHRONOUS ?? "NORMAL";
-		this.db.pragma(`synchronous = ${sync}`);
-		this.db.pragma("foreign_keys = OFF");
-		this.init();
-	}
-
-	private init(): void {
-		this.db.exec(`
+	const init = (): void => {
+		db.exec(`
 			CREATE TABLE IF NOT EXISTS users (
 				user_id TEXT PRIMARY KEY,
 				localpart TEXT UNIQUE NOT NULL,
@@ -351,7 +348,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			);
 		`);
 
-		const maxPos = this.db
+		const maxPos = db
 			.prepare(
 				`SELECT MAX(m) as m FROM (
 					SELECT MAX(stream_pos) as m FROM events
@@ -361,86 +358,84 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				)`,
 			)
 			.get() as { m: number | null } | undefined;
-		this.streamCounter = maxPos?.m ?? 0;
+		eph.streamCounter = maxPos?.m ?? 0;
 
-		const maxFilter = this.db
+		const maxFilter = db
 			.prepare("SELECT MAX(CAST(filter_id AS INTEGER)) as m FROM filters")
 			.get() as { m: number | null } | undefined;
-		this.filterCounter = maxFilter?.m ?? 0;
+		eph.filterCounter = maxFilter?.m ?? 0;
 
-		this.stmts = {
-			insertEvent: this.db.prepare(
+		stmts = {
+			insertEvent: db.prepare(
 				"INSERT OR REPLACE INTO events (event_id, room_id, stream_pos, event_json) VALUES (?, ?, ?, ?)",
 			),
-			getEvent: this.db.prepare(
+			getEvent: db.prepare(
 				"SELECT event_id, event_json, rejected FROM events WHERE event_id = ?",
 			),
-			insertTimelineEntry: this.db.prepare(
+			insertTimelineEntry: db.prepare(
 				"INSERT OR REPLACE INTO events (event_id, room_id, stream_pos, event_json) VALUES (?, ?, ?, ?)",
 			),
-			getSession: this.db.prepare(
-				"SELECT * FROM sessions WHERE access_token = ?",
-			),
-			insertSession: this.db.prepare(
+			getSession: db.prepare("SELECT * FROM sessions WHERE access_token = ?"),
+			insertSession: db.prepare(
 				"INSERT OR REPLACE INTO sessions (access_token, refresh_token, device_id, user_id, access_token_hash, expires_at, display_name, last_seen_ip, last_seen_ts, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			),
-			insertStateEvent: this.db.prepare(
+			insertStateEvent: db.prepare(
 				"INSERT OR REPLACE INTO state_events (room_id, event_type, state_key, event_id, event_json) VALUES (?, ?, ?, ?, ?)",
 			),
-			getStateEvent: this.db.prepare(
+			getStateEvent: db.prepare(
 				"SELECT event_id, event_json FROM state_events WHERE room_id = ? AND event_type = ? AND state_key = ?",
 			),
-			getTxn: this.db.prepare(
+			getTxn: db.prepare(
 				"SELECT event_id FROM txn_map WHERE user_id = ? AND device_id = ? AND txn_id = ?",
 			),
-			setTxn: this.db.prepare(
+			setTxn: db.prepare(
 				"INSERT OR REPLACE INTO txn_map (user_id, device_id, txn_id, event_id) VALUES (?, ?, ?, ?)",
 			),
 		};
-	}
+	};
 
-	async createUser(account: UserAccount): Promise<void> {
-		this.db
-			.prepare(
-				"INSERT OR REPLACE INTO users (user_id, localpart, server_name, password_hash, account_type, is_deactivated, created_at, displayname, avatar_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			)
-			.run(
-				account.user_id,
-				account.localpart,
-				account.server_name,
-				account.password_hash,
-				account.account_type,
-				account.is_deactivated ? 1 : 0,
-				account.created_at,
-				account.displayname ?? null,
-				account.avatar_url ?? null,
-			);
-	}
+	const createUser = async (account: UserAccount): Promise<void> => {
+		db.prepare(
+			"INSERT OR REPLACE INTO users (user_id, localpart, server_name, password_hash, account_type, is_deactivated, created_at, displayname, avatar_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		).run(
+			account.user_id,
+			account.localpart,
+			account.server_name,
+			account.password_hash,
+			account.account_type,
+			account.is_deactivated ? 1 : 0,
+			account.created_at,
+			account.displayname ?? null,
+			account.avatar_url ?? null,
+		);
+	};
 
-	async getUserByLocalpart(
+	const getUserByLocalpart = async (
 		localpart: string,
-	): Promise<UserAccount | undefined> {
-		const row = this.db
+	): Promise<UserAccount | undefined> => {
+		const row = db
 			.prepare("SELECT * FROM users WHERE localpart = ?")
 			.get(localpart) as Record<string, unknown> | undefined;
 		return row ? rowToUser(row, true) : undefined;
-	}
+	};
 
-	async getUserById(userId: UserId): Promise<UserAccount | undefined> {
-		const row = this.db
+	const getUserById = async (
+		userId: UserId,
+	): Promise<UserAccount | undefined> => {
+		const row = db
 			.prepare("SELECT * FROM users WHERE user_id = ?")
 			.get(userId) as Record<string, unknown> | undefined;
 		return row ? rowToUser(row, true) : undefined;
-	}
+	};
 
-	async createSession(session: StoredSession): Promise<void> {
-		this.insertSessionRow(session);
+	const createSession = async (session: StoredSession): Promise<void> => {
+		insertSessionRow(session);
 		// A new device/session was added: notify device-list subscribers.
-		await this.recordDeviceKeyChange(session.user_id);
-	}
+		await recordDeviceKeyChange(session.user_id);
+	};
 
-	private insertSessionRow(session: StoredSession): void {
-		this.stmts.insertSession.run(
+	const insertSessionRow = (session: StoredSession): void => {
+		stmts.insertSession.run(
 			session.access_token,
 			session.refresh_token ?? null,
 			session.device_id,
@@ -452,63 +447,65 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			session.last_seen_ts ?? null,
 			session.user_agent ?? null,
 		);
-	}
+	};
 
-	async getSessionByAccessToken(
+	const getSessionByAccessToken = async (
 		token: AccessToken,
-	): Promise<StoredSession | undefined> {
-		const row = this.stmts.getSession.get(token) as
+	): Promise<StoredSession | undefined> => {
+		const row = stmts.getSession.get(token) as
 			| Record<string, unknown>
 			| undefined;
 		return row ? rowToSession(row) : undefined;
-	}
+	};
 
-	async getSessionByRefreshToken(
+	const getSessionByRefreshToken = async (
 		token: RefreshToken,
-	): Promise<StoredSession | undefined> {
-		const row = this.db
+	): Promise<StoredSession | undefined> => {
+		const row = db
 			.prepare("SELECT * FROM sessions WHERE refresh_token = ?")
 			.get(token) as Record<string, unknown> | undefined;
 		return row ? rowToSession(row) : undefined;
-	}
+	};
 
-	async getSessionsByUser(userId: UserId): Promise<StoredSession[]> {
-		const rows = this.db
+	const getSessionsByUser = async (
+		userId: UserId,
+	): Promise<StoredSession[]> => {
+		const rows = db
 			.prepare("SELECT * FROM sessions WHERE user_id = ?")
 			.all(userId) as Record<string, unknown>[];
 		return rows.map((r) => rowToSession(r));
-	}
+	};
 
-	async deleteSession(token: AccessToken): Promise<void> {
-		const session = await this.getSessionByAccessToken(token);
-		this.db.prepare("DELETE FROM sessions WHERE access_token = ?").run(token);
+	const deleteSession = async (token: AccessToken): Promise<void> => {
+		const session = await getSessionByAccessToken(token);
+		db.prepare("DELETE FROM sessions WHERE access_token = ?").run(token);
 		// A device/session was removed: notify device-list subscribers.
 		if (session) {
-			await this.recordDeviceKeyChange(session.user_id);
+			await recordDeviceKeyChange(session.user_id);
 		}
-	}
+	};
 
-	async deleteAllSessions(userId: UserId): Promise<void> {
-		this.db.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
+	const deleteAllSessions = async (userId: UserId): Promise<void> => {
+		db.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
 		// Devices were removed: notify device-list subscribers.
-		await this.recordDeviceKeyChange(userId);
-	}
+		await recordDeviceKeyChange(userId);
+	};
 
-	async rotateToken(
+	const rotateToken = async (
 		oldAccessToken: AccessToken,
 		newAccessToken: AccessToken,
 		newRefreshToken?: RefreshToken,
 		expiresAt?: Timestamp,
-	): Promise<StoredSession | undefined> {
-		const session = await this.getSessionByAccessToken(oldAccessToken);
+	): Promise<StoredSession | undefined> => {
+		const session = await getSessionByAccessToken(oldAccessToken);
 		if (!session) return undefined;
 
 		// Token rotation keeps the same device, so it must NOT signal a
 		// device-list change. Use the raw row helpers, not the instrumented
 		// deleteSession/createSession.
-		this.db
-			.prepare("DELETE FROM sessions WHERE access_token = ?")
-			.run(oldAccessToken);
+		db.prepare("DELETE FROM sessions WHERE access_token = ?").run(
+			oldAccessToken,
+		);
 
 		const updated: StoredSession = {
 			...session,
@@ -517,71 +514,66 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			expires_at: expiresAt,
 		};
 
-		this.insertSessionRow(updated);
+		insertSessionRow(updated);
 		return updated;
-	}
+	};
 
-	async touchSession(
+	const touchSession = async (
 		token: AccessToken,
 		ip: string,
 		userAgent: string,
-	): Promise<void> {
-		this.db
-			.prepare(
-				"UPDATE sessions SET last_seen_ip = ?, last_seen_ts = ?, user_agent = ? WHERE access_token = ?",
-			)
-			.run(ip, Date.now(), userAgent, token);
-	}
+	): Promise<void> => {
+		db.prepare(
+			"UPDATE sessions SET last_seen_ip = ?, last_seen_ts = ?, user_agent = ? WHERE access_token = ?",
+		).run(ip, Date.now(), userAgent, token);
+	};
 
-	async createUIAASession(sessionId: string): Promise<void> {
-		this.db
-			.prepare(
-				"INSERT OR REPLACE INTO uiaa_sessions (session_id, completed) VALUES (?, '[]')",
-			)
-			.run(sessionId);
-	}
+	const createUIAASession = async (sessionId: string): Promise<void> => {
+		db.prepare(
+			"INSERT OR REPLACE INTO uiaa_sessions (session_id, completed) VALUES (?, '[]')",
+		).run(sessionId);
+	};
 
-	async getUIAASession(
+	const getUIAASession = async (
 		sessionId: string,
-	): Promise<{ completed: string[] } | undefined> {
-		const row = this.db
+	): Promise<{ completed: string[] } | undefined> => {
+		const row = db
 			.prepare("SELECT completed FROM uiaa_sessions WHERE session_id = ?")
 			.get(sessionId) as { completed: string } | undefined;
 		if (!row) return undefined;
 		return { completed: JSON.parse(row.completed) };
-	}
+	};
 
-	async addUIAACompleted(sessionId: string, stageType: string): Promise<void> {
-		const session = await this.getUIAASession(sessionId);
+	const addUIAACompleted = async (
+		sessionId: string,
+		stageType: string,
+	): Promise<void> => {
+		const session = await getUIAASession(sessionId);
 		if (!session) return;
 		session.completed.push(stageType);
-		this.db
-			.prepare("UPDATE uiaa_sessions SET completed = ? WHERE session_id = ?")
-			.run(JSON.stringify(session.completed), sessionId);
-	}
+		db.prepare(
+			"UPDATE uiaa_sessions SET completed = ? WHERE session_id = ?",
+		).run(JSON.stringify(session.completed), sessionId);
+	};
 
-	async deleteUIAASession(sessionId: string): Promise<void> {
-		this.db
-			.prepare("DELETE FROM uiaa_sessions WHERE session_id = ?")
-			.run(sessionId);
-	}
+	const deleteUIAASession = async (sessionId: string): Promise<void> => {
+		db.prepare("DELETE FROM uiaa_sessions WHERE session_id = ?").run(sessionId);
+	};
 
-	async createRoom(state: RoomState): Promise<void> {
-		this.db
-			.prepare(
-				"INSERT OR REPLACE INTO rooms (room_id, room_version, depth, forward_extremities) VALUES (?, ?, ?, ?)",
-			)
-			.run(
-				state.room_id,
-				state.room_version,
-				state.depth,
-				JSON.stringify(state.forward_extremities),
-			);
+	const createRoom = async (state: RoomState): Promise<void> => {
+		db.prepare(
+			"INSERT OR REPLACE INTO rooms (room_id, room_version, depth, forward_extremities) VALUES (?, ?, ?, ?)",
+		).run(
+			state.room_id,
+			state.room_version,
+			state.depth,
+			JSON.stringify(state.forward_extremities),
+		);
 
 		for (const [key, event] of state.state_events) {
 			const [eventType, stateKey] = key.split("\x1f") as [string, string];
 			const eventId = computeEventId(event, state.room_version);
-			this.stmts.insertStateEvent.run(
+			stmts.insertStateEvent.run(
 				state.room_id,
 				eventType,
 				stateKey,
@@ -591,20 +583,20 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		}
 
 		// Cache the reference so setStateEvent can mutate it in-place
-		this.roomCache.set(state.room_id, state);
-	}
+		eph.roomCache.set(state.room_id, state);
+	};
 
-	async getRoom(roomId: RoomId): Promise<RoomState | undefined> {
+	const getRoom = async (roomId: RoomId): Promise<RoomState | undefined> => {
 		// Return cached reference if available (needed for in-place mutation)
-		const cached = this.roomCache.get(roomId);
+		const cached = eph.roomCache.get(roomId);
 		if (cached) return cached;
 
-		const row = this.db
+		const row = db
 			.prepare("SELECT * FROM rooms WHERE room_id = ?")
 			.get(roomId) as Record<string, unknown> | undefined;
 		if (!row) return undefined;
 
-		const stateRows = this.db
+		const stateRows = db
 			.prepare("SELECT * FROM state_events WHERE room_id = ?")
 			.all(roomId) as {
 			event_type: string;
@@ -628,40 +620,43 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			forward_extremities: JSON.parse(row.forward_extremities as string),
 		};
 
-		this.roomCache.set(roomId, room);
+		eph.roomCache.set(roomId, room);
 		return room;
-	}
+	};
 
-	async getRoomsForUser(userId: UserId): Promise<RoomId[]> {
-		const rows = this.db
+	const getRoomsForUser = async (userId: UserId): Promise<RoomId[]> => {
+		const rows = db
 			.prepare(
 				"SELECT room_id FROM state_events WHERE event_type = 'm.room.member' AND state_key = ? AND json_extract(event_json, '$.content.membership') = 'join'",
 			)
 			.all(userId) as { room_id: string }[];
 		return rows.map((r) => r.room_id as RoomId);
-	}
+	};
 
-	async storeEvent(event: PDU, eventId: EventId): Promise<void> {
-		this.streamCounter++;
-		this.stmts.insertEvent.run(
+	const storeEvent = async (event: PDU, eventId: EventId): Promise<void> => {
+		eph.streamCounter++;
+		stmts.insertEvent.run(
 			eventId,
 			event.room_id,
-			this.streamCounter,
+			eph.streamCounter,
 			JSON.stringify(event),
 		);
-		this.wakeWaiters();
-	}
+		eph.wakeWaiters();
+	};
 
-	async updateEvent(eventId: EventId, event: PDU): Promise<void> {
-		this.db
-			.prepare("UPDATE events SET event_json = ? WHERE event_id = ?")
-			.run(JSON.stringify(event), eventId);
-	}
+	const updateEvent = async (eventId: EventId, event: PDU): Promise<void> => {
+		db.prepare("UPDATE events SET event_json = ? WHERE event_id = ?").run(
+			JSON.stringify(event),
+			eventId,
+		);
+	};
 
-	async getEvent(
+	const getEvent = async (
 		eventId: EventId,
-	): Promise<{ event: PDU; eventId: EventId; rejected?: boolean } | undefined> {
-		const row = this.stmts.getEvent.get(eventId) as
+	): Promise<
+		{ event: PDU; eventId: EventId; rejected?: boolean } | undefined
+	> => {
+		const row = stmts.getEvent.get(eventId) as
 			| { event_id: string; event_json: string; rejected?: number }
 			| undefined;
 		if (!row) return undefined;
@@ -670,9 +665,9 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			eventId: row.event_id as EventId,
 			rejected: !!row.rejected,
 		};
-	}
+	};
 
-	async getEventsByRoom(
+	const getEventsByRoom = async (
 		roomId: RoomId,
 		limit: number,
 		from?: number,
@@ -680,18 +675,18 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 	): Promise<{
 		events: { event: PDU; eventId: EventId }[];
 		end?: number;
-	}> {
-		const fromPos = from ?? (direction === "f" ? 0 : this.streamCounter + 1);
+	}> => {
+		const fromPos = from ?? (direction === "f" ? 0 : eph.streamCounter + 1);
 
 		let rows: { event_id: string; event_json: string; stream_pos: number }[];
 		if (direction === "f") {
-			rows = this.db
+			rows = db
 				.prepare(
 					"SELECT event_id, event_json, stream_pos FROM events WHERE room_id = ? AND rejected = 0 AND stream_pos > ? ORDER BY stream_pos ASC LIMIT ?",
 				)
 				.all(roomId, fromPos, limit) as typeof rows;
 		} else {
-			rows = this.db
+			rows = db
 				.prepare(
 					"SELECT event_id, event_json, stream_pos FROM events WHERE room_id = ? AND rejected = 0 AND stream_pos < ? ORDER BY stream_pos DESC LIMIT ?",
 				)
@@ -706,18 +701,18 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		const lastRow = rows[rows.length - 1];
 		const end = lastRow ? lastRow.stream_pos : undefined;
 		return { events, end };
-	}
+	};
 
-	async getStreamPosition(): Promise<number> {
-		return this.streamCounter;
-	}
+	const getStreamPosition = async (): Promise<number> => {
+		return eph.streamCounter;
+	};
 
-	async getStateEvent(
+	const getStateEvent = async (
 		roomId: RoomId,
 		eventType: string,
 		stateKey: string,
-	): Promise<{ event: PDU; eventId: EventId } | undefined> {
-		const row = this.stmts.getStateEvent.get(roomId, eventType, stateKey) as
+	): Promise<{ event: PDU; eventId: EventId } | undefined> => {
+		const row = stmts.getStateEvent.get(roomId, eventType, stateKey) as
 			| { event_id: string; event_json: string }
 			| undefined;
 		if (!row) return undefined;
@@ -725,12 +720,12 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			event: JSON.parse(row.event_json),
 			eventId: row.event_id as EventId,
 		};
-	}
+	};
 
-	async getAllState(
+	const getAllState = async (
 		roomId: RoomId,
-	): Promise<{ event: PDU; eventId: EventId }[]> {
-		const rows = this.db
+	): Promise<{ event: PDU; eventId: EventId }[]> => {
+		const rows = db
 			.prepare(
 				"SELECT event_id, event_json FROM state_events WHERE room_id = ?",
 			)
@@ -739,13 +734,13 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			event: JSON.parse(r.event_json),
 			eventId: r.event_id as EventId,
 		}));
-	}
+	};
 
-	async setStateEvent(
+	const setStateEvent = async (
 		roomId: RoomId,
 		event: PDU,
 		eventId: EventId,
-	): Promise<void> {
+	): Promise<void> => {
 		// When this state event replaces a previous one of the same
 		// (type, state_key), stamp the new event's unsigned with the prior
 		// state per the spec: prev_content / prev_sender / replaces_state.
@@ -753,7 +748,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		// computation, so mutating it here is safe and does not alter eventId.
 		// The mutated event is serialized into both the state_events row and the
 		// events row (via storeEvent), so the unsigned fields are persisted.
-		const previousRow = this.stmts.getStateEvent.get(
+		const previousRow = stmts.getStateEvent.get(
 			roomId,
 			event.type,
 			event.state_key ?? "",
@@ -768,7 +763,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			};
 		}
 
-		this.stmts.insertStateEvent.run(
+		stmts.insertStateEvent.run(
 			roomId,
 			event.type,
 			event.state_key ?? "",
@@ -777,19 +772,19 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		);
 
 		// Update cached room state in-place (handler relies on reference sharing)
-		const cached = this.roomCache.get(roomId);
+		const cached = eph.roomCache.get(roomId);
 		if (cached) {
 			const key = `${event.type}\x1f${event.state_key ?? ""}`;
 			cached.state_events.set(key, event);
 		}
 
-		await this.storeEvent(event, eventId);
-	}
+		await storeEvent(event, eventId);
+	};
 
-	async getMemberEvents(
+	const getMemberEvents = async (
 		roomId: RoomId,
-	): Promise<{ event: PDU; eventId: EventId }[]> {
-		const rows = this.db
+	): Promise<{ event: PDU; eventId: EventId }[]> => {
+		const rows = db
 			.prepare(
 				"SELECT event_id, event_json FROM state_events WHERE room_id = ? AND event_type = 'm.room.member'",
 			)
@@ -798,32 +793,32 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			event: JSON.parse(r.event_json),
 			eventId: r.event_id as EventId,
 		}));
-	}
+	};
 
-	async getTxnEventId(
+	const getTxnEventId = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		txnId: string,
-	): Promise<EventId | undefined> {
-		const row = this.stmts.getTxn.get(userId, deviceId, txnId) as
+	): Promise<EventId | undefined> => {
+		const row = stmts.getTxn.get(userId, deviceId, txnId) as
 			| { event_id: string }
 			| undefined;
 		return row ? (row.event_id as EventId) : undefined;
-	}
+	};
 
-	async setTxnEventId(
+	const setTxnEventId = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		txnId: string,
 		eventId: EventId,
-	): Promise<void> {
-		this.stmts.setTxn.run(userId, deviceId, txnId, eventId);
-	}
+	): Promise<void> => {
+		stmts.setTxn.run(userId, deviceId, txnId, eventId);
+	};
 
-	async getRoomsForUserWithMembership(
+	const getRoomsForUserWithMembership = async (
 		userId: UserId,
-	): Promise<{ roomId: RoomId; membership: string }[]> {
-		const rows = this.db
+	): Promise<{ roomId: RoomId; membership: string }[]> => {
+		const rows = db
 			.prepare(
 				"SELECT room_id, json_extract(event_json, '$.content.membership') as membership FROM state_events WHERE event_type = 'm.room.member' AND state_key = ?",
 			)
@@ -831,17 +826,17 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		return rows
 			.filter((r) => r.membership)
 			.map((r) => ({ roomId: r.room_id as RoomId, membership: r.membership }));
-	}
+	};
 
-	async getEventsByRoomSince(
+	const getEventsByRoomSince = async (
 		roomId: RoomId,
 		since: number,
 		limit: number,
 	): Promise<{
 		events: { event: PDU; eventId: EventId; streamPos: number }[];
 		limited: boolean;
-	}> {
-		const countRow = this.db
+	}> => {
+		const countRow = db
 			.prepare(
 				"SELECT COUNT(*) as cnt FROM events WHERE room_id = ? AND rejected = 0 AND stream_pos > ?",
 			)
@@ -852,14 +847,14 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		// When limited, take the most recent events (tail)
 		let rows: { event_id: string; event_json: string; stream_pos: number }[];
 		if (limited) {
-			rows = this.db
+			rows = db
 				.prepare(
 					"SELECT event_id, event_json, stream_pos FROM events WHERE room_id = ? AND rejected = 0 AND stream_pos > ? ORDER BY stream_pos DESC LIMIT ?",
 				)
 				.all(roomId, since, limit) as typeof rows;
 			rows.reverse();
 		} else {
-			rows = this.db
+			rows = db
 				.prepare(
 					"SELECT event_id, event_json, stream_pos FROM events WHERE room_id = ? AND rejected = 0 AND stream_pos > ? ORDER BY stream_pos ASC",
 				)
@@ -873,11 +868,13 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		}));
 
 		return { events, limited };
-	}
+	};
 
-	async getStrippedState(roomId: RoomId): Promise<StrippedStateEvent[]> {
+	const getStrippedState = async (
+		roomId: RoomId,
+	): Promise<StrippedStateEvent[]> => {
 		const placeholders = INVITE_STATE_TYPES.map(() => "?").join(",");
-		const rows = this.db
+		const rows = db
 			.prepare(
 				`SELECT event_json FROM state_events WHERE room_id = ? AND event_type IN (${placeholders})`,
 			)
@@ -887,10 +884,12 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			const event = JSON.parse(r.event_json) as PDU;
 			return eventToStrippedState(event);
 		});
-	}
+	};
 
-	async getProfile(userId: UserId): Promise<UserProfile | undefined> {
-		const row = this.db
+	const getProfile = async (
+		userId: UserId,
+	): Promise<UserProfile | undefined> => {
+		const row = db
 			.prepare("SELECT displayname, avatar_url FROM users WHERE user_id = ?")
 			.get(userId) as
 			| { displayname: string | null; avatar_url: string | null }
@@ -900,28 +899,33 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		if (row.displayname) profile.displayname = row.displayname;
 		if (row.avatar_url) profile.avatar_url = row.avatar_url;
 		return profile;
-	}
+	};
 
-	async setDisplayName(
+	const setDisplayName = async (
 		userId: UserId,
 		displayname: string | null,
-	): Promise<void> {
-		this.db
-			.prepare("UPDATE users SET displayname = ? WHERE user_id = ?")
-			.run(displayname, userId);
-	}
+	): Promise<void> => {
+		db.prepare("UPDATE users SET displayname = ? WHERE user_id = ?").run(
+			displayname,
+			userId,
+		);
+	};
 
-	async setAvatarUrl(userId: UserId, avatarUrl: string | null): Promise<void> {
-		this.db
-			.prepare("UPDATE users SET avatar_url = ? WHERE user_id = ?")
-			.run(avatarUrl, userId);
-	}
+	const setAvatarUrl = async (
+		userId: UserId,
+		avatarUrl: string | null,
+	): Promise<void> => {
+		db.prepare("UPDATE users SET avatar_url = ? WHERE user_id = ?").run(
+			avatarUrl,
+			userId,
+		);
+	};
 
-	async getDevice(
+	const getDevice = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<Device | undefined> {
-		const row = this.db
+	): Promise<Device | undefined> => {
+		const row = db
 			.prepare(
 				"SELECT device_id, display_name, last_seen_ip, last_seen_ts FROM sessions WHERE user_id = ? AND device_id = ? LIMIT 1",
 			)
@@ -933,10 +937,10 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			last_seen_ip: (row.last_seen_ip as string) ?? undefined,
 			last_seen_ts: (row.last_seen_ts as number) ?? undefined,
 		};
-	}
+	};
 
-	async getAllDevices(userId: UserId): Promise<Device[]> {
-		const rows = this.db
+	const getAllDevices = async (userId: UserId): Promise<Device[]> => {
+		const rows = db
 			.prepare(
 				"SELECT DISTINCT device_id, display_name, last_seen_ip, last_seen_ts FROM sessions WHERE user_id = ?",
 			)
@@ -947,71 +951,75 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			last_seen_ip: (r.last_seen_ip as string) ?? undefined,
 			last_seen_ts: (r.last_seen_ts as number) ?? undefined,
 		}));
-	}
+	};
 
-	async updateDeviceDisplayName(
+	const updateDeviceDisplayName = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		displayName: string,
-	): Promise<void> {
-		this.db
-			.prepare(
-				"UPDATE sessions SET display_name = ? WHERE user_id = ? AND device_id = ?",
-			)
-			.run(displayName, userId, deviceId);
+	): Promise<void> => {
+		db.prepare(
+			"UPDATE sessions SET display_name = ? WHERE user_id = ? AND device_id = ?",
+		).run(displayName, userId, deviceId);
 		// A device's display name changed: notify device-list subscribers.
 		// Mirrors Synapse's DeviceHandler, where update_device (display-name
 		// change) calls notify_device_update so local /sync device_lists.changed
 		// and /keys/changes, plus federated m.device_list_update, pick up the
 		// change.
-		await this.recordDeviceKeyChange(userId);
-	}
+		await recordDeviceKeyChange(userId);
+	};
 
-	async deleteDeviceSession(userId: UserId, deviceId: DeviceId): Promise<void> {
-		this.db
-			.prepare("DELETE FROM sessions WHERE user_id = ? AND device_id = ?")
-			.run(userId, deviceId);
+	const deleteDeviceSession = async (
+		userId: UserId,
+		deviceId: DeviceId,
+	): Promise<void> => {
+		db.prepare("DELETE FROM sessions WHERE user_id = ? AND device_id = ?").run(
+			userId,
+			deviceId,
+		);
 		// A device was removed: notify device-list subscribers.
-		await this.recordDeviceKeyChange(userId);
-	}
+		await recordDeviceKeyChange(userId);
+	};
 
-	async updatePassword(userId: UserId, newPasswordHash: string): Promise<void> {
-		this.db
-			.prepare("UPDATE users SET password_hash = ? WHERE user_id = ?")
-			.run(newPasswordHash, userId);
-	}
+	const updatePassword = async (
+		userId: UserId,
+		newPasswordHash: string,
+	): Promise<void> => {
+		db.prepare("UPDATE users SET password_hash = ? WHERE user_id = ?").run(
+			newPasswordHash,
+			userId,
+		);
+	};
 
-	async deactivateUser(userId: UserId): Promise<void> {
-		this.db
-			.prepare("UPDATE users SET is_deactivated = 1 WHERE user_id = ?")
-			.run(userId);
-		await this.deleteAllSessions(userId);
-	}
+	const deactivateUser = async (userId: UserId): Promise<void> => {
+		db.prepare("UPDATE users SET is_deactivated = 1 WHERE user_id = ?").run(
+			userId,
+		);
+		await deleteAllSessions(userId);
+	};
 
-	async createRoomAlias(
+	const createRoomAlias = async (
 		roomAlias: RoomAlias,
 		roomId: RoomId,
 		servers: ServerName[],
 		creator: UserId,
-	): Promise<void> {
-		this.db
-			.prepare(
-				"INSERT OR REPLACE INTO room_aliases (room_alias, room_id, servers, creator) VALUES (?, ?, ?, ?)",
-			)
-			.run(roomAlias, roomId, JSON.stringify(servers), creator);
-	}
+	): Promise<void> => {
+		db.prepare(
+			"INSERT OR REPLACE INTO room_aliases (room_alias, room_id, servers, creator) VALUES (?, ?, ?, ?)",
+		).run(roomAlias, roomId, JSON.stringify(servers), creator);
+	};
 
-	async deleteRoomAlias(roomAlias: RoomAlias): Promise<boolean> {
-		const result = this.db
+	const deleteRoomAlias = async (roomAlias: RoomAlias): Promise<boolean> => {
+		const result = db
 			.prepare("DELETE FROM room_aliases WHERE room_alias = ?")
 			.run(roomAlias);
 		return result.changes > 0;
-	}
+	};
 
-	async getRoomByAlias(
+	const getRoomByAlias = async (
 		roomAlias: RoomAlias,
-	): Promise<{ room_id: RoomId; servers: ServerName[] } | undefined> {
-		const row = this.db
+	): Promise<{ room_id: RoomId; servers: ServerName[] } | undefined> => {
+		const row = db
 			.prepare("SELECT room_id, servers FROM room_aliases WHERE room_alias = ?")
 			.get(roomAlias) as { room_id: string; servers: string } | undefined;
 		if (!row) return undefined;
@@ -1019,164 +1027,161 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			room_id: row.room_id as RoomId,
 			servers: JSON.parse(row.servers),
 		};
-	}
+	};
 
-	async getAliasesForRoom(roomId: RoomId): Promise<RoomAlias[]> {
-		const rows = this.db
+	const getAliasesForRoom = async (roomId: RoomId): Promise<RoomAlias[]> => {
+		const rows = db
 			.prepare("SELECT room_alias FROM room_aliases WHERE room_id = ?")
 			.all(roomId) as { room_alias: string }[];
 		return rows.map((r) => r.room_alias as RoomAlias);
-	}
+	};
 
-	async getAliasCreator(roomAlias: RoomAlias): Promise<UserId | undefined> {
-		const row = this.db
+	const getAliasCreator = async (
+		roomAlias: RoomAlias,
+	): Promise<UserId | undefined> => {
+		const row = db
 			.prepare("SELECT creator FROM room_aliases WHERE room_alias = ?")
 			.get(roomAlias) as { creator: string } | undefined;
 		return row ? (row.creator as UserId) : undefined;
-	}
+	};
 
-	async setRoomVisibility(
+	const setRoomVisibility = async (
 		roomId: RoomId,
 		visibility: "public" | "private",
-	): Promise<void> {
-		this.db
-			.prepare(
-				"INSERT OR REPLACE INTO room_directory (room_id, visibility) VALUES (?, ?)",
-			)
-			.run(roomId, visibility);
-	}
+	): Promise<void> => {
+		db.prepare(
+			"INSERT OR REPLACE INTO room_directory (room_id, visibility) VALUES (?, ?)",
+		).run(roomId, visibility);
+	};
 
-	async getRoomVisibility(roomId: RoomId): Promise<"public" | "private"> {
-		const row = this.db
+	const getRoomVisibility = async (
+		roomId: RoomId,
+	): Promise<"public" | "private"> => {
+		const row = db
 			.prepare("SELECT visibility FROM room_directory WHERE room_id = ?")
 			.get(roomId) as { visibility: string } | undefined;
 		return (row?.visibility as "public" | "private") ?? "private";
-	}
+	};
 
-	async getPublicRoomIds(): Promise<RoomId[]> {
-		const rows = this.db
+	const getPublicRoomIds = async (): Promise<RoomId[]> => {
+		const rows = db
 			.prepare("SELECT room_id FROM room_directory WHERE visibility = 'public'")
 			.all() as { room_id: string }[];
 		return rows.map((r) => r.room_id as RoomId);
-	}
+	};
 
-	async getGlobalAccountData(
+	const getGlobalAccountData = async (
 		userId: UserId,
 		type: string,
-	): Promise<JsonObject | undefined> {
-		const row = this.db
+	): Promise<JsonObject | undefined> => {
+		const row = db
 			.prepare(
 				"SELECT content FROM global_account_data WHERE user_id = ? AND type = ?",
 			)
 			.get(userId, type) as { content: string } | undefined;
 		return row ? JSON.parse(row.content) : undefined;
-	}
+	};
 
-	async setGlobalAccountData(
+	const setGlobalAccountData = async (
 		userId: UserId,
 		type: string,
 		content: JsonObject,
-	): Promise<void> {
-		this.db
-			.prepare(
-				"INSERT OR REPLACE INTO global_account_data (user_id, type, content, stream_pos) VALUES (?, ?, ?, ?)",
-			)
-			.run(userId, type, JSON.stringify(content), ++this.streamCounter);
-		this.wakeWaiters();
-	}
+	): Promise<void> => {
+		db.prepare(
+			"INSERT OR REPLACE INTO global_account_data (user_id, type, content, stream_pos) VALUES (?, ?, ?, ?)",
+		).run(userId, type, JSON.stringify(content), ++eph.streamCounter);
+		eph.wakeWaiters();
+	};
 
-	async getAllGlobalAccountData(
+	const getAllGlobalAccountData = async (
 		userId: UserId,
-	): Promise<{ type: string; content: JsonObject }[]> {
-		const rows = this.db
+	): Promise<{ type: string; content: JsonObject }[]> => {
+		const rows = db
 			.prepare(
 				// Exclude MSC3391 deletion tombstones (content '{}') from initial sync.
 				"SELECT type, content FROM global_account_data WHERE user_id = ? AND content != '{}'",
 			)
 			.all(userId) as { type: string; content: string }[];
 		return rows.map((r) => ({ type: r.type, content: JSON.parse(r.content) }));
-	}
+	};
 
-	async getGlobalAccountDataSince(
+	const getGlobalAccountDataSince = async (
 		userId: UserId,
 		since: number,
-	): Promise<{ type: string; content: JsonObject }[]> {
-		const rows = this.db
+	): Promise<{ type: string; content: JsonObject }[]> => {
+		const rows = db
 			.prepare(
 				// Include tombstones so incremental sync surfaces deletions.
 				"SELECT type, content FROM global_account_data WHERE user_id = ? AND stream_pos > ?",
 			)
 			.all(userId, since) as { type: string; content: string }[];
 		return rows.map((r) => ({ type: r.type, content: JSON.parse(r.content) }));
-	}
+	};
 
-	async getRoomAccountData(
+	const getRoomAccountData = async (
 		userId: UserId,
 		roomId: RoomId,
 		type: string,
-	): Promise<JsonObject | undefined> {
-		const row = this.db
+	): Promise<JsonObject | undefined> => {
+		const row = db
 			.prepare(
 				"SELECT content FROM room_account_data WHERE user_id = ? AND room_id = ? AND type = ?",
 			)
 			.get(userId, roomId, type) as { content: string } | undefined;
 		return row ? JSON.parse(row.content) : undefined;
-	}
+	};
 
-	async setRoomAccountData(
+	const setRoomAccountData = async (
 		userId: UserId,
 		roomId: RoomId,
 		type: string,
 		content: JsonObject,
-	): Promise<void> {
-		this.db
-			.prepare(
-				"INSERT OR REPLACE INTO room_account_data (user_id, room_id, type, content, stream_pos) VALUES (?, ?, ?, ?, ?)",
-			)
-			.run(userId, roomId, type, JSON.stringify(content), ++this.streamCounter);
-		this.wakeWaiters();
-	}
-	async deleteGlobalAccountData(userId: UserId, type: string): Promise<void> {
+	): Promise<void> => {
+		db.prepare(
+			"INSERT OR REPLACE INTO room_account_data (user_id, room_id, type, content, stream_pos) VALUES (?, ?, ?, ?, ?)",
+		).run(userId, roomId, type, JSON.stringify(content), ++eph.streamCounter);
+		eph.wakeWaiters();
+	};
+	const deleteGlobalAccountData = async (
+		userId: UserId,
+		type: string,
+	): Promise<void> => {
 		// MSC3391: leave a tombstone (content '{}') with a fresh stream position
 		// rather than removing the row, so incremental sync can surface it.
-		this.db
-			.prepare(
-				"INSERT OR REPLACE INTO global_account_data (user_id, type, content, stream_pos) VALUES (?, ?, '{}', ?)",
-			)
-			.run(userId, type, ++this.streamCounter);
-		this.wakeWaiters();
-	}
-	async deleteRoomAccountData(
+		db.prepare(
+			"INSERT OR REPLACE INTO global_account_data (user_id, type, content, stream_pos) VALUES (?, ?, '{}', ?)",
+		).run(userId, type, ++eph.streamCounter);
+		eph.wakeWaiters();
+	};
+	const deleteRoomAccountData = async (
 		userId: UserId,
 		roomId: RoomId,
 		type: string,
-	): Promise<void> {
-		this.db
-			.prepare(
-				"INSERT OR REPLACE INTO room_account_data (user_id, room_id, type, content, stream_pos) VALUES (?, ?, ?, '{}', ?)",
-			)
-			.run(userId, roomId, type, ++this.streamCounter);
-		this.wakeWaiters();
-	}
+	): Promise<void> => {
+		db.prepare(
+			"INSERT OR REPLACE INTO room_account_data (user_id, room_id, type, content, stream_pos) VALUES (?, ?, ?, '{}', ?)",
+		).run(userId, roomId, type, ++eph.streamCounter);
+		eph.wakeWaiters();
+	};
 
-	async getAllRoomAccountData(
+	const getAllRoomAccountData = async (
 		userId: UserId,
 		roomId: RoomId,
-	): Promise<{ type: string; content: JsonObject }[]> {
-		const rows = this.db
+	): Promise<{ type: string; content: JsonObject }[]> => {
+		const rows = db
 			.prepare(
 				// Exclude MSC3391 deletion tombstones from initial sync.
 				"SELECT type, content FROM room_account_data WHERE user_id = ? AND room_id = ? AND content != '{}'",
 			)
 			.all(userId, roomId) as { type: string; content: string }[];
 		return rows.map((r) => ({ type: r.type, content: JSON.parse(r.content) }));
-	}
+	};
 
-	async getRoomAccountDataSince(
+	const getRoomAccountDataSince = async (
 		userId: UserId,
 		since: number,
-	): Promise<{ roomId: RoomId; type: string; content: JsonObject }[]> {
-		const rows = this.db
+	): Promise<{ roomId: RoomId; type: string; content: JsonObject }[]> => {
+		const rows = db
 			.prepare(
 				// Include tombstones so incremental sync surfaces deletions.
 				"SELECT room_id, type, content FROM room_account_data WHERE user_id = ? AND stream_pos > ?",
@@ -1191,25 +1196,25 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			type: r.type,
 			content: JSON.parse(r.content),
 		}));
-	}
+	};
 
-	async setReceipt(
+	const setReceipt = async (
 		roomId: RoomId,
 		userId: UserId,
 		eventId: EventId,
 		receiptType: string,
 		ts: Timestamp,
 		threadId?: string,
-	): Promise<void> {
-		this.db
-			.prepare(
-				"INSERT OR REPLACE INTO receipts (room_id, user_id, event_id, receipt_type, ts, thread_id) VALUES (?, ?, ?, ?, ?, ?)",
-			)
-			.run(roomId, userId, eventId, receiptType, ts, threadId ?? "");
-		this.wakeWaiters();
-	}
+	): Promise<void> => {
+		db.prepare(
+			"INSERT OR REPLACE INTO receipts (room_id, user_id, event_id, receipt_type, ts, thread_id) VALUES (?, ?, ?, ?, ?, ?)",
+		).run(roomId, userId, eventId, receiptType, ts, threadId ?? "");
+		eph.wakeWaiters();
+	};
 
-	async getReceipts(roomId: RoomId): Promise<
+	const getReceipts = async (
+		roomId: RoomId,
+	): Promise<
 		{
 			eventId: EventId;
 			receiptType: string;
@@ -1217,8 +1222,8 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			ts: Timestamp;
 			threadId?: string;
 		}[]
-	> {
-		const rows = this.db
+	> => {
+		const rows = db
 			.prepare("SELECT * FROM receipts WHERE room_id = ?")
 			.all(roomId) as {
 			event_id: string;
@@ -1237,151 +1242,140 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 					r.thread_id === null || r.thread_id === "" ? undefined : r.thread_id,
 			})),
 		);
-	}
+	};
 
-	async storeMedia(media: StoredMedia, data: Buffer): Promise<void> {
-		this.db
-			.prepare(
-				"INSERT OR REPLACE INTO media (origin, media_id, user_id, content_type, upload_name, file_size, content_hash, created_at, quarantined, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			)
-			.run(
-				media.origin,
-				media.media_id,
-				media.user_id ?? null,
-				media.content_type,
-				media.upload_name ?? null,
-				media.file_size,
-				media.content_hash,
-				media.created_at,
-				media.quarantined ? 1 : 0,
-				data,
-			);
-	}
+	const storeMedia = async (
+		media: StoredMedia,
+		data: Buffer,
+	): Promise<void> => {
+		db.prepare(
+			"INSERT OR REPLACE INTO media (origin, media_id, user_id, content_type, upload_name, file_size, content_hash, created_at, quarantined, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		).run(
+			media.origin,
+			media.media_id,
+			media.user_id ?? null,
+			media.content_type,
+			media.upload_name ?? null,
+			media.file_size,
+			media.content_hash,
+			media.created_at,
+			media.quarantined ? 1 : 0,
+			data,
+		);
+	};
 
-	async getMedia(
+	const getMedia = async (
 		serverName: ServerName,
 		mediaId: string,
-	): Promise<{ metadata: StoredMedia; data: Buffer } | undefined> {
-		const row = this.db
+	): Promise<{ metadata: StoredMedia; data: Buffer } | undefined> => {
+		const row = db
 			.prepare("SELECT * FROM media WHERE origin = ? AND media_id = ?")
 			.get(serverName, mediaId) as Record<string, unknown> | undefined;
 		if (!row) return undefined;
 		return {
-			metadata: {
-				media_id: row.media_id as string,
-				origin: row.origin as ServerName,
-				user_id: (row.user_id as UserId) ?? undefined,
-				content_type: row.content_type as string,
-				upload_name: (row.upload_name as string) ?? undefined,
-				file_size: row.file_size as number,
-				content_hash: row.content_hash as string,
-				created_at: row.created_at as number,
-				quarantined: row.quarantined === 1,
-			},
+			metadata: rowToStoredMedia(row, true),
 			data: row.data as Buffer,
 		};
-	}
+	};
 
-	async reserveMedia(media: StoredMedia): Promise<void> {
-		await this.storeMedia(media, Buffer.alloc(0));
-	}
+	const reserveMedia = async (media: StoredMedia): Promise<void> => {
+		await storeMedia(media, Buffer.alloc(0));
+	};
 
-	async updateMediaContent(
+	const updateMediaContent = async (
 		serverName: ServerName,
 		mediaId: string,
 		contentType: string,
 		fileName: string | undefined,
 		data: Buffer,
-	): Promise<boolean> {
-		const existing = await this.getMedia(serverName, mediaId);
+	): Promise<boolean> => {
+		const existing = await getMedia(serverName, mediaId);
 		if (!existing) return false;
 		const { createHash } = await import("node:crypto");
 		const hash = createHash("sha256").update(data).digest("base64");
-		this.db
-			.prepare(
-				"UPDATE media SET content_type = ?, upload_name = ?, file_size = ?, content_hash = ?, data = ? WHERE origin = ? AND media_id = ?",
-			)
-			.run(
-				contentType,
-				fileName ?? null,
-				data.length,
-				hash,
-				data,
-				serverName,
-				mediaId,
-			);
+		db.prepare(
+			"UPDATE media SET content_type = ?, upload_name = ?, file_size = ?, content_hash = ?, data = ? WHERE origin = ? AND media_id = ?",
+		).run(
+			contentType,
+			fileName ?? null,
+			data.length,
+			hash,
+			data,
+			serverName,
+			mediaId,
+		);
 		return true;
-	}
+	};
 
-	async createFilter(userId: UserId, filter: JsonObject): Promise<string> {
-		const filterId = String(++this.filterCounter);
-		this.db
-			.prepare(
-				"INSERT OR REPLACE INTO filters (user_id, filter_id, filter_json) VALUES (?, ?, ?)",
-			)
-			.run(userId, filterId, JSON.stringify(filter));
+	const createFilter = async (
+		userId: UserId,
+		filter: JsonObject,
+	): Promise<string> => {
+		const filterId = String(++eph.filterCounter);
+		db.prepare(
+			"INSERT OR REPLACE INTO filters (user_id, filter_id, filter_json) VALUES (?, ?, ?)",
+		).run(userId, filterId, JSON.stringify(filter));
 		return filterId;
-	}
+	};
 
-	async getFilter(
+	const getFilter = async (
 		userId: UserId,
 		filterId: string,
-	): Promise<JsonObject | undefined> {
-		const row = this.db
+	): Promise<JsonObject | undefined> => {
+		const row = db
 			.prepare(
 				"SELECT filter_json FROM filters WHERE user_id = ? AND filter_id = ?",
 			)
 			.get(userId, filterId) as { filter_json: string } | undefined;
 		return row ? JSON.parse(row.filter_json) : undefined;
-	}
+	};
 
-	async setDeviceKeys(
+	const setDeviceKeys = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		keys: DeviceKeys,
-	): Promise<void> {
-		this.db
-			.prepare(
-				"INSERT OR REPLACE INTO device_keys (user_id, device_id, keys_json) VALUES (?, ?, ?)",
-			)
-			.run(userId, deviceId, JSON.stringify(keys));
-		await this.recordDeviceKeyChange(userId);
-	}
+	): Promise<void> => {
+		db.prepare(
+			"INSERT OR REPLACE INTO device_keys (user_id, device_id, keys_json) VALUES (?, ?, ?)",
+		).run(userId, deviceId, JSON.stringify(keys));
+		await recordDeviceKeyChange(userId);
+	};
 
-	async recordDeviceKeyChange(userId: UserId): Promise<void> {
-		this.db
-			.prepare(
-				"INSERT INTO device_list_stream (user_id, stream_pos) VALUES (?, ?)",
-			)
-			.run(userId, ++this.streamCounter);
-		this.wakeWaiters();
-	}
+	const recordDeviceKeyChange = async (userId: UserId): Promise<void> => {
+		db.prepare(
+			"INSERT INTO device_list_stream (user_id, stream_pos) VALUES (?, ?)",
+		).run(userId, ++eph.streamCounter);
+		eph.wakeWaiters();
+	};
 
-	async getChangedDeviceUsers(since: number, until: number): Promise<UserId[]> {
-		const rows = this.db
+	const getChangedDeviceUsers = async (
+		since: number,
+		until: number,
+	): Promise<UserId[]> => {
+		const rows = db
 			.prepare(
 				"SELECT DISTINCT user_id FROM device_list_stream WHERE stream_pos > ? AND stream_pos <= ?",
 			)
 			.all(since, until) as { user_id: string }[];
 		return rows.map((r) => r.user_id as UserId);
-	}
+	};
 
-	async getDeviceKeys(
+	const getDeviceKeys = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<DeviceKeys | undefined> {
-		const row = this.db
+	): Promise<DeviceKeys | undefined> => {
+		const row = db
 			.prepare(
 				"SELECT keys_json FROM device_keys WHERE user_id = ? AND device_id = ?",
 			)
 			.get(userId, deviceId) as { keys_json: string } | undefined;
 		return row ? JSON.parse(row.keys_json) : undefined;
-	}
+	};
 
-	async getAllDeviceKeys(
+	const getAllDeviceKeys = async (
 		userId: UserId,
-	): Promise<Record<DeviceId, DeviceKeys>> {
-		const rows = this.db
+	): Promise<Record<DeviceId, DeviceKeys>> => {
+		const rows = db
 			.prepare("SELECT device_id, keys_json FROM device_keys WHERE user_id = ?")
 			.all(userId) as { device_id: string; keys_json: string }[];
 		const result: Record<DeviceId, DeviceKeys> = {};
@@ -1389,35 +1383,35 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			result[r.device_id as DeviceId] = JSON.parse(r.keys_json);
 		}
 		return result;
-	}
+	};
 
-	async deleteDeviceKeys(userId: UserId): Promise<void> {
-		this.db.prepare("DELETE FROM device_keys WHERE user_id = ?").run(userId);
-	}
+	const deleteDeviceKeys = async (userId: UserId): Promise<void> => {
+		db.prepare("DELETE FROM device_keys WHERE user_id = ?").run(userId);
+	};
 
-	async addOneTimeKeys(
+	const addOneTimeKeys = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		keys: Record<KeyId, string | OneTimeKey>,
-	): Promise<void> {
-		const stmt = this.db.prepare(
+	): Promise<void> => {
+		const stmt = db.prepare(
 			"INSERT OR REPLACE INTO one_time_keys (user_id, device_id, key_id, algorithm, key_json) VALUES (?, ?, ?, ?, ?)",
 		);
-		const insertAll = this.db.transaction(() => {
+		const insertAll = db.transaction(() => {
 			for (const [keyId, key] of Object.entries(keys)) {
 				const algorithm = keyId.split(":")[0] as string;
 				stmt.run(userId, deviceId, keyId, algorithm, JSON.stringify(key));
 			}
 		});
 		insertAll();
-	}
+	};
 
-	async claimOneTimeKey(
+	const claimOneTimeKey = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		algorithm: string,
-	): Promise<{ keyId: KeyId; key: string | OneTimeKey } | undefined> {
-		const row = this.db
+	): Promise<{ keyId: KeyId; key: string | OneTimeKey } | undefined> => {
+		const row = db
 			.prepare(
 				"SELECT key_id, key_json FROM one_time_keys WHERE user_id = ? AND device_id = ? AND algorithm = ? ORDER BY rowid ASC LIMIT 1",
 			)
@@ -1426,16 +1420,14 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			| undefined;
 
 		if (row) {
-			this.db
-				.prepare(
-					"DELETE FROM one_time_keys WHERE user_id = ? AND device_id = ? AND key_id = ?",
-				)
-				.run(userId, deviceId, row.key_id);
+			db.prepare(
+				"DELETE FROM one_time_keys WHERE user_id = ? AND device_id = ? AND key_id = ?",
+			).run(userId, deviceId, row.key_id);
 			return { keyId: row.key_id as KeyId, key: JSON.parse(row.key_json) };
 		}
 
 		// Fall back to fallback keys
-		const fallback = this.db
+		const fallback = db
 			.prepare(
 				"SELECT key_id, key_json FROM fallback_keys WHERE user_id = ? AND device_id = ? AND key_id LIKE ? LIMIT 1",
 			)
@@ -1451,13 +1443,13 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		}
 
 		return undefined;
-	}
+	};
 
-	async getOneTimeKeyCounts(
+	const getOneTimeKeyCounts = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<Record<string, number>> {
-		const rows = this.db
+	): Promise<Record<string, number>> => {
+		const rows = db
 			.prepare(
 				"SELECT algorithm, COUNT(*) as cnt FROM one_time_keys WHERE user_id = ? AND device_id = ? GROUP BY algorithm",
 			)
@@ -1467,32 +1459,32 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			counts[r.algorithm] = r.cnt;
 		}
 		return counts;
-	}
+	};
 
-	async setFallbackKeys(
+	const setFallbackKeys = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		keys: Record<KeyId, string | OneTimeKey>,
-	): Promise<void> {
-		const del = this.db.prepare(
+	): Promise<void> => {
+		const del = db.prepare(
 			"DELETE FROM fallback_keys WHERE user_id = ? AND device_id = ?",
 		);
-		const ins = this.db.prepare(
+		const ins = db.prepare(
 			"INSERT INTO fallback_keys (user_id, device_id, key_id, key_json) VALUES (?, ?, ?, ?)",
 		);
-		this.db.transaction(() => {
+		db.transaction(() => {
 			del.run(userId, deviceId);
 			for (const [keyId, key] of Object.entries(keys)) {
 				ins.run(userId, deviceId, keyId, JSON.stringify(key));
 			}
 		})();
-	}
+	};
 
-	async getFallbackKeyTypes(
+	const getFallbackKeyTypes = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<string[]> {
-		const rows = this.db
+	): Promise<string[]> => {
+		const rows = db
 			.prepare(
 				"SELECT DISTINCT key_id FROM fallback_keys WHERE user_id = ? AND device_id = ?",
 			)
@@ -1502,20 +1494,20 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			types.add(r.key_id.split(":")[0] as string);
 		}
 		return [...types];
-	}
+	};
 
-	async setCrossSigningKeys(
+	const setCrossSigningKeys = async (
 		userId: UserId,
 		keys: {
 			master_key?: CrossSigningKey;
 			self_signing_key?: CrossSigningKey;
 			user_signing_key?: CrossSigningKey;
 		},
-	): Promise<void> {
-		const stmt = this.db.prepare(
+	): Promise<void> => {
+		const stmt = db.prepare(
 			"INSERT OR REPLACE INTO cross_signing_keys (user_id, key_type, key_json) VALUES (?, ?, ?)",
 		);
-		this.db.transaction(() => {
+		db.transaction(() => {
 			if (keys.master_key)
 				stmt.run(userId, "master_key", JSON.stringify(keys.master_key));
 			if (keys.self_signing_key)
@@ -1531,40 +1523,29 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 					JSON.stringify(keys.user_signing_key),
 				);
 		})();
-	}
+	};
 
-	async getCrossSigningKeys(userId: UserId): Promise<{
+	const getCrossSigningKeys = async (
+		userId: UserId,
+	): Promise<{
 		master_key?: CrossSigningKey;
 		self_signing_key?: CrossSigningKey;
 		user_signing_key?: CrossSigningKey;
-	}> {
-		const rows = this.db
+	}> => {
+		const rows = db
 			.prepare(
 				"SELECT key_type, key_json FROM cross_signing_keys WHERE user_id = ?",
 			)
 			.all(userId) as { key_type: string; key_json: string }[];
-		const result: {
-			master_key?: CrossSigningKey;
-			self_signing_key?: CrossSigningKey;
-			user_signing_key?: CrossSigningKey;
-		} = {};
-		for (const row of rows) {
-			if (row.key_type === "master_key")
-				result.master_key = JSON.parse(row.key_json);
-			else if (row.key_type === "self_signing_key")
-				result.self_signing_key = JSON.parse(row.key_json);
-			else if (row.key_type === "user_signing_key")
-				result.user_signing_key = JSON.parse(row.key_json);
-		}
-		return result;
-	}
+		return rowsToCrossSigningKeys(rows, (j) => JSON.parse(j as string));
+	};
 
-	async storeCrossSigningSignatures(
+	const storeCrossSigningSignatures = async (
 		_userId: UserId,
 		signatures: Record<string, Record<string, JsonObject>>,
 	): Promise<
 		Record<string, Record<string, { errcode: string; error: string }>>
-	> {
+	> => {
 		const failures: Record<
 			string,
 			Record<string, { errcode: string; error: string }>
@@ -1588,7 +1569,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				}
 
 				// Try updating device keys
-				const dkRow = this.db
+				const dkRow = db
 					.prepare(
 						"SELECT keys_json FROM device_keys WHERE user_id = ? AND device_id = ?",
 					)
@@ -1603,16 +1584,14 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 							sigs,
 						);
 					}
-					this.db
-						.prepare(
-							"UPDATE device_keys SET keys_json = ? WHERE user_id = ? AND device_id = ?",
-						)
-						.run(JSON.stringify(deviceKeys), targetUserId, keyId);
+					db.prepare(
+						"UPDATE device_keys SET keys_json = ? WHERE user_id = ? AND device_id = ?",
+					).run(JSON.stringify(deviceKeys), targetUserId, keyId);
 					continue;
 				}
 
 				// Try updating cross-signing keys
-				const csRows = this.db
+				const csRows = db
 					.prepare(
 						"SELECT key_type, key_json FROM cross_signing_keys WHERE user_id = ?",
 					)
@@ -1636,11 +1615,9 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 								sigs,
 							);
 						}
-						this.db
-							.prepare(
-								"UPDATE cross_signing_keys SET key_json = ? WHERE user_id = ? AND key_type = ?",
-							)
-							.run(JSON.stringify(key), targetUserId, csRow.key_type);
+						db.prepare(
+							"UPDATE cross_signing_keys SET key_json = ? WHERE user_id = ? AND key_type = ?",
+						).run(JSON.stringify(key), targetUserId, csRow.key_type);
 						matched = true;
 						break;
 					}
@@ -1660,26 +1637,35 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			}
 		}
 		return failures;
-	}
+	};
 
-	async createKeyBackupVersion(
+	const createKeyBackupVersion = async (
 		userId: UserId,
 		algorithm: string,
 		authData: JsonObject,
-	): Promise<string> {
-		const result = this.db
+	): Promise<string> => {
+		const result = db
 			.prepare(
 				"INSERT INTO key_backup_versions (user_id, version, algorithm, auth_data) VALUES (?, (SELECT COALESCE(MAX(CAST(version AS INTEGER)), 0) + 1 FROM key_backup_versions WHERE user_id = ?), ?, ?)",
 			)
 			.run(userId, userId, algorithm, JSON.stringify(authData));
 		// Get the version we just inserted
-		const row = this.db
+		const row = db
 			.prepare("SELECT version FROM key_backup_versions WHERE rowid = ?")
 			.get(result.lastInsertRowid) as { version: string };
 		return row.version;
-	}
+	};
 
-	async getKeyBackupVersion(
+	const keyBackupEtagFor = (userId: string, version: string): string =>
+		keyBackupEtag(
+			db
+				.prepare(
+					"SELECT room_id, session_id FROM key_backup_data WHERE user_id = ? AND version = ?",
+				)
+				.all(userId, version) as Record<string, unknown>[],
+		);
+
+	const getKeyBackupVersion = async (
 		userId: UserId,
 		version?: string,
 	): Promise<
@@ -1691,18 +1677,18 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				etag: string;
 		  }
 		| undefined
-	> {
+	> => {
 		let row:
 			| { version: string; algorithm: string; auth_data: string }
 			| undefined;
 		if (version) {
-			row = this.db
+			row = db
 				.prepare(
 					"SELECT version, algorithm, auth_data FROM key_backup_versions WHERE user_id = ? AND version = ?",
 				)
 				.get(userId, version) as typeof row;
 		} else {
-			row = this.db
+			row = db
 				.prepare(
 					"SELECT version, algorithm, auth_data FROM key_backup_versions WHERE user_id = ? ORDER BY CAST(version AS INTEGER) DESC LIMIT 1",
 				)
@@ -1710,12 +1696,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		}
 		if (!row) return undefined;
 
-		const countRow = this.db
-			.prepare(
-				"SELECT COUNT(*) as c FROM key_backup_data WHERE user_id = ? AND version = ?",
-			)
-			.get(userId, row.version) as { c: number };
-		const etagRow = this.db
+		const countRow = db
 			.prepare(
 				"SELECT COUNT(*) as c FROM key_backup_data WHERE user_id = ? AND version = ?",
 			)
@@ -1726,40 +1707,40 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			algorithm: row.algorithm,
 			auth_data: JSON.parse(row.auth_data),
 			count: countRow.c,
-			etag: String(etagRow.c),
+			etag: keyBackupEtagFor(userId, row.version),
 		};
-	}
+	};
 
-	async updateKeyBackupVersion(
+	const updateKeyBackupVersion = async (
 		userId: UserId,
 		version: string,
 		authData: JsonObject,
-	): Promise<boolean> {
-		const result = this.db
+	): Promise<boolean> => {
+		const result = db
 			.prepare(
 				"UPDATE key_backup_versions SET auth_data = ? WHERE user_id = ? AND version = ?",
 			)
 			.run(JSON.stringify(authData), userId, version);
 		return result.changes > 0;
-	}
+	};
 
-	async deleteKeyBackupVersion(
+	const deleteKeyBackupVersion = async (
 		userId: UserId,
 		version: string,
-	): Promise<boolean> {
-		const result = this.db
+	): Promise<boolean> => {
+		const result = db
 			.prepare(
 				"DELETE FROM key_backup_versions WHERE user_id = ? AND version = ?",
 			)
 			.run(userId, version);
 		if (result.changes === 0) return false;
-		this.db
-			.prepare("DELETE FROM key_backup_data WHERE user_id = ? AND version = ?")
-			.run(userId, version);
+		db.prepare(
+			"DELETE FROM key_backup_data WHERE user_id = ? AND version = ?",
+		).run(userId, version);
 		return true;
-	}
+	};
 
-	async putKeyBackupKeys(
+	const putKeyBackupKeys = async (
 		userId: UserId,
 		version: string,
 		roomId: RoomId | undefined,
@@ -1770,75 +1751,50 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			| {
 					rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
 			  },
-	): Promise<{ count: number; etag: string } | undefined> {
+	): Promise<{ count: number; etag: string } | undefined> => {
 		// Verify version is current
-		const latest = this.db
+		const latest = db
 			.prepare(
 				"SELECT version FROM key_backup_versions WHERE user_id = ? ORDER BY CAST(version AS INTEGER) DESC LIMIT 1",
 			)
 			.get(userId) as { version: string } | undefined;
 		if (!latest || latest.version !== version) return undefined;
 
-		const upsert = this.db.prepare(
+		const upsert = db.prepare(
 			"INSERT OR REPLACE INTO key_backup_data (user_id, version, room_id, session_id, key_json) VALUES (?, ?, ?, ?, ?)",
 		);
 
-		const entries: [RoomId, string, KeyBackupData][] = [];
-		if (roomId && sessionId) {
-			entries.push([roomId, sessionId, keys as KeyBackupData]);
-		} else if (roomId) {
-			const roomKeys = keys as {
-				sessions: Record<string, KeyBackupData>;
-			};
-			for (const [sid, data] of Object.entries(roomKeys.sessions)) {
-				entries.push([roomId, sid, data]);
-			}
-		} else {
-			const allKeys = keys as {
-				rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
-			};
-			for (const [rid, roomData] of Object.entries(allKeys.rooms)) {
-				for (const [sid, data] of Object.entries(roomData.sessions)) {
-					entries.push([rid as RoomId, sid, data]);
-				}
-			}
-		}
+		const entries = flattenKeyBackupEntries(roomId, sessionId, keys);
 
-		this.db.transaction(() => {
+		db.transaction(() => {
 			for (const [rid, sid, data] of entries) {
 				// Check merge logic
-				const existing = this.db
+				const existing = db
 					.prepare(
 						"SELECT key_json FROM key_backup_data WHERE user_id = ? AND version = ? AND room_id = ? AND session_id = ?",
 					)
 					.get(userId, version, rid, sid) as { key_json: string } | undefined;
-				if (existing) {
-					const old = JSON.parse(existing.key_json) as KeyBackupData;
-					if (
-						(data.is_verified && !old.is_verified) ||
-						(data.is_verified === old.is_verified &&
-							data.first_message_index < old.first_message_index) ||
-						(data.is_verified === old.is_verified &&
-							data.first_message_index === old.first_message_index &&
-							data.forwarded_count < old.forwarded_count)
-					) {
-						upsert.run(userId, version, rid, sid, JSON.stringify(data));
-					}
-				} else {
+				const old = existing
+					? (JSON.parse(existing.key_json) as KeyBackupData)
+					: undefined;
+				if (!old || shouldReplaceBackupKey(data, old)) {
 					upsert.run(userId, version, rid, sid, JSON.stringify(data));
 				}
 			}
 		})();
 
-		const countRow = this.db
+		const countRow = db
 			.prepare(
 				"SELECT COUNT(*) as c FROM key_backup_data WHERE user_id = ? AND version = ?",
 			)
 			.get(userId, version) as { c: number };
-		return { count: countRow.c, etag: String(countRow.c) };
-	}
+		return {
+			count: countRow.c,
+			etag: keyBackupEtagFor(userId, version),
+		};
+	};
 
-	async getKeyBackupKeys(
+	const getKeyBackupKeys = async (
 		userId: UserId,
 		version: string,
 		roomId?: RoomId,
@@ -1850,9 +1806,9 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
 		  }
 		| undefined
-	> {
+	> => {
 		if (roomId && sessionId) {
-			const row = this.db
+			const row = db
 				.prepare(
 					"SELECT key_json FROM key_backup_data WHERE user_id = ? AND version = ? AND room_id = ? AND session_id = ?",
 				)
@@ -1861,7 +1817,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				| undefined;
 			return row ? JSON.parse(row.key_json) : undefined;
 		} else if (roomId) {
-			const rows = this.db
+			const rows = db
 				.prepare(
 					"SELECT session_id, key_json FROM key_backup_data WHERE user_id = ? AND version = ? AND room_id = ?",
 				)
@@ -1874,7 +1830,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				sessions[row.session_id] = JSON.parse(row.key_json);
 			return { sessions };
 		} else {
-			const rows = this.db
+			const rows = db
 				.prepare(
 					"SELECT room_id, session_id, key_json FROM key_backup_data WHERE user_id = ? AND version = ?",
 				)
@@ -1896,15 +1852,15 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			}
 			return { rooms };
 		}
-	}
+	};
 
-	async deleteKeyBackupKeys(
+	const deleteKeyBackupKeys = async (
 		userId: UserId,
 		version: string,
 		roomId?: RoomId,
 		sessionId?: string,
-	): Promise<{ count: number; etag: string } | undefined> {
-		const versionExists = this.db
+	): Promise<{ count: number; etag: string } | undefined> => {
+		const versionExists = db
 			.prepare(
 				"SELECT 1 FROM key_backup_versions WHERE user_id = ? AND version = ?",
 			)
@@ -1912,135 +1868,129 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		if (!versionExists) return undefined;
 
 		if (roomId && sessionId) {
-			this.db
-				.prepare(
-					"DELETE FROM key_backup_data WHERE user_id = ? AND version = ? AND room_id = ? AND session_id = ?",
-				)
-				.run(userId, version, roomId, sessionId);
+			db.prepare(
+				"DELETE FROM key_backup_data WHERE user_id = ? AND version = ? AND room_id = ? AND session_id = ?",
+			).run(userId, version, roomId, sessionId);
 		} else if (roomId) {
-			this.db
-				.prepare(
-					"DELETE FROM key_backup_data WHERE user_id = ? AND version = ? AND room_id = ?",
-				)
-				.run(userId, version, roomId);
+			db.prepare(
+				"DELETE FROM key_backup_data WHERE user_id = ? AND version = ? AND room_id = ?",
+			).run(userId, version, roomId);
 		} else {
-			this.db
-				.prepare(
-					"DELETE FROM key_backup_data WHERE user_id = ? AND version = ?",
-				)
-				.run(userId, version);
+			db.prepare(
+				"DELETE FROM key_backup_data WHERE user_id = ? AND version = ?",
+			).run(userId, version);
 		}
 
-		const countRow = this.db
+		const countRow = db
 			.prepare(
 				"SELECT COUNT(*) as c FROM key_backup_data WHERE user_id = ? AND version = ?",
 			)
 			.get(userId, version) as { c: number };
-		return { count: countRow.c, etag: String(countRow.c) };
-	}
+		return {
+			count: countRow.c,
+			etag: keyBackupEtagFor(userId, version),
+		};
+	};
 
-	async sendToDevice(
+	const sendToDevice = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		event: ToDeviceEvent,
-	): Promise<void> {
-		this.db
-			.prepare(
-				"INSERT INTO to_device (user_id, device_id, event_json) VALUES (?, ?, ?)",
-			)
-			.run(userId, deviceId, JSON.stringify(event));
-		this.wakeWaiters();
-	}
+	): Promise<void> => {
+		db.prepare(
+			"INSERT INTO to_device (user_id, device_id, event_json) VALUES (?, ?, ?)",
+		).run(userId, deviceId, JSON.stringify(event));
+		eph.wakeWaiters();
+	};
 
-	async getToDeviceMessages(
+	const getToDeviceMessages = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<ToDeviceEvent[]> {
-		const rows = this.db
+	): Promise<ToDeviceEvent[]> => {
+		const rows = db
 			.prepare(
 				"SELECT event_json FROM to_device WHERE user_id = ? AND device_id = ? ORDER BY id",
 			)
 			.all(userId, deviceId) as { event_json: string }[];
 		return rows.map((r) => JSON.parse(r.event_json));
-	}
+	};
 
-	async clearToDeviceMessages(
+	const clearToDeviceMessages = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<void> {
-		this.db
-			.prepare("DELETE FROM to_device WHERE user_id = ? AND device_id = ?")
-			.run(userId, deviceId);
-	}
+	): Promise<void> => {
+		db.prepare("DELETE FROM to_device WHERE user_id = ? AND device_id = ?").run(
+			userId,
+			deviceId,
+		);
+	};
 
-	async getPushers(userId: UserId): Promise<Pusher[]> {
-		const rows = this.db
+	const getPushers = async (userId: UserId): Promise<Pusher[]> => {
+		const rows = db
 			.prepare("SELECT pusher_json FROM pushers WHERE user_id = ?")
 			.all(userId) as { pusher_json: string }[];
 		return rows.map((r) => JSON.parse(r.pusher_json));
-	}
+	};
 
-	async setPusher(userId: UserId, pusher: Pusher): Promise<void> {
-		this.db
-			.prepare(
-				"INSERT OR REPLACE INTO pushers (user_id, app_id, pushkey, pusher_json) VALUES (?, ?, ?, ?)",
-			)
-			.run(userId, pusher.app_id, pusher.pushkey, JSON.stringify(pusher));
-	}
+	const setPusher = async (userId: UserId, pusher: Pusher): Promise<void> => {
+		db.prepare(
+			"INSERT OR REPLACE INTO pushers (user_id, app_id, pushkey, pusher_json) VALUES (?, ?, ?, ?)",
+		).run(userId, pusher.app_id, pusher.pushkey, JSON.stringify(pusher));
+	};
 
-	async deletePusher(
+	const deletePusher = async (
 		userId: UserId,
 		appId: string,
 		pushkey: string,
-	): Promise<void> {
-		this.db
-			.prepare(
-				"DELETE FROM pushers WHERE user_id = ? AND app_id = ? AND pushkey = ?",
-			)
-			.run(userId, appId, pushkey);
-	}
+	): Promise<void> => {
+		db.prepare(
+			"DELETE FROM pushers WHERE user_id = ? AND app_id = ? AND pushkey = ?",
+		).run(userId, appId, pushkey);
+	};
 
-	async deletePusherByKey(appId: string, pushkey: string): Promise<void> {
-		this.db
-			.prepare("DELETE FROM pushers WHERE app_id = ? AND pushkey = ?")
-			.run(appId, pushkey);
-	}
+	const deletePusherByKey = async (
+		appId: string,
+		pushkey: string,
+	): Promise<void> => {
+		db.prepare("DELETE FROM pushers WHERE app_id = ? AND pushkey = ?").run(
+			appId,
+			pushkey,
+		);
+	};
 
-	async storeRelation(
+	const storeRelation = async (
 		eventId: EventId,
 		roomId: RoomId,
 		relType: string,
 		targetEventId: EventId,
 		key?: string,
-	): Promise<void> {
-		const eventRow = this.stmts.getEvent.get(eventId) as
+	): Promise<void> => {
+		const eventRow = stmts.getEvent.get(eventId) as
 			| { event_json: string }
 			| undefined;
 		if (!eventRow) return;
 		const event = JSON.parse(eventRow.event_json) as PDU;
 
-		const posRow = this.db
+		const posRow = db
 			.prepare("SELECT stream_pos FROM events WHERE event_id = ?")
 			.get(eventId) as { stream_pos: number } | undefined;
-		const streamPos = posRow?.stream_pos ?? this.streamCounter;
+		const streamPos = posRow?.stream_pos ?? eph.streamCounter;
 
-		this.db
-			.prepare(
-				"INSERT INTO relations (event_id, room_id, rel_type, target_event_id, key, sender, event_type, stream_pos) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-			)
-			.run(
-				eventId,
-				roomId,
-				relType,
-				targetEventId,
-				key ?? null,
-				event.sender,
-				event.type,
-				streamPos,
-			);
-	}
+		db.prepare(
+			"INSERT INTO relations (event_id, room_id, rel_type, target_event_id, key, sender, event_type, stream_pos) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		).run(
+			eventId,
+			roomId,
+			relType,
+			targetEventId,
+			key ?? null,
+			event.sender,
+			event.type,
+			streamPos,
+		);
+	};
 
-	async getRelatedEvents(
+	const getRelatedEvents = async (
 		roomId: RoomId,
 		eventId: EventId,
 		relType?: string,
@@ -2051,7 +2001,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 	): Promise<{
 		events: { event: PDU; eventId: EventId }[];
 		nextBatch?: string;
-	}> {
+	}> => {
 		let sql =
 			"SELECT r.event_id, r.stream_pos, e.event_json FROM relations r JOIN events e ON r.event_id = e.event_id WHERE r.target_event_id = ? AND r.room_id = ?";
 		const params: unknown[] = [eventId, roomId];
@@ -2081,7 +2031,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				: " ORDER BY r.stream_pos DESC LIMIT ?";
 		params.push(limit);
 
-		const rows = this.db.prepare(sql).all(...params) as {
+		const rows = db.prepare(sql).all(...params) as {
 			event_id: string;
 			stream_pos: number;
 			event_json: string;
@@ -2098,24 +2048,24 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				: undefined;
 
 		return { events, nextBatch };
-	}
+	};
 
-	async getAnnotationCounts(
+	const getAnnotationCounts = async (
 		eventId: EventId,
-	): Promise<{ type: string; key: string; count: number }[]> {
-		const rows = this.db
+	): Promise<{ type: string; key: string; count: number }[]> => {
+		const rows = db
 			.prepare(
 				"SELECT event_type, key, COUNT(*) as cnt FROM relations WHERE target_event_id = ? AND rel_type = 'm.annotation' AND key IS NOT NULL GROUP BY event_type, key",
 			)
 			.all(eventId) as { event_type: string; key: string; cnt: number }[];
 		return rows.map((r) => ({ type: r.event_type, key: r.key, count: r.cnt }));
-	}
+	};
 
-	async getLatestEdit(
+	const getLatestEdit = async (
 		eventId: EventId,
 		sender: UserId,
-	): Promise<{ event: PDU; eventId: EventId } | undefined> {
-		const row = this.db
+	): Promise<{ event: PDU; eventId: EventId } | undefined> => {
+		const row = db
 			.prepare(
 				"SELECT r.event_id, e.event_json FROM relations r JOIN events e ON r.event_id = e.event_id WHERE r.target_event_id = ? AND r.rel_type = 'm.replace' AND r.sender = ? ORDER BY r.stream_pos DESC LIMIT 1",
 			)
@@ -2127,9 +2077,9 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			event: JSON.parse(row.event_json),
 			eventId: row.event_id as EventId,
 		};
-	}
+	};
 
-	async getThreadSummary(
+	const getThreadSummary = async (
 		eventId: EventId,
 		userId: UserId,
 	): Promise<
@@ -2139,22 +2089,22 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				currentUserParticipated: boolean;
 		  }
 		| undefined
-	> {
-		const countRow = this.db
+	> => {
+		const countRow = db
 			.prepare(
 				"SELECT COUNT(*) as cnt FROM relations WHERE target_event_id = ? AND rel_type = 'm.thread'",
 			)
 			.get(eventId) as { cnt: number };
 		if (countRow.cnt === 0) return undefined;
 
-		const latestRow = this.db
+		const latestRow = db
 			.prepare(
 				"SELECT r.event_id, e.event_json FROM relations r JOIN events e ON r.event_id = e.event_id WHERE r.target_event_id = ? AND r.rel_type = 'm.thread' ORDER BY r.stream_pos DESC LIMIT 1",
 			)
 			.get(eventId) as { event_id: string; event_json: string } | undefined;
 		if (!latestRow) return undefined;
 
-		const participatedRow = this.db
+		const participatedRow = db
 			.prepare(
 				"SELECT 1 FROM relations WHERE target_event_id = ? AND rel_type = 'm.thread' AND sender = ? LIMIT 1",
 			)
@@ -2168,86 +2118,78 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			count: countRow.cnt,
 			currentUserParticipated: !!participatedRow,
 		};
-	}
+	};
 
-	async storeReport(
+	const storeReport = async (
 		userId: UserId,
 		roomId: RoomId,
 		eventId: EventId,
 		score?: number,
 		reason?: string,
-	): Promise<void> {
-		this.db
-			.prepare(
-				"INSERT INTO reports (user_id, room_id, event_id, score, reason, ts) VALUES (?, ?, ?, ?, ?, ?)",
-			)
-			.run(userId, roomId, eventId, score ?? null, reason ?? null, Date.now());
-	}
+	): Promise<void> => {
+		db.prepare(
+			"INSERT INTO reports (user_id, room_id, event_id, score, reason, ts) VALUES (?, ?, ?, ?, ?, ?)",
+		).run(userId, roomId, eventId, score ?? null, reason ?? null, Date.now());
+	};
 
-	async storeOpenIdToken(
+	const storeOpenIdToken = async (
 		token: string,
 		userId: UserId,
 		expiresAt: Timestamp,
-	): Promise<void> {
-		this.db
-			.prepare(
-				"INSERT OR REPLACE INTO openid_tokens (token, user_id, expires_at) VALUES (?, ?, ?)",
-			)
-			.run(token, userId, expiresAt);
-	}
+	): Promise<void> => {
+		db.prepare(
+			"INSERT OR REPLACE INTO openid_tokens (token, user_id, expires_at) VALUES (?, ?, ?)",
+		).run(token, userId, expiresAt);
+	};
 
-	async getOpenIdToken(
+	const getOpenIdToken = async (
 		token: string,
-	): Promise<{ userId: UserId; expiresAt: Timestamp } | undefined> {
-		const row = this.db
+	): Promise<{ userId: UserId; expiresAt: Timestamp } | undefined> => {
+		const row = db
 			.prepare("SELECT user_id, expires_at FROM openid_tokens WHERE token = ?")
 			.get(token) as { user_id: string; expires_at: number } | undefined;
 		if (!row) return undefined;
 		return { userId: row.user_id as UserId, expiresAt: row.expires_at };
-	}
+	};
 
-	async getThreePids(
+	const getThreePids = async (
 		userId: UserId,
-	): Promise<{ medium: string; address: string; added_at: Timestamp }[]> {
-		return this.db
+	): Promise<{ medium: string; address: string; added_at: Timestamp }[]> => {
+		return db
 			.prepare(
 				"SELECT medium, address, added_at FROM threepids WHERE user_id = ?",
 			)
 			.all(userId) as { medium: string; address: string; added_at: number }[];
-	}
+	};
 
-	async addThreePid(
+	const addThreePid = async (
 		userId: UserId,
 		medium: string,
 		address: string,
-	): Promise<void> {
-		this.db
-			.prepare(
-				"INSERT OR IGNORE INTO threepids (user_id, medium, address, added_at) VALUES (?, ?, ?, ?)",
-			)
-			.run(userId, medium, address, Date.now());
-	}
+	): Promise<void> => {
+		db.prepare(
+			"INSERT OR IGNORE INTO threepids (user_id, medium, address, added_at) VALUES (?, ?, ?, ?)",
+		).run(userId, medium, address, Date.now());
+	};
 
-	async deleteThreePid(
+	const deleteThreePid = async (
 		userId: UserId,
 		medium: string,
 		address: string,
-	): Promise<void> {
-		this.db
-			.prepare(
-				"DELETE FROM threepids WHERE user_id = ? AND medium = ? AND address = ?",
-			)
-			.run(userId, medium, address);
-	}
+	): Promise<void> => {
+		db.prepare(
+			"DELETE FROM threepids WHERE user_id = ? AND medium = ? AND address = ?",
+		).run(userId, medium, address);
+	};
 
-	async searchUserDirectory(
+	const searchUserDirectory = async (
 		searchTerm: string,
 		limit: number,
 	): Promise<
 		{ user_id: UserId; display_name?: string; avatar_url?: string }[]
-	> {
+	> => {
 		const term = `%${searchTerm}%`;
-		const rows = this.db
+		const rows = db
 			.prepare(
 				"SELECT user_id, displayname, avatar_url FROM users WHERE is_deactivated = 0 AND (user_id LIKE ? OR displayname LIKE ?) LIMIT ?",
 			)
@@ -2261,9 +2203,9 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			display_name: r.displayname ?? undefined,
 			avatar_url: r.avatar_url ?? undefined,
 		}));
-	}
+	};
 
-	async getThreadRoots(
+	const getThreadRoots = async (
 		roomId: RoomId,
 		userId: UserId,
 		include: "all" | "participated",
@@ -2272,7 +2214,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 	): Promise<{
 		events: { event: PDU; eventId: EventId }[];
 		nextBatch?: string;
-	}> {
+	}> => {
 		let sql = `
 			SELECT r.target_event_id, MAX(r.stream_pos) as latest_pos, e.event_json
 			FROM relations r
@@ -2295,7 +2237,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		sql += " GROUP BY r.target_event_id ORDER BY latest_pos DESC LIMIT ?";
 		params.push(limit);
 
-		const rows = this.db.prepare(sql).all(...params) as {
+		const rows = db.prepare(sql).all(...params) as {
 			target_event_id: string;
 			latest_pos: number;
 			event_json: string;
@@ -2312,9 +2254,9 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				: undefined;
 
 		return { events, nextBatch };
-	}
+	};
 
-	async searchRoomEvents(
+	const searchRoomEvents = async (
 		roomIds: RoomId[],
 		searchTerm: string,
 		keys: string[],
@@ -2324,13 +2266,13 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		events: { event: PDU; eventId: EventId; streamPos: number }[];
 		count: number;
 		nextBatch?: string;
-	}> {
+	}> => {
 		if (roomIds.length === 0) return { events: [], count: 0 };
 
 		const placeholders = roomIds.map(() => "?").join(",");
 		const sql = `SELECT event_id, event_json, stream_pos FROM events WHERE room_id IN (${placeholders}) ORDER BY stream_pos DESC`;
 
-		const rows = this.db.prepare(sql).all(...roomIds) as {
+		const rows = db.prepare(sql).all(...roomIds) as {
 			event_id: string;
 			event_json: string;
 			stream_pos: number;
@@ -2350,27 +2292,27 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		}
 
 		return paginateSearchMatches(allMatches, limit, from);
-	}
+	};
 
-	async storeServerKeys(
+	const storeServerKeys = async (
 		serverName: ServerName,
 		keys: ServerKeys,
-	): Promise<void> {
-		const stmt = this.db.prepare(
+	): Promise<void> => {
+		const stmt = db.prepare(
 			"INSERT OR REPLACE INTO server_keys (server_name, key_id, key, valid_until) VALUES (?, ?, ?, ?)",
 		);
-		this.db.transaction(() => {
+		db.transaction(() => {
 			for (const [keyId, val] of Object.entries(keys.verify_keys)) {
 				stmt.run(serverName, keyId, val.key, keys.valid_until_ts);
 			}
 		})();
-	}
+	};
 
-	async getServerKeys(
+	const getServerKeys = async (
 		serverName: ServerName,
 		keyId: KeyId,
-	): Promise<{ key: string; validUntil: number } | undefined> {
-		const row = this.db
+	): Promise<{ key: string; validUntil: number } | undefined> => {
+		const row = db
 			.prepare(
 				"SELECT key, valid_until FROM server_keys WHERE server_name = ? AND key_id = ?",
 			)
@@ -2379,9 +2321,9 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			| undefined;
 		if (!row) return undefined;
 		return { key: row.key, validUntil: row.valid_until };
-	}
+	};
 
-	async getAuthChain(eventIds: EventId[]): Promise<PDU[]> {
+	const getAuthChain = async (eventIds: EventId[]): Promise<PDU[]> => {
 		const visited = new Set<EventId>();
 		const result: PDU[] = [];
 		const queue = [...eventIds];
@@ -2391,9 +2333,7 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			if (visited.has(id)) continue;
 			visited.add(id);
 
-			const row = this.stmts.getEvent.get(id) as
-				| { event_json: string }
-				| undefined;
+			const row = stmts.getEvent.get(id) as { event_json: string } | undefined;
 			if (!row) continue;
 			const event = JSON.parse(row.event_json) as PDU;
 			result.push(event);
@@ -2404,12 +2344,12 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		}
 
 		return result;
-	}
+	};
 
-	async getServersInRoom(roomId: RoomId): Promise<ServerName[]> {
+	const getServersInRoom = async (roomId: RoomId): Promise<ServerName[]> => {
 		// Include servers of any join/invite/knock member so that federation
 		// fanout reaches invited and knocking participants.
-		const rows = this.db
+		const rows = db
 			.prepare(
 				"SELECT state_key FROM state_events WHERE room_id = ? AND event_type = 'm.room.member' AND json_extract(event_json, '$.content.membership') IN ('join', 'invite', 'knock')",
 			)
@@ -2426,83 +2366,81 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		// While partial-state, the omitted member events hide most of the room's
 		// servers; include the servers_in_room recorded at join so federation
 		// fanout still reaches them.
-		const ps = this.db
+		const ps = db
 			.prepare("SELECT servers FROM partial_state_rooms WHERE room_id = ?")
 			.get(roomId) as { servers: string } | undefined;
 		if (ps)
 			for (const s of JSON.parse(ps.servers) as ServerName[]) servers.add(s);
 		return [...servers];
-	}
+	};
 
-	private partialStateWaiters = new Map<string, Set<() => void>>();
-	private unPartialStatedAt = new Map<string, number>();
-	private historicalPos = -1;
+	const partialStateWaiters = new Map<string, Set<() => void>>();
+	const unPartialStatedAt = new Map<string, number>();
+	let historicalPos = -1;
 
-	async getRoomUnPartialStatedAt(roomId: RoomId): Promise<number | undefined> {
-		return this.unPartialStatedAt.get(roomId);
-	}
+	const getRoomUnPartialStatedAt = async (
+		roomId: RoomId,
+	): Promise<number | undefined> => {
+		return unPartialStatedAt.get(roomId);
+	};
 
-	async setStateEventHistorical(
+	const setStateEventHistorical = async (
 		roomId: RoomId,
 		event: PDU,
 		eventId: EventId,
-	): Promise<void> {
-		const pos = this.historicalPos--;
-		this.stmts.insertEvent.run(
+	): Promise<void> => {
+		const pos = historicalPos--;
+		stmts.insertEvent.run(
 			eventId,
 			event.room_id ?? roomId,
 			pos,
 			JSON.stringify(event),
 		);
-		this.stmts.insertStateEvent.run(
+		stmts.insertStateEvent.run(
 			roomId,
 			event.type,
 			event.state_key ?? "",
 			eventId,
 			JSON.stringify(event),
 		);
-		const cached = this.roomCache.get(roomId);
+		const cached = eph.roomCache.get(roomId);
 		if (cached) {
 			cached.state_events.set(
 				`${event.type}\x1f${event.state_key ?? ""}`,
 				event,
 			);
 		}
-	}
+	};
 
-	async markRoomPartialState(
+	const markRoomPartialState = async (
 		roomId: RoomId,
 		servers: ServerName[],
 		joinEventId: EventId,
-	): Promise<void> {
-		this.db
-			.prepare(
-				"INSERT OR REPLACE INTO partial_state_rooms (room_id, servers, join_event_id) VALUES (?, ?, ?)",
-			)
-			.run(roomId, JSON.stringify(servers), joinEventId);
-	}
+	): Promise<void> => {
+		db.prepare(
+			"INSERT OR REPLACE INTO partial_state_rooms (room_id, servers, join_event_id) VALUES (?, ?, ?)",
+		).run(roomId, JSON.stringify(servers), joinEventId);
+	};
 
-	async clearRoomPartialState(roomId: RoomId): Promise<void> {
-		this.db
-			.prepare("DELETE FROM partial_state_rooms WHERE room_id = ?")
-			.run(roomId);
+	const clearRoomPartialState = async (roomId: RoomId): Promise<void> => {
+		db.prepare("DELETE FROM partial_state_rooms WHERE room_id = ?").run(roomId);
 		// Un-partial-stating is a sync-relevant change: advance the stream so an
 		// incremental /sync taken before the resync sees the room now (with its
 		// newly-known state) and long-polls wake.
-		this.streamCounter++;
-		this.unPartialStatedAt.set(roomId, this.streamCounter);
-		const waiters = this.partialStateWaiters.get(roomId);
+		eph.streamCounter++;
+		unPartialStatedAt.set(roomId, eph.streamCounter);
+		const waiters = partialStateWaiters.get(roomId);
 		if (waiters) {
-			this.partialStateWaiters.delete(roomId);
+			partialStateWaiters.delete(roomId);
 			for (const w of waiters) w();
 		}
-		this.wakeWaiters(); // wake long-poll /sync so eager syncs pick the room up
-	}
+		eph.wakeWaiters(); // wake long-poll /sync so eager syncs pick the room up
+	};
 
-	async getRoomPartialState(
+	const getRoomPartialState = async (
 		roomId: RoomId,
-	): Promise<{ servers: ServerName[]; joinEventId: EventId } | undefined> {
-		const row = this.db
+	): Promise<{ servers: ServerName[]; joinEventId: EventId } | undefined> => {
+		const row = db
 			.prepare(
 				"SELECT servers, join_event_id FROM partial_state_rooms WHERE room_id = ?",
 			)
@@ -2512,12 +2450,12 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			servers: JSON.parse(row.servers) as ServerName[],
 			joinEventId: row.join_event_id as EventId,
 		};
-	}
+	};
 
-	async getAllPartialStateRooms(): Promise<
+	const getAllPartialStateRooms = async (): Promise<
 		{ roomId: RoomId; servers: ServerName[]; joinEventId: EventId }[]
-	> {
-		const rows = this.db
+	> => {
+		const rows = db
 			.prepare(
 				"SELECT room_id, servers, join_event_id FROM partial_state_rooms",
 			)
@@ -2531,62 +2469,52 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			servers: JSON.parse(r.servers) as ServerName[],
 			joinEventId: r.join_event_id as EventId,
 		}));
-	}
+	};
 
-	async recordPartialStateEvent(
+	const recordPartialStateEvent = async (
 		roomId: RoomId,
 		eventId: EventId,
-	): Promise<void> {
-		this.db
-			.prepare(
-				"INSERT OR IGNORE INTO partial_state_events (room_id, event_id) VALUES (?, ?)",
-			)
-			.run(roomId, eventId);
-	}
+	): Promise<void> => {
+		db.prepare(
+			"INSERT OR IGNORE INTO partial_state_events (room_id, event_id) VALUES (?, ?)",
+		).run(roomId, eventId);
+	};
 
-	async takePartialStateEvents(roomId: RoomId): Promise<EventId[]> {
-		const rows = this.db
+	const takePartialStateEvents = async (roomId: RoomId): Promise<EventId[]> => {
+		const rows = db
 			.prepare("SELECT event_id FROM partial_state_events WHERE room_id = ?")
 			.all(roomId) as { event_id: string }[];
-		this.db
-			.prepare("DELETE FROM partial_state_events WHERE room_id = ?")
-			.run(roomId);
+		db.prepare("DELETE FROM partial_state_events WHERE room_id = ?").run(
+			roomId,
+		);
 		return rows.map((r) => r.event_id as EventId);
-	}
+	};
 
-	private partialStateDevicePokes = new Map<string, Set<string>>();
+	const partialStateDevicePokes = new Map<string, Set<string>>();
 
-	async recordPartialStateDevicePoke(
+	const recordPartialStateDevicePoke = async (
 		roomId: RoomId,
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<void> {
-		let set = this.partialStateDevicePokes.get(roomId);
+	): Promise<void> => {
+		let set = partialStateDevicePokes.get(roomId);
 		if (!set) {
 			set = new Set();
-			this.partialStateDevicePokes.set(roomId, set);
+			partialStateDevicePokes.set(roomId, set);
 		}
-		set.add(`${userId}\x1f${deviceId}`);
-	}
+		set.add(encodeDevicePoke(userId, deviceId));
+	};
 
-	async takePartialStateDevicePokes(
+	const takePartialStateDevicePokes = async (
 		roomId: RoomId,
-	): Promise<{ userId: UserId; deviceId: DeviceId }[]> {
-		const set = this.partialStateDevicePokes.get(roomId);
-		this.partialStateDevicePokes.delete(roomId);
-		return set
-			? [...set].map((s) => {
-					const sep = s.indexOf("\x1f");
-					return {
-						userId: s.slice(0, sep) as UserId,
-						deviceId: s.slice(sep + 1) as DeviceId,
-					};
-				})
-			: [];
-	}
+	): Promise<{ userId: UserId; deviceId: DeviceId }[]> => {
+		const set = partialStateDevicePokes.get(roomId);
+		partialStateDevicePokes.delete(roomId);
+		return set ? [...set].map(decodeDevicePoke) : [];
+	};
 
-	async deleteEvent(eventId: EventId): Promise<void> {
-		const row = this.db
+	const deleteEvent = async (eventId: EventId): Promise<void> => {
+		const row = db
 			.prepare("SELECT room_id FROM events WHERE event_id = ?")
 			.get(eventId) as { room_id: string } | undefined;
 		// Mark the event rejected rather than deleting it: it stays in the events
@@ -2594,33 +2522,33 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		// but it is dropped from current state, hidden from /sync and timeline
 		// reads, served as 404 by /event, and ignored when computing state at an
 		// event. Mirrors synapse keeping rejected events with a rejection_reason.
-		this.db
-			.prepare("UPDATE events SET rejected = 1 WHERE event_id = ?")
-			.run(eventId);
-		this.db.prepare("DELETE FROM state_events WHERE event_id = ?").run(eventId);
-		if (row) this.roomCache.delete(row.room_id as RoomId);
-	}
+		db.prepare("UPDATE events SET rejected = 1 WHERE event_id = ?").run(
+			eventId,
+		);
+		db.prepare("DELETE FROM state_events WHERE event_id = ?").run(eventId);
+		if (row) eph.roomCache.delete(row.room_id as RoomId);
+	};
 
-	async unrejectEvent(eventId: EventId): Promise<void> {
-		const row = this.db
+	const unrejectEvent = async (eventId: EventId): Promise<void> => {
+		const row = db
 			.prepare("SELECT room_id FROM events WHERE event_id = ?")
 			.get(eventId) as { room_id: string } | undefined;
-		this.db
-			.prepare("UPDATE events SET rejected = 0 WHERE event_id = ?")
-			.run(eventId);
-		if (row) this.roomCache.delete(row.room_id as RoomId);
-	}
+		db.prepare("UPDATE events SET rejected = 0 WHERE event_id = ?").run(
+			eventId,
+		);
+		if (row) eph.roomCache.delete(row.room_id as RoomId);
+	};
 
-	async waitForPartialStateClear(
+	const waitForPartialStateClear = async (
 		roomId: RoomId,
 		timeoutMs: number,
-	): Promise<void> {
-		if (!(await this.getRoomPartialState(roomId))) return;
+	): Promise<void> => {
+		if (!(await getRoomPartialState(roomId))) return;
 		await new Promise<void>((resolve) => {
-			let set = this.partialStateWaiters.get(roomId);
+			let set = partialStateWaiters.get(roomId);
 			if (!set) {
 				set = new Set();
-				this.partialStateWaiters.set(roomId, set);
+				partialStateWaiters.set(roomId, set);
 			}
 			const done = () => {
 				set?.delete(done);
@@ -2630,45 +2558,49 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			const timer = setTimeout(done, timeoutMs);
 			set.add(done);
 		});
-	}
+	};
 
-	async getStateAtEvent(
+	const getStateAtEvent = async (
 		_roomId: RoomId,
 		_eventId: EventId,
-	): Promise<Map<string, PDU> | undefined> {
+	): Promise<Map<string, PDU> | undefined> => {
 		// Simplified: return current room state
-		const room = await this.getRoom(_roomId);
+		const room = await getRoom(_roomId);
 		if (!room) return undefined;
 		return new Map(room.state_events);
-	}
+	};
 
-	async getFederationTxn(origin: ServerName, txnId: string): Promise<boolean> {
-		const row = this.db
+	const getFederationTxn = async (
+		origin: ServerName,
+		txnId: string,
+	): Promise<boolean> => {
+		const row = db
 			.prepare("SELECT 1 FROM federation_txns WHERE origin = ? AND txn_id = ?")
 			.get(origin, txnId);
 		return !!row;
-	}
+	};
 
-	async setFederationTxn(origin: ServerName, txnId: string): Promise<void> {
-		this.db
-			.prepare(
-				"INSERT OR IGNORE INTO federation_txns (origin, txn_id) VALUES (?, ?)",
-			)
-			.run(origin, txnId);
-	}
+	const setFederationTxn = async (
+		origin: ServerName,
+		txnId: string,
+	): Promise<void> => {
+		db.prepare(
+			"INSERT OR IGNORE INTO federation_txns (origin, txn_id) VALUES (?, ?)",
+		).run(origin, txnId);
+	};
 
-	async enqueueFederationEdu(
+	const enqueueFederationEdu = async (
 		destination: ServerName,
 		edu: EDU,
-	): Promise<number> {
-		const info = this.db
+	): Promise<number> => {
+		const info = db
 			.prepare(
 				"INSERT INTO pending_federation_edus (destination, edu_json) VALUES (?, ?)",
 			)
 			.run(destination, JSON.stringify(edu));
 		// Enforce the per-destination cap by deleting the oldest overflow rows.
 		const count = (
-			this.db
+			db
 				.prepare(
 					"SELECT COUNT(*) AS c FROM pending_federation_edus WHERE destination = ?",
 				)
@@ -2676,43 +2608,41 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 		).c;
 		if (count > PENDING_FEDERATION_EDU_CAP) {
 			const overflow = count - PENDING_FEDERATION_EDU_CAP;
-			this.db
-				.prepare(
-					"DELETE FROM pending_federation_edus WHERE id IN (SELECT id FROM pending_federation_edus WHERE destination = ? ORDER BY id ASC LIMIT ?)",
-				)
-				.run(destination, overflow);
+			db.prepare(
+				"DELETE FROM pending_federation_edus WHERE id IN (SELECT id FROM pending_federation_edus WHERE destination = ? ORDER BY id ASC LIMIT ?)",
+			).run(destination, overflow);
 			console.warn(
 				`pending_federation_edus: dropped ${overflow} EDU(s) for ${destination} (queue cap ${PENDING_FEDERATION_EDU_CAP} exceeded)`,
 			);
 		}
 		return Number(info.lastInsertRowid);
-	}
+	};
 
-	async getPendingFederationEdus(
+	const getPendingFederationEdus = async (
 		destination: ServerName,
 		limit: number,
-	): Promise<{ id: number; edu: EDU }[]> {
-		const rows = this.db
+	): Promise<{ id: number; edu: EDU }[]> => {
+		const rows = db
 			.prepare(
 				"SELECT id, edu_json FROM pending_federation_edus WHERE destination = ? ORDER BY id ASC LIMIT ?",
 			)
 			.all(destination, limit) as { id: number; edu_json: string }[];
 		return rows.map((r) => ({ id: r.id, edu: JSON.parse(r.edu_json) as EDU }));
-	}
+	};
 
-	async deleteFederationEdu(id: number): Promise<void> {
-		this.db.prepare("DELETE FROM pending_federation_edus WHERE id = ?").run(id);
-	}
+	const deleteFederationEdu = async (id: number): Promise<void> => {
+		db.prepare("DELETE FROM pending_federation_edus WHERE id = ?").run(id);
+	};
 
-	async getPendingFederationDestinations(): Promise<ServerName[]> {
-		const rows = this.db
+	const getPendingFederationDestinations = async (): Promise<ServerName[]> => {
+		const rows = db
 			.prepare("SELECT DISTINCT destination FROM pending_federation_edus")
 			.all() as { destination: string }[];
 		return rows.map((r) => r.destination as ServerName);
-	}
+	};
 
 	// 3PID verification — in-memory for simplicity (not persisted across restarts)
-	private verificationSessions = new Map<
+	const verificationSessions = new Map<
 		string,
 		{
 			medium: string;
@@ -2724,12 +2654,9 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			userId?: string;
 		}
 	>();
-	private loginTokens = new Map<
-		string,
-		{ userId: UserId; expiresAt: number }
-	>();
+	const loginTokens = new Map<string, { userId: UserId; expiresAt: number }>();
 
-	async storeVerificationToken(
+	const storeVerificationToken = async (
 		sessionId: string,
 		data: {
 			medium: string;
@@ -2740,11 +2667,13 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 			validated: boolean;
 			userId?: string;
 		},
-	): Promise<void> {
-		this.verificationSessions.set(sessionId, { ...data });
-	}
+	): Promise<void> => {
+		verificationSessions.set(sessionId, { ...data });
+	};
 
-	async getVerificationSession(sessionId: string): Promise<
+	const getVerificationSession = async (
+		sessionId: string,
+	): Promise<
 		| {
 				medium: string;
 				address: string;
@@ -2755,53 +2684,53 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				userId?: string;
 		  }
 		| undefined
-	> {
-		return this.verificationSessions.get(sessionId);
-	}
+	> => {
+		return verificationSessions.get(sessionId);
+	};
 
-	async validateVerificationToken(
+	const validateVerificationToken = async (
 		sessionId: string,
 		token: string,
-	): Promise<boolean> {
-		const session = this.verificationSessions.get(sessionId);
+	): Promise<boolean> => {
+		const session = verificationSessions.get(sessionId);
 		if (!session) return false;
 		if (session.token !== token) return false;
 		session.validated = true;
 		return true;
-	}
+	};
 
-	async storeLoginToken(
+	const storeLoginToken = async (
 		token: string,
 		userId: UserId,
 		expiresAt: number,
-	): Promise<void> {
-		this.loginTokens.set(token, { userId, expiresAt });
-	}
+	): Promise<void> => {
+		loginTokens.set(token, { userId, expiresAt });
+	};
 
-	async getLoginToken(
+	const getLoginToken = async (
 		token: string,
-	): Promise<{ userId: UserId; expiresAt: number } | undefined> {
-		return this.loginTokens.get(token);
-	}
+	): Promise<{ userId: UserId; expiresAt: number } | undefined> => {
+		return loginTokens.get(token);
+	};
 
-	async deleteLoginToken(token: string): Promise<void> {
-		this.loginTokens.delete(token);
-	}
+	const deleteLoginToken = async (token: string): Promise<void> => {
+		loginTokens.delete(token);
+	};
 
-	async importRoomState(
+	const importRoomState = async (
 		roomId: RoomId,
 		roomVersion: RoomVersion,
 		stateEvents: PDU[],
 		authChain: PDU[],
-	): Promise<void> {
-		this.db.transaction(() => {
+	): Promise<void> => {
+		db.transaction(() => {
 			for (const event of authChain) {
 				const eventId = computeEventId(event, roomVersion);
-				this.streamCounter++;
-				this.stmts.insertEvent.run(
+				eph.streamCounter++;
+				stmts.insertEvent.run(
 					eventId,
 					event.room_id,
-					this.streamCounter,
+					eph.streamCounter,
 					JSON.stringify(event),
 				);
 			}
@@ -2811,15 +2740,15 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 
 			for (const event of stateEvents) {
 				const eventId = computeEventId(event, roomVersion);
-				this.streamCounter++;
-				this.stmts.insertEvent.run(
+				eph.streamCounter++;
+				stmts.insertEvent.run(
 					eventId,
 					event.room_id,
-					this.streamCounter,
+					eph.streamCounter,
 					JSON.stringify(event),
 				);
 
-				this.stmts.insertStateEvent.run(
+				stmts.insertStateEvent.run(
 					roomId,
 					event.type,
 					event.state_key ?? "",
@@ -2832,13 +2761,172 @@ export class SqliteStorage extends EphemeralMixin implements Storage {
 				extremities.push(eventId);
 			}
 
-			this.db
-				.prepare(
-					"INSERT OR REPLACE INTO rooms (room_id, room_version, depth, forward_extremities) VALUES (?, ?, ?, ?)",
-				)
-				.run(roomId, roomVersion, maxDepth + 1, JSON.stringify(extremities));
+			db.prepare(
+				"INSERT OR REPLACE INTO rooms (room_id, room_version, depth, forward_extremities) VALUES (?, ?, ?, ?)",
+			).run(roomId, roomVersion, maxDepth + 1, JSON.stringify(extremities));
 		})();
 
-		this.wakeWaiters();
-	}
-}
+		eph.wakeWaiters();
+	};
+
+	mkdirSync(dirname(dbPath), { recursive: true });
+	db = new Database(dbPath);
+	db.pragma("journal_mode = WAL");
+	// Durability is configurable: NORMAL (default) fsyncs at WAL checkpoints
+	// (~fast, can lose the last few txns on power loss); FULL fsyncs every
+	// commit (fully durable). Override with SQLITE_SYNCHRONOUS=FULL.
+	const sync = process.env.SQLITE_SYNCHRONOUS ?? "NORMAL";
+	db.pragma(`synchronous = ${sync}`);
+	db.pragma("foreign_keys = OFF");
+	init();
+
+	return {
+		addOneTimeKeys,
+		addThreePid,
+		addUIAACompleted,
+		claimOneTimeKey,
+		clearRoomPartialState,
+		clearToDeviceMessages,
+		createFilter,
+		createKeyBackupVersion,
+		createRoom,
+		createRoomAlias,
+		createSession,
+		createUIAASession,
+		createUser,
+		deactivateUser,
+		deleteAllSessions,
+		deleteDeviceKeys,
+		deleteDeviceSession,
+		deleteEvent,
+		deleteFederationEdu,
+		deleteGlobalAccountData,
+		deleteKeyBackupKeys,
+		deleteKeyBackupVersion,
+		deleteLoginToken,
+		deletePusher,
+		deletePusherByKey,
+		deleteRoomAccountData,
+		deleteRoomAlias,
+		deleteSession,
+		deleteThreePid,
+		deleteUIAASession,
+		enqueueFederationEdu,
+		getAliasCreator,
+		getAliasesForRoom,
+		getAllDeviceKeys,
+		getAllDevices,
+		getAllGlobalAccountData,
+		getAllPartialStateRooms,
+		getAllRoomAccountData,
+		getAllState,
+		getAnnotationCounts,
+		getAuthChain,
+		getChangedDeviceUsers,
+		getCrossSigningKeys,
+		getDevice,
+		getDeviceKeys,
+		getEvent,
+		getEventsByRoom,
+		getEventsByRoomSince,
+		getFallbackKeyTypes,
+		getFederationTxn,
+		getFilter,
+		getGlobalAccountData,
+		getGlobalAccountDataSince,
+		getKeyBackupKeys,
+		getKeyBackupVersion,
+		getLatestEdit,
+		getLoginToken,
+		getMedia,
+		getMemberEvents,
+		getOneTimeKeyCounts,
+		getOpenIdToken,
+		getPendingFederationDestinations,
+		getPendingFederationEdus,
+		getProfile,
+		getPublicRoomIds,
+		getPushers,
+		getReceipts,
+		getRelatedEvents,
+		getRoom,
+		getRoomAccountData,
+		getRoomAccountDataSince,
+		getRoomByAlias,
+		getRoomPartialState,
+		getRoomsForUser,
+		getRoomsForUserWithMembership,
+		getRoomUnPartialStatedAt,
+		getRoomVisibility,
+		getServerKeys,
+		getServersInRoom,
+		getSessionByAccessToken,
+		getSessionByRefreshToken,
+		getSessionsByUser,
+		getStateAtEvent,
+		getStateEvent,
+		getStreamPosition,
+		getStrippedState,
+		getThreadRoots,
+		getThreadSummary,
+		getThreePids,
+		getToDeviceMessages,
+		getTxnEventId,
+		getUIAASession,
+		getUserById,
+		getUserByLocalpart,
+		getVerificationSession,
+		importRoomState,
+		markRoomPartialState,
+		putKeyBackupKeys,
+		recordDeviceKeyChange,
+		recordPartialStateDevicePoke,
+		recordPartialStateEvent,
+		reserveMedia,
+		rotateToken,
+		searchRoomEvents,
+		searchUserDirectory,
+		sendToDevice,
+		setAvatarUrl,
+		setCrossSigningKeys,
+		setDeviceKeys,
+		setDisplayName,
+		setFallbackKeys,
+		setFederationTxn,
+		setGlobalAccountData,
+		setPusher,
+		setReceipt,
+		setRoomAccountData,
+		setRoomVisibility,
+		setStateEvent,
+		setStateEventHistorical,
+		setTxnEventId,
+		storeCrossSigningSignatures,
+		storeEvent,
+		storeLoginToken,
+		storeMedia,
+		storeOpenIdToken,
+		storeRelation,
+		storeReport,
+		storeServerKeys,
+		storeVerificationToken,
+		takePartialStateDevicePokes,
+		takePartialStateEvents,
+		touchSession,
+		unrejectEvent,
+		updateDeviceDisplayName,
+		updateEvent,
+		updateKeyBackupVersion,
+		updateMediaContent,
+		updatePassword,
+		validateVerificationToken,
+		waitForPartialStateClear,
+		waitForEvents: eph.waitForEvents,
+		setTyping: eph.setTyping,
+		getTypingUsers: eph.getTypingUsers,
+		getTypingChangedAt: eph.getTypingChangedAt,
+		setPresence: eph.setPresence,
+		getPresenceChangedAt: eph.getPresenceChangedAt,
+		getPresence: eph.getPresence,
+	};
+};

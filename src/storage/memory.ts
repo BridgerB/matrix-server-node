@@ -37,7 +37,7 @@ import type { Pusher } from "../types/push.ts";
 import type { RoomVersion } from "../types/room-versions.ts";
 import type { Device, UserProfile } from "../types/user.ts";
 import {
-	EphemeralMixin,
+	createEphemeralStore,
 	eventToStrippedState,
 	INVITE_STATE_TYPES,
 } from "./ephemeral.ts";
@@ -52,46 +52,44 @@ function isEmptyJsonObject(content: JsonObject): boolean {
 	return Object.keys(content).length === 0;
 }
 
-export class MemoryStorage extends EphemeralMixin implements Storage {
-	private users = new Map<string, UserAccount>();
-	private usersByFullId = new Map<UserId, UserAccount>();
-	private sessions = new Map<AccessToken, StoredSession>();
-	private refreshIndex = new Map<RefreshToken, AccessToken>();
-	private uiaaSessions = new Map<string, { completed: string[] }>();
-	private rooms = new Map<RoomId, RoomState>();
-	private events = new Map<EventId, PDU>();
-	private roomTimeline = new Map<
+export const createMemoryStorage = (): Storage => {
+	const eph = createEphemeralStore();
+	const users = new Map<string, UserAccount>();
+	const usersByFullId = new Map<UserId, UserAccount>();
+	const sessionsByToken = new Map<AccessToken, StoredSession>();
+	const refreshIndex = new Map<RefreshToken, AccessToken>();
+	const uiaaSessions = new Map<string, { completed: string[] }>();
+	const roomsById = new Map<RoomId, RoomState>();
+	const eventsById = new Map<EventId, PDU>();
+	const roomTimeline = new Map<
 		RoomId,
 		{ eventId: EventId; streamPos: number }[]
 	>();
-	private txnMap = new Map<string, EventId>();
-	private aliases = new Map<
+	const txnMap = new Map<string, EventId>();
+	const aliases = new Map<
 		RoomAlias,
 		{ room_id: RoomId; servers: ServerName[]; creator: UserId }
 	>();
-	private publicRooms = new Set<RoomId>();
-	private globalAccountData = new Map<
+	const publicRooms = new Set<RoomId>();
+	const globalAccountData = new Map<
 		UserId,
 		Map<string, { content: JsonObject; streamPos: number }>
 	>();
-	private roomAccountDataMap = new Map<
+	const roomAccountDataMap = new Map<
 		string,
 		Map<string, { content: JsonObject; streamPos: number }>
 	>();
-	private receiptsMap = new Map<
+	const receiptsMap = new Map<
 		RoomId,
 		Map<string, { eventId: EventId; ts: Timestamp; threadId?: string }>
 	>();
-	private mediaStore = new Map<
-		string,
-		{ metadata: StoredMedia; data: Buffer }
-	>();
-	private filters = new Map<UserId, Map<string, JsonObject>>();
-	private deviceKeysMap = new Map<string, DeviceKeys>();
-	private deviceListStream: { userId: UserId; streamPos: number }[] = [];
-	private oneTimeKeysMap = new Map<string, Map<KeyId, string | OneTimeKey>>();
-	private fallbackKeysMap = new Map<string, Map<KeyId, string | OneTimeKey>>();
-	private crossSigningKeysMap = new Map<
+	const mediaStore = new Map<string, { metadata: StoredMedia; data: Buffer }>();
+	const filters = new Map<UserId, Map<string, JsonObject>>();
+	const deviceKeysMap = new Map<string, DeviceKeys>();
+	const deviceListStream: { userId: UserId; streamPos: number }[] = [];
+	const oneTimeKeysMap = new Map<string, Map<KeyId, string | OneTimeKey>>();
+	const fallbackKeysMap = new Map<string, Map<KeyId, string | OneTimeKey>>();
+	const crossSigningKeysMap = new Map<
 		UserId,
 		{
 			master_key?: CrossSigningKey;
@@ -99,7 +97,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			user_signing_key?: CrossSigningKey;
 		}
 	>();
-	private keyBackupVersions = new Map<
+	const keyBackupVersions = new Map<
 		UserId,
 		{
 			version: string;
@@ -107,14 +105,14 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			auth_data: JsonObject;
 		}[]
 	>();
-	private keyBackupData = new Map<
+	const keyBackupData = new Map<
 		string,
 		Map<RoomId, Map<string, KeyBackupData>>
 	>();
-	private keyBackupCounter = 0;
-	private toDeviceInbox = new Map<string, ToDeviceEvent[]>();
-	private pushersMap = new Map<UserId, Pusher[]>();
-	private relationsMap = new Map<
+	let keyBackupCounter = 0;
+	const toDeviceInbox = new Map<string, ToDeviceEvent[]>();
+	const pushersMap = new Map<UserId, Pusher[]>();
+	const relationsMap = new Map<
 		EventId,
 		{
 			eventId: EventId;
@@ -125,7 +123,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			streamPos: number;
 		}[]
 	>();
-	private reports: {
+	const reports: {
 		userId: UserId;
 		roomId: RoomId;
 		eventId: EventId;
@@ -133,26 +131,23 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		reason?: string;
 		ts: number;
 	}[] = [];
-	private openIdTokens = new Map<
-		string,
-		{ userId: UserId; expiresAt: number }
-	>();
-	private threePidsMap = new Map<
+	const openIdTokens = new Map<string, { userId: UserId; expiresAt: number }>();
+	const threePidsMap = new Map<
 		UserId,
 		{ medium: string; address: string; added_at: number }[]
 	>();
-	private serverKeysCache = new Map<
+	const serverKeysCache = new Map<
 		string,
 		{ key: string; validUntil: number }
 	>();
-	private federationTxns = new Set<string>();
+	const federationTxns = new Set<string>();
 	// Durable outbound EDU retry queue: destination -> ordered pending entries.
-	private pendingFederationEdus = new Map<
+	const pendingFederationEdus = new Map<
 		ServerName,
 		{ id: number; edu: EDU }[]
 	>();
-	private pendingFederationEduCounter = 0;
-	private verificationSessions = new Map<
+	let pendingFederationEduCounter = 0;
+	const verificationSessions = new Map<
 		string,
 		{
 			medium: string;
@@ -164,90 +159,91 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			userId?: string;
 		}
 	>();
-	private loginTokens = new Map<
-		string,
-		{ userId: UserId; expiresAt: number }
-	>();
+	const loginTokens = new Map<string, { userId: UserId; expiresAt: number }>();
 
-	async createUser(account: UserAccount): Promise<void> {
-		this.users.set(account.localpart, account);
-		this.usersByFullId.set(account.user_id, account);
-	}
+	const createUser = async (account: UserAccount): Promise<void> => {
+		users.set(account.localpart, account);
+		usersByFullId.set(account.user_id, account);
+	};
 
-	async getUserByLocalpart(
+	const getUserByLocalpart = async (
 		localpart: string,
-	): Promise<UserAccount | undefined> {
-		return this.users.get(localpart);
-	}
+	): Promise<UserAccount | undefined> => {
+		return users.get(localpart);
+	};
 
-	async getUserById(userId: UserId): Promise<UserAccount | undefined> {
-		return this.usersByFullId.get(userId);
-	}
+	const getUserById = async (
+		userId: UserId,
+	): Promise<UserAccount | undefined> => {
+		return usersByFullId.get(userId);
+	};
 
-	async createSession(session: StoredSession): Promise<void> {
-		this.sessions.set(session.access_token, session);
+	const createSession = async (session: StoredSession): Promise<void> => {
+		sessionsByToken.set(session.access_token, session);
 		if (session.refresh_token) {
-			this.refreshIndex.set(session.refresh_token, session.access_token);
+			refreshIndex.set(session.refresh_token, session.access_token);
 		}
 		// A new device/session was added: notify device-list subscribers.
-		await this.recordDeviceKeyChange(session.user_id);
-	}
+		await recordDeviceKeyChange(session.user_id);
+	};
 
-	async getSessionByAccessToken(
+	const getSessionByAccessToken = async (
 		token: AccessToken,
-	): Promise<StoredSession | undefined> {
-		return this.sessions.get(token);
-	}
+	): Promise<StoredSession | undefined> => {
+		return sessionsByToken.get(token);
+	};
 
-	async getSessionByRefreshToken(
+	const getSessionByRefreshToken = async (
 		token: RefreshToken,
-	): Promise<StoredSession | undefined> {
-		const accessToken = this.refreshIndex.get(token);
+	): Promise<StoredSession | undefined> => {
+		const accessToken = refreshIndex.get(token);
 		if (!accessToken) return undefined;
-		return this.sessions.get(accessToken);
-	}
+		return sessionsByToken.get(accessToken);
+	};
 
-	async getSessionsByUser(userId: UserId): Promise<StoredSession[]> {
-		return [...this.sessions.values()].filter((s) => s.user_id === userId);
-	}
+	const getSessionsByUser = async (
+		userId: UserId,
+	): Promise<StoredSession[]> => {
+		return [...sessionsByToken.values()].filter((s) => s.user_id === userId);
+	};
 
-	async deleteSession(token: AccessToken): Promise<void> {
-		const session = this.sessions.get(token);
+	const deleteSession = async (token: AccessToken): Promise<void> => {
+		const session = sessionsByToken.get(token);
 		if (session?.refresh_token) {
-			this.refreshIndex.delete(session.refresh_token);
+			refreshIndex.delete(session.refresh_token);
 		}
-		this.sessions.delete(token);
+		sessionsByToken.delete(token);
 		// A device/session was removed: notify device-list subscribers.
 		if (session) {
-			await this.recordDeviceKeyChange(session.user_id);
+			await recordDeviceKeyChange(session.user_id);
 		}
-	}
+	};
 
-	async deleteAllSessions(userId: UserId): Promise<void> {
-		for (const [token, session] of this.sessions) {
+	const deleteAllSessions = async (userId: UserId): Promise<void> => {
+		for (const [token, session] of sessionsByToken) {
 			if (session.user_id === userId) {
 				if (session.refresh_token) {
-					this.refreshIndex.delete(session.refresh_token);
+					refreshIndex.delete(session.refresh_token);
 				}
-				this.sessions.delete(token);
+				sessionsByToken.delete(token);
 			}
 		}
 		// Devices were removed: notify device-list subscribers.
-		await this.recordDeviceKeyChange(userId);
-	}
+		await recordDeviceKeyChange(userId);
+	};
 
-	async rotateToken(
+	const rotateToken = async (
 		oldAccessToken: AccessToken,
 		newAccessToken: AccessToken,
 		newRefreshToken?: RefreshToken,
 		expiresAt?: Timestamp,
-	): Promise<StoredSession | undefined> {
-		const session = this.sessions.get(oldAccessToken);
+	): Promise<StoredSession | undefined> => {
+		const session = sessionsByToken.get(oldAccessToken);
 		if (!session) return undefined;
 
-		this.sessions.delete(oldAccessToken);
+		sessionsByToken.delete(oldAccessToken);
 		if (session.refresh_token) {
-			this.refreshIndex.delete(session.refresh_token);
+			refreshIndex.delete(session.refresh_token);
 		}
 
 		const updated: StoredSession = {
@@ -257,55 +253,58 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			expires_at: expiresAt,
 		};
 
-		this.sessions.set(newAccessToken, updated);
+		sessionsByToken.set(newAccessToken, updated);
 		if (newRefreshToken) {
-			this.refreshIndex.set(newRefreshToken, newAccessToken);
+			refreshIndex.set(newRefreshToken, newAccessToken);
 		}
 		return updated;
-	}
+	};
 
-	async touchSession(
+	const touchSession = async (
 		token: AccessToken,
 		ip: string,
 		userAgent: string,
-	): Promise<void> {
-		const session = this.sessions.get(token);
+	): Promise<void> => {
+		const session = sessionsByToken.get(token);
 		if (session) {
 			session.last_seen_ip = ip;
 			session.last_seen_ts = Date.now();
 			session.user_agent = userAgent;
 		}
-	}
+	};
 
-	async createUIAASession(sessionId: string): Promise<void> {
-		this.uiaaSessions.set(sessionId, { completed: [] });
-	}
+	const createUIAASession = async (sessionId: string): Promise<void> => {
+		uiaaSessions.set(sessionId, { completed: [] });
+	};
 
-	async getUIAASession(
+	const getUIAASession = async (
 		sessionId: string,
-	): Promise<{ completed: string[] } | undefined> {
-		return this.uiaaSessions.get(sessionId);
-	}
+	): Promise<{ completed: string[] } | undefined> => {
+		return uiaaSessions.get(sessionId);
+	};
 
-	async addUIAACompleted(sessionId: string, stageType: string): Promise<void> {
-		this.uiaaSessions.get(sessionId)?.completed.push(stageType);
-	}
+	const addUIAACompleted = async (
+		sessionId: string,
+		stageType: string,
+	): Promise<void> => {
+		uiaaSessions.get(sessionId)?.completed.push(stageType);
+	};
 
-	async deleteUIAASession(sessionId: string): Promise<void> {
-		this.uiaaSessions.delete(sessionId);
-	}
+	const deleteUIAASession = async (sessionId: string): Promise<void> => {
+		uiaaSessions.delete(sessionId);
+	};
 
-	async createRoom(state: RoomState): Promise<void> {
-		this.rooms.set(state.room_id, state);
-		this.roomTimeline.set(state.room_id, []);
-	}
+	const createRoom = async (state: RoomState): Promise<void> => {
+		roomsById.set(state.room_id, state);
+		roomTimeline.set(state.room_id, []);
+	};
 
-	async getRoom(roomId: RoomId): Promise<RoomState | undefined> {
-		return this.rooms.get(roomId);
-	}
+	const getRoom = async (roomId: RoomId): Promise<RoomState | undefined> => {
+		return roomsById.get(roomId);
+	};
 
-	async getRoomsForUser(userId: UserId): Promise<RoomId[]> {
-		return [...this.rooms.values()]
+	const getRoomsForUser = async (userId: UserId): Promise<RoomId[]> => {
+		return [...roomsById.values()]
 			.filter((room) => {
 				const memberEvent = room.state_events.get(`m.room.member\x1f${userId}`);
 				return (
@@ -314,38 +313,38 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 				);
 			})
 			.map((room) => room.room_id);
-	}
+	};
 
-	async storeEvent(event: PDU, eventId: EventId): Promise<void> {
-		this.events.set(eventId, event);
-		const timeline = this.roomTimeline.get(event.room_id);
+	const storeEvent = async (event: PDU, eventId: EventId): Promise<void> => {
+		eventsById.set(eventId, event);
+		const timeline = roomTimeline.get(event.room_id);
 		if (timeline) {
-			this.streamCounter++;
-			timeline.push({ eventId, streamPos: this.streamCounter });
+			eph.streamCounter++;
+			timeline.push({ eventId, streamPos: eph.streamCounter });
 		}
-		this.wakeWaiters();
-	}
+		eph.wakeWaiters();
+	};
 
-	async updateEvent(eventId: EventId, event: PDU): Promise<void> {
-		this.events.set(eventId, event);
-	}
+	const updateEvent = async (eventId: EventId, event: PDU): Promise<void> => {
+		eventsById.set(eventId, event);
+	};
 
-	async getEvent(
+	const getEvent = async (
 		eventId: EventId,
-	): Promise<{ event: PDU; eventId: EventId } | undefined> {
-		const event = this.events.get(eventId);
+	): Promise<{ event: PDU; eventId: EventId } | undefined> => {
+		const event = eventsById.get(eventId);
 		if (!event) return undefined;
 		return { event, eventId };
-	}
+	};
 
-	async getEventsByRoom(
+	const getEventsByRoom = async (
 		roomId: RoomId,
 		limit: number,
 		from?: number,
 		direction: "b" | "f" = "f",
-	): Promise<{ events: { event: PDU; eventId: EventId }[]; end?: number }> {
-		const timeline = this.roomTimeline.get(roomId) ?? [];
-		const fromPos = from ?? (direction === "f" ? 0 : this.streamCounter + 1);
+	): Promise<{ events: { event: PDU; eventId: EventId }[]; end?: number }> => {
+		const timeline = roomTimeline.get(roomId) ?? [];
+		const fromPos = from ?? (direction === "f" ? 0 : eph.streamCounter + 1);
 
 		const filtered =
 			direction === "f"
@@ -354,45 +353,45 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 
 		const sliced = filtered.slice(0, limit);
 		const events = sliced.map((e) => ({
-			event: this.events.get(e.eventId) as PDU,
+			event: eventsById.get(e.eventId) as PDU,
 			eventId: e.eventId,
 		}));
 
 		return { events, end: sliced[sliced.length - 1]?.streamPos };
-	}
+	};
 
-	async getStreamPosition(): Promise<number> {
-		return this.streamCounter;
-	}
+	const getStreamPosition = async (): Promise<number> => {
+		return eph.streamCounter;
+	};
 
-	async getStateEvent(
+	const getStateEvent = async (
 		roomId: RoomId,
 		eventType: string,
 		stateKey: string,
-	): Promise<{ event: PDU; eventId: EventId } | undefined> {
-		const room = this.rooms.get(roomId);
+	): Promise<{ event: PDU; eventId: EventId } | undefined> => {
+		const room = roomsById.get(roomId);
 		const event = room?.state_events.get(`${eventType}\x1f${stateKey}`);
 		if (!event) return undefined;
 		return { event, eventId: computeEventId(event, room?.room_version) };
-	}
+	};
 
-	async getAllState(
+	const getAllState = async (
 		roomId: RoomId,
-	): Promise<{ event: PDU; eventId: EventId }[]> {
-		const room = this.rooms.get(roomId);
+	): Promise<{ event: PDU; eventId: EventId }[]> => {
+		const room = roomsById.get(roomId);
 		if (!room) return [];
 		return [...room.state_events.values()].map((event) => ({
 			event,
 			eventId: computeEventId(event, room.room_version),
 		}));
-	}
+	};
 
-	async setStateEvent(
+	const setStateEvent = async (
 		roomId: RoomId,
 		event: PDU,
 		eventId: EventId,
-	): Promise<void> {
-		const room = this.rooms.get(roomId);
+	): Promise<void> => {
+		const room = roomsById.get(roomId);
 		if (!room) return;
 		const key = `${event.type}\x1f${event.state_key ?? ""}`;
 		// When this state event replaces a previous one of the same
@@ -413,13 +412,13 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			}
 		}
 		room.state_events.set(key, event);
-		await this.storeEvent(event, eventId);
-	}
+		await storeEvent(event, eventId);
+	};
 
-	async getMemberEvents(
+	const getMemberEvents = async (
 		roomId: RoomId,
-	): Promise<{ event: PDU; eventId: EventId }[]> {
-		const room = this.rooms.get(roomId);
+	): Promise<{ event: PDU; eventId: EventId }[]> => {
+		const room = roomsById.get(roomId);
 		if (!room) return [];
 		return [...room.state_events.entries()]
 			.filter(([key]) => key.startsWith("m.room.member\x1f"))
@@ -427,29 +426,29 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 				event,
 				eventId: computeEventId(event, room.room_version),
 			}));
-	}
+	};
 
-	async getTxnEventId(
+	const getTxnEventId = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		txnId: string,
-	): Promise<EventId | undefined> {
-		return this.txnMap.get(`${userId}|${deviceId}|${txnId}`);
-	}
+	): Promise<EventId | undefined> => {
+		return txnMap.get(`${userId}|${deviceId}|${txnId}`);
+	};
 
-	async setTxnEventId(
+	const setTxnEventId = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		txnId: string,
 		eventId: EventId,
-	): Promise<void> {
-		this.txnMap.set(`${userId}|${deviceId}|${txnId}`, eventId);
-	}
+	): Promise<void> => {
+		txnMap.set(`${userId}|${deviceId}|${txnId}`, eventId);
+	};
 
-	async getRoomsForUserWithMembership(
+	const getRoomsForUserWithMembership = async (
 		userId: UserId,
-	): Promise<{ roomId: RoomId; membership: string }[]> {
-		return [...this.rooms.values()]
+	): Promise<{ roomId: RoomId; membership: string }[]> => {
+		return [...roomsById.values()]
 			.map((room) => {
 				const memberEvent = room.state_events.get(`m.room.member\x1f${userId}`);
 				const membership = (memberEvent?.content as Record<string, unknown>)
@@ -460,30 +459,32 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 				(entry): entry is { roomId: RoomId; membership: string } =>
 					entry !== undefined,
 			);
-	}
+	};
 
-	async getEventsByRoomSince(
+	const getEventsByRoomSince = async (
 		roomId: RoomId,
 		since: number,
 		limit: number,
 	): Promise<{
 		events: { event: PDU; eventId: EventId; streamPos: number }[];
 		limited: boolean;
-	}> {
-		const timeline = this.roomTimeline.get(roomId) ?? [];
+	}> => {
+		const timeline = roomTimeline.get(roomId) ?? [];
 		const filtered = timeline.filter((e) => e.streamPos > since);
 		const limited = filtered.length > limit;
 		const sliced = limited ? filtered.slice(filtered.length - limit) : filtered;
 		const events = sliced.map((e) => ({
-			event: this.events.get(e.eventId) as PDU,
+			event: eventsById.get(e.eventId) as PDU,
 			eventId: e.eventId,
 			streamPos: e.streamPos,
 		}));
 		return { events, limited };
-	}
+	};
 
-	async getStrippedState(roomId: RoomId): Promise<StrippedStateEvent[]> {
-		const room = this.rooms.get(roomId);
+	const getStrippedState = async (
+		roomId: RoomId,
+	): Promise<StrippedStateEvent[]> => {
+		const room = roomsById.get(roomId);
 		if (!room) return [];
 		return [...room.state_events.entries()]
 			.filter(([key]) =>
@@ -492,45 +493,50 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 				),
 			)
 			.map(([, event]) => eventToStrippedState(event));
-	}
+	};
 
-	async getProfile(userId: UserId): Promise<UserProfile | undefined> {
-		const user = this.usersByFullId.get(userId);
+	const getProfile = async (
+		userId: UserId,
+	): Promise<UserProfile | undefined> => {
+		const user = usersByFullId.get(userId);
 		if (!user) return undefined;
 		const profile: UserProfile = {};
 		if (user.displayname) profile.displayname = user.displayname;
 		if (user.avatar_url) profile.avatar_url = user.avatar_url;
 		return profile;
-	}
+	};
 
-	async setDisplayName(
+	const setDisplayName = async (
 		userId: UserId,
 		displayname: string | null,
-	): Promise<void> {
-		const user = this.usersByFullId.get(userId);
+	): Promise<void> => {
+		const user = usersByFullId.get(userId);
 		if (!user) return;
 		if (displayname === null) {
 			delete user.displayname;
 		} else {
 			user.displayname = displayname;
 		}
-	}
+	};
 
-	async setAvatarUrl(userId: UserId, avatarUrl: string | null): Promise<void> {
-		const user = this.usersByFullId.get(userId);
+	const setAvatarUrl = async (
+		userId: UserId,
+		avatarUrl: string | null,
+	): Promise<void> => {
+		const user = usersByFullId.get(userId);
 		if (!user) return;
 		if (avatarUrl === null) {
 			delete user.avatar_url;
 		} else {
 			user.avatar_url = avatarUrl;
 		}
-	}
+	};
 
-	async getDevice(
+	const getDevice = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<Device | undefined> {
-		const session = [...this.sessions.values()].find(
+	): Promise<Device | undefined> => {
+		const session = [...sessionsByToken.values()].find(
 			(s) => s.user_id === userId && s.device_id === deviceId,
 		);
 		if (!session) return undefined;
@@ -540,10 +546,10 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			last_seen_ip: session.last_seen_ip,
 			last_seen_ts: session.last_seen_ts,
 		};
-	}
+	};
 
-	async getAllDevices(userId: UserId): Promise<Device[]> {
-		return [...this.sessions.values()]
+	const getAllDevices = async (userId: UserId): Promise<Device[]> => {
+		return [...sessionsByToken.values()]
 			.filter((s) => s.user_id === userId)
 			.map((s) => ({
 				device_id: s.device_id,
@@ -551,14 +557,14 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 				last_seen_ip: s.last_seen_ip,
 				last_seen_ts: s.last_seen_ts,
 			}));
-	}
+	};
 
-	async updateDeviceDisplayName(
+	const updateDeviceDisplayName = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		displayName: string,
-	): Promise<void> {
-		for (const session of this.sessions.values()) {
+	): Promise<void> => {
+		for (const session of sessionsByToken.values()) {
 			if (session.user_id === userId && session.device_id === deviceId) {
 				session.display_name = displayName;
 				// A device's display name changed: notify device-list
@@ -566,204 +572,216 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 				// update_device (display-name change) calls notify_device_update
 				// so local /sync device_lists.changed and /keys/changes, plus
 				// federated m.device_list_update, pick up the change.
-				await this.recordDeviceKeyChange(userId);
+				await recordDeviceKeyChange(userId);
 				return;
 			}
 		}
-	}
+	};
 
-	async deleteDeviceSession(userId: UserId, deviceId: DeviceId): Promise<void> {
-		for (const [token, session] of this.sessions) {
+	const deleteDeviceSession = async (
+		userId: UserId,
+		deviceId: DeviceId,
+	): Promise<void> => {
+		for (const [token, session] of sessionsByToken) {
 			if (session.user_id === userId && session.device_id === deviceId) {
 				if (session.refresh_token) {
-					this.refreshIndex.delete(session.refresh_token);
+					refreshIndex.delete(session.refresh_token);
 				}
-				this.sessions.delete(token);
+				sessionsByToken.delete(token);
 				break;
 			}
 		}
 		// A device was removed: notify device-list subscribers.
-		await this.recordDeviceKeyChange(userId);
-	}
+		await recordDeviceKeyChange(userId);
+	};
 
-	async updatePassword(userId: UserId, newPasswordHash: string): Promise<void> {
-		const user = this.usersByFullId.get(userId);
+	const updatePassword = async (
+		userId: UserId,
+		newPasswordHash: string,
+	): Promise<void> => {
+		const user = usersByFullId.get(userId);
 		if (user) {
 			user.password_hash = newPasswordHash;
 		}
-	}
+	};
 
-	async deactivateUser(userId: UserId): Promise<void> {
-		const user = this.usersByFullId.get(userId);
+	const deactivateUser = async (userId: UserId): Promise<void> => {
+		const user = usersByFullId.get(userId);
 		if (user) {
 			user.is_deactivated = true;
 		}
-		await this.deleteAllSessions(userId);
-	}
+		await deleteAllSessions(userId);
+	};
 
-	async createRoomAlias(
+	const createRoomAlias = async (
 		roomAlias: RoomAlias,
 		roomId: RoomId,
 		servers: ServerName[],
 		creator: UserId,
-	): Promise<void> {
-		this.aliases.set(roomAlias, { room_id: roomId, servers, creator });
-	}
+	): Promise<void> => {
+		aliases.set(roomAlias, { room_id: roomId, servers, creator });
+	};
 
-	async deleteRoomAlias(roomAlias: RoomAlias): Promise<boolean> {
-		return this.aliases.delete(roomAlias);
-	}
+	const deleteRoomAlias = async (roomAlias: RoomAlias): Promise<boolean> => {
+		return aliases.delete(roomAlias);
+	};
 
-	async getRoomByAlias(
+	const getRoomByAlias = async (
 		roomAlias: RoomAlias,
-	): Promise<{ room_id: RoomId; servers: ServerName[] } | undefined> {
-		const entry = this.aliases.get(roomAlias);
+	): Promise<{ room_id: RoomId; servers: ServerName[] } | undefined> => {
+		const entry = aliases.get(roomAlias);
 		if (!entry) return undefined;
 		return { room_id: entry.room_id, servers: entry.servers };
-	}
+	};
 
-	async getAliasesForRoom(roomId: RoomId): Promise<RoomAlias[]> {
-		return [...this.aliases.entries()]
+	const getAliasesForRoom = async (roomId: RoomId): Promise<RoomAlias[]> => {
+		return [...aliases.entries()]
 			.filter(([, entry]) => entry.room_id === roomId)
 			.map(([alias]) => alias);
-	}
+	};
 
-	async getAliasCreator(roomAlias: RoomAlias): Promise<UserId | undefined> {
-		return this.aliases.get(roomAlias)?.creator;
-	}
+	const getAliasCreator = async (
+		roomAlias: RoomAlias,
+	): Promise<UserId | undefined> => {
+		return aliases.get(roomAlias)?.creator;
+	};
 
-	async setRoomVisibility(
+	const setRoomVisibility = async (
 		roomId: RoomId,
 		visibility: "public" | "private",
-	): Promise<void> {
+	): Promise<void> => {
 		if (visibility === "public") {
-			this.publicRooms.add(roomId);
+			publicRooms.add(roomId);
 		} else {
-			this.publicRooms.delete(roomId);
+			publicRooms.delete(roomId);
 		}
-	}
+	};
 
-	async getRoomVisibility(roomId: RoomId): Promise<"public" | "private"> {
-		return this.publicRooms.has(roomId) ? "public" : "private";
-	}
+	const getRoomVisibility = async (
+		roomId: RoomId,
+	): Promise<"public" | "private"> => {
+		return publicRooms.has(roomId) ? "public" : "private";
+	};
 
-	async getPublicRoomIds(): Promise<RoomId[]> {
-		return [...this.publicRooms];
-	}
+	const getPublicRoomIds = async (): Promise<RoomId[]> => {
+		return [...publicRooms];
+	};
 
-	async getGlobalAccountData(
+	const getGlobalAccountData = async (
 		userId: UserId,
 		type: string,
-	): Promise<JsonObject | undefined> {
-		return this.globalAccountData.get(userId)?.get(type)?.content;
-	}
+	): Promise<JsonObject | undefined> => {
+		return globalAccountData.get(userId)?.get(type)?.content;
+	};
 
-	async setGlobalAccountData(
+	const setGlobalAccountData = async (
 		userId: UserId,
 		type: string,
 		content: JsonObject,
-	): Promise<void> {
-		let userMap = this.globalAccountData.get(userId);
+	): Promise<void> => {
+		let userMap = globalAccountData.get(userId);
 		if (!userMap) {
 			userMap = new Map();
-			this.globalAccountData.set(userId, userMap);
+			globalAccountData.set(userId, userMap);
 		}
-		userMap.set(type, { content, streamPos: ++this.streamCounter });
-		this.wakeWaiters();
-	}
+		userMap.set(type, { content, streamPos: ++eph.streamCounter });
+		eph.wakeWaiters();
+	};
 
-	async getAllGlobalAccountData(
+	const getAllGlobalAccountData = async (
 		userId: UserId,
-	): Promise<{ type: string; content: JsonObject }[]> {
-		const userMap = this.globalAccountData.get(userId);
+	): Promise<{ type: string; content: JsonObject }[]> => {
+		const userMap = globalAccountData.get(userId);
 		if (!userMap) return [];
 		// Exclude MSC3391 deletion tombstones (empty content) from initial sync.
 		return [...userMap.entries()]
 			.filter(([, v]) => !isEmptyJsonObject(v.content))
 			.map(([type, v]) => ({ type, content: v.content }));
-	}
+	};
 
-	async getGlobalAccountDataSince(
+	const getGlobalAccountDataSince = async (
 		userId: UserId,
 		since: number,
-	): Promise<{ type: string; content: JsonObject }[]> {
-		const userMap = this.globalAccountData.get(userId);
+	): Promise<{ type: string; content: JsonObject }[]> => {
+		const userMap = globalAccountData.get(userId);
 		if (!userMap) return [];
 		// Include tombstones so incremental sync surfaces deletions.
 		return [...userMap.entries()]
 			.filter(([, v]) => v.streamPos > since)
 			.map(([type, v]) => ({ type, content: v.content }));
-	}
+	};
 
-	async getRoomAccountData(
+	const getRoomAccountData = async (
 		userId: UserId,
 		roomId: RoomId,
 		type: string,
-	): Promise<JsonObject | undefined> {
-		return this.roomAccountDataMap.get(`${userId}\x1f${roomId}`)?.get(type)
-			?.content;
-	}
+	): Promise<JsonObject | undefined> => {
+		return roomAccountDataMap.get(`${userId}\x1f${roomId}`)?.get(type)?.content;
+	};
 
-	async setRoomAccountData(
+	const setRoomAccountData = async (
 		userId: UserId,
 		roomId: RoomId,
 		type: string,
 		content: JsonObject,
-	): Promise<void> {
+	): Promise<void> => {
 		const key = `${userId}\x1f${roomId}`;
-		let dataMap = this.roomAccountDataMap.get(key);
+		let dataMap = roomAccountDataMap.get(key);
 		if (!dataMap) {
 			dataMap = new Map();
-			this.roomAccountDataMap.set(key, dataMap);
+			roomAccountDataMap.set(key, dataMap);
 		}
-		dataMap.set(type, { content, streamPos: ++this.streamCounter });
-		this.wakeWaiters();
-	}
-	async deleteGlobalAccountData(userId: UserId, type: string): Promise<void> {
+		dataMap.set(type, { content, streamPos: ++eph.streamCounter });
+		eph.wakeWaiters();
+	};
+	const deleteGlobalAccountData = async (
+		userId: UserId,
+		type: string,
+	): Promise<void> => {
 		// MSC3391: leave a tombstone (empty content) with a fresh stream position
 		// rather than removing the entry, so incremental sync can surface it.
-		let userMap = this.globalAccountData.get(userId);
+		let userMap = globalAccountData.get(userId);
 		if (!userMap) {
 			userMap = new Map();
-			this.globalAccountData.set(userId, userMap);
+			globalAccountData.set(userId, userMap);
 		}
-		userMap.set(type, { content: {}, streamPos: ++this.streamCounter });
-		this.wakeWaiters();
-	}
-	async deleteRoomAccountData(
+		userMap.set(type, { content: {}, streamPos: ++eph.streamCounter });
+		eph.wakeWaiters();
+	};
+	const deleteRoomAccountData = async (
 		userId: UserId,
 		roomId: RoomId,
 		type: string,
-	): Promise<void> {
+	): Promise<void> => {
 		const key = `${userId}\x1f${roomId}`;
-		let dataMap = this.roomAccountDataMap.get(key);
+		let dataMap = roomAccountDataMap.get(key);
 		if (!dataMap) {
 			dataMap = new Map();
-			this.roomAccountDataMap.set(key, dataMap);
+			roomAccountDataMap.set(key, dataMap);
 		}
-		dataMap.set(type, { content: {}, streamPos: ++this.streamCounter });
-		this.wakeWaiters();
-	}
+		dataMap.set(type, { content: {}, streamPos: ++eph.streamCounter });
+		eph.wakeWaiters();
+	};
 
-	async getAllRoomAccountData(
+	const getAllRoomAccountData = async (
 		userId: UserId,
 		roomId: RoomId,
-	): Promise<{ type: string; content: JsonObject }[]> {
-		const dataMap = this.roomAccountDataMap.get(`${userId}\x1f${roomId}`);
+	): Promise<{ type: string; content: JsonObject }[]> => {
+		const dataMap = roomAccountDataMap.get(`${userId}\x1f${roomId}`);
 		if (!dataMap) return [];
 		// Exclude MSC3391 deletion tombstones from initial sync.
 		return [...dataMap.entries()]
 			.filter(([, v]) => !isEmptyJsonObject(v.content))
 			.map(([type, v]) => ({ type, content: v.content }));
-	}
+	};
 
-	async getRoomAccountDataSince(
+	const getRoomAccountDataSince = async (
 		userId: UserId,
 		since: number,
-	): Promise<{ roomId: RoomId; type: string; content: JsonObject }[]> {
+	): Promise<{ roomId: RoomId; type: string; content: JsonObject }[]> => {
 		const prefix = `${userId}\x1f`;
 		const out: { roomId: RoomId; type: string; content: JsonObject }[] = [];
-		for (const [key, dataMap] of this.roomAccountDataMap.entries()) {
+		for (const [key, dataMap] of roomAccountDataMap.entries()) {
 			if (!key.startsWith(prefix)) continue;
 			const roomId = key.slice(prefix.length) as RoomId;
 			for (const [type, v] of dataMap.entries()) {
@@ -771,20 +789,20 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			}
 		}
 		return out;
-	}
+	};
 
-	async setReceipt(
+	const setReceipt = async (
 		roomId: RoomId,
 		userId: UserId,
 		eventId: EventId,
 		receiptType: string,
 		ts: Timestamp,
 		threadId?: string,
-	): Promise<void> {
-		let roomReceipts = this.receiptsMap.get(roomId);
+	): Promise<void> => {
+		let roomReceipts = receiptsMap.get(roomId);
 		if (!roomReceipts) {
 			roomReceipts = new Map();
-			this.receiptsMap.set(roomId, roomReceipts);
+			receiptsMap.set(roomId, roomReceipts);
 		}
 		// Key by (userId, receiptType, threadId) so an unthreaded receipt and
 		// receipts in distinct threads coexist as separate entries. Empty string
@@ -794,10 +812,12 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			ts,
 			threadId,
 		});
-		this.wakeWaiters();
-	}
+		eph.wakeWaiters();
+	};
 
-	async getReceipts(roomId: RoomId): Promise<
+	const getReceipts = async (
+		roomId: RoomId,
+	): Promise<
 		{
 			eventId: EventId;
 			receiptType: string;
@@ -805,8 +825,8 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			ts: Timestamp;
 			threadId?: string;
 		}[]
-	> {
-		const roomReceipts = this.receiptsMap.get(roomId);
+	> => {
+		const roomReceipts = receiptsMap.get(roomId);
 		if (!roomReceipts) return [];
 		const rows = [...roomReceipts.entries()].map(([key, value]) => {
 			const [userId, receiptType] = key.split("\x1f") as [UserId, string];
@@ -819,38 +839,41 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			};
 		});
 		return collapseReceiptsMsc4102(rows);
-	}
+	};
 
-	async storeMedia(media: StoredMedia, data: Buffer): Promise<void> {
-		this.mediaStore.set(`${media.origin}/${media.media_id}`, {
+	const storeMedia = async (
+		media: StoredMedia,
+		data: Buffer,
+	): Promise<void> => {
+		mediaStore.set(`${media.origin}/${media.media_id}`, {
 			metadata: media,
 			data,
 		});
-	}
+	};
 
-	async getMedia(
+	const getMedia = async (
 		serverName: ServerName,
 		mediaId: string,
-	): Promise<{ metadata: StoredMedia; data: Buffer } | undefined> {
-		return this.mediaStore.get(`${serverName}/${mediaId}`);
-	}
+	): Promise<{ metadata: StoredMedia; data: Buffer } | undefined> => {
+		return mediaStore.get(`${serverName}/${mediaId}`);
+	};
 
-	async reserveMedia(media: StoredMedia): Promise<void> {
-		this.mediaStore.set(`${media.origin}/${media.media_id}`, {
+	const reserveMedia = async (media: StoredMedia): Promise<void> => {
+		mediaStore.set(`${media.origin}/${media.media_id}`, {
 			metadata: media,
 			data: Buffer.alloc(0),
 		});
-	}
+	};
 
-	async updateMediaContent(
+	const updateMediaContent = async (
 		serverName: ServerName,
 		mediaId: string,
 		contentType: string,
 		fileName: string | undefined,
 		data: Buffer,
-	): Promise<boolean> {
+	): Promise<boolean> => {
 		const key = `${serverName}/${mediaId}`;
-		const existing = this.mediaStore.get(key);
+		const existing = mediaStore.get(key);
 		if (!existing) return false;
 		const hash = createHash("sha256").update(data).digest("base64");
 		existing.metadata.content_type = contentType;
@@ -859,100 +882,106 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		existing.metadata.content_hash = hash;
 		existing.data = data;
 		return true;
-	}
+	};
 
-	async createFilter(userId: UserId, filter: JsonObject): Promise<string> {
-		let userFilters = this.filters.get(userId);
+	const createFilter = async (
+		userId: UserId,
+		filter: JsonObject,
+	): Promise<string> => {
+		let userFilters = filters.get(userId);
 		if (!userFilters) {
 			userFilters = new Map();
-			this.filters.set(userId, userFilters);
+			filters.set(userId, userFilters);
 		}
-		const filterId = String(++this.filterCounter);
+		const filterId = String(++eph.filterCounter);
 		userFilters.set(filterId, filter);
 		return filterId;
-	}
+	};
 
-	async getFilter(
+	const getFilter = async (
 		userId: UserId,
 		filterId: string,
-	): Promise<JsonObject | undefined> {
-		return this.filters.get(userId)?.get(filterId);
-	}
+	): Promise<JsonObject | undefined> => {
+		return filters.get(userId)?.get(filterId);
+	};
 
-	async setDeviceKeys(
+	const setDeviceKeys = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		keys: DeviceKeys,
-	): Promise<void> {
-		this.deviceKeysMap.set(`${userId}\x1f${deviceId}`, keys);
-		await this.recordDeviceKeyChange(userId);
-	}
+	): Promise<void> => {
+		deviceKeysMap.set(`${userId}\x1f${deviceId}`, keys);
+		await recordDeviceKeyChange(userId);
+	};
 
-	async recordDeviceKeyChange(userId: UserId): Promise<void> {
-		this.deviceListStream.push({ userId, streamPos: ++this.streamCounter });
-		this.wakeWaiters();
-	}
+	const recordDeviceKeyChange = async (userId: UserId): Promise<void> => {
+		deviceListStream.push({ userId, streamPos: ++eph.streamCounter });
+		eph.wakeWaiters();
+	};
 
-	async getChangedDeviceUsers(since: number, until: number): Promise<UserId[]> {
+	const getChangedDeviceUsers = async (
+		since: number,
+		until: number,
+	): Promise<UserId[]> => {
 		const seen = new Set<UserId>();
-		for (const entry of this.deviceListStream) {
+		for (const entry of deviceListStream) {
 			if (entry.streamPos > since && entry.streamPos <= until) {
 				seen.add(entry.userId);
 			}
 		}
 		return [...seen];
-	}
+	};
 
-	async getDeviceKeys(
+	const getDeviceKeys = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<DeviceKeys | undefined> {
-		return this.deviceKeysMap.get(`${userId}\x1f${deviceId}`);
-	}
+	): Promise<DeviceKeys | undefined> => {
+		return deviceKeysMap.get(`${userId}\x1f${deviceId}`);
+	};
 
-	async getAllDeviceKeys(
+	const getAllDeviceKeys = async (
 		userId: UserId,
-	): Promise<Record<DeviceId, DeviceKeys>> {
+	): Promise<Record<DeviceId, DeviceKeys>> => {
 		const result: Record<DeviceId, DeviceKeys> = {};
 		const prefix = `${userId}\x1f`;
-		for (const [key, value] of this.deviceKeysMap) {
+		for (const [key, value] of deviceKeysMap) {
 			if (key.startsWith(prefix)) {
 				result[key.slice(prefix.length) as DeviceId] = value;
 			}
 		}
 		return result;
-	}
+	};
 
-	async deleteDeviceKeys(userId: UserId): Promise<void> {
+	const deleteDeviceKeys = async (userId: UserId): Promise<void> => {
 		const prefix = `${userId}\x1f`;
-		for (const key of this.deviceKeysMap.keys()) {
-			if (key.startsWith(prefix)) this.deviceKeysMap.delete(key);
+		for (const key of deviceKeysMap.keys()) {
+			if (key.startsWith(prefix)) deviceKeysMap.delete(key);
 		}
-	}
+	};
 
-	async addOneTimeKeys(
+	const addOneTimeKeys = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		keys: Record<KeyId, string | OneTimeKey>,
-	): Promise<void> {
+	): Promise<void> => {
 		const mapKey = `${userId}\x1f${deviceId}`;
-		let otks = this.oneTimeKeysMap.get(mapKey);
+		let otks = oneTimeKeysMap.get(mapKey);
 		if (!otks) {
 			otks = new Map();
-			this.oneTimeKeysMap.set(mapKey, otks);
+			oneTimeKeysMap.set(mapKey, otks);
 		}
 		for (const [keyId, key] of Object.entries(keys)) {
 			otks.set(keyId as KeyId, key);
 		}
-	}
+	};
 
-	async claimOneTimeKey(
+	const claimOneTimeKey = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		algorithm: string,
-	): Promise<{ keyId: KeyId; key: string | OneTimeKey } | undefined> {
+	): Promise<{ keyId: KeyId; key: string | OneTimeKey } | undefined> => {
 		const mapKey = `${userId}\x1f${deviceId}`;
-		const otks = this.oneTimeKeysMap.get(mapKey);
+		const otks = oneTimeKeysMap.get(mapKey);
 		if (otks) {
 			for (const [keyId, key] of otks) {
 				if (keyId.startsWith(`${algorithm}:`)) {
@@ -961,7 +990,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 				}
 			}
 		}
-		const fallbacks = this.fallbackKeysMap.get(mapKey);
+		const fallbacks = fallbackKeysMap.get(mapKey);
 		if (fallbacks) {
 			for (const [keyId, key] of fallbacks) {
 				if (keyId.startsWith(`${algorithm}:`)) {
@@ -970,13 +999,13 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			}
 		}
 		return undefined;
-	}
+	};
 
-	async getOneTimeKeyCounts(
+	const getOneTimeKeyCounts = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<Record<string, number>> {
-		const otks = this.oneTimeKeysMap.get(`${userId}\x1f${deviceId}`);
+	): Promise<Record<string, number>> => {
+		const otks = oneTimeKeysMap.get(`${userId}\x1f${deviceId}`);
 		if (!otks) return {};
 		const counts: Record<string, number> = {};
 		for (const keyId of otks.keys()) {
@@ -984,65 +1013,67 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			counts[algorithm] = (counts[algorithm] ?? 0) + 1;
 		}
 		return counts;
-	}
+	};
 
-	async setFallbackKeys(
+	const setFallbackKeys = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		keys: Record<KeyId, string | OneTimeKey>,
-	): Promise<void> {
+	): Promise<void> => {
 		const fallbacks = new Map<KeyId, string | OneTimeKey>();
 		for (const [keyId, key] of Object.entries(keys)) {
 			fallbacks.set(keyId as KeyId, key);
 		}
-		this.fallbackKeysMap.set(`${userId}\x1f${deviceId}`, fallbacks);
-	}
+		fallbackKeysMap.set(`${userId}\x1f${deviceId}`, fallbacks);
+	};
 
-	async getFallbackKeyTypes(
+	const getFallbackKeyTypes = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<string[]> {
-		const fallbacks = this.fallbackKeysMap.get(`${userId}\x1f${deviceId}`);
+	): Promise<string[]> => {
+		const fallbacks = fallbackKeysMap.get(`${userId}\x1f${deviceId}`);
 		if (!fallbacks) return [];
 		return [
 			...new Set(
 				[...fallbacks.keys()].map((keyId) => keyId.split(":")[0] as string),
 			),
 		];
-	}
+	};
 
 	// Cross-signing keys
-	async setCrossSigningKeys(
+	const setCrossSigningKeys = async (
 		userId: UserId,
 		keys: {
 			master_key?: CrossSigningKey;
 			self_signing_key?: CrossSigningKey;
 			user_signing_key?: CrossSigningKey;
 		},
-	): Promise<void> {
-		const existing = this.crossSigningKeysMap.get(userId) ?? {};
+	): Promise<void> => {
+		const existing = crossSigningKeysMap.get(userId) ?? {};
 		if (keys.master_key) existing.master_key = keys.master_key;
 		if (keys.self_signing_key)
 			existing.self_signing_key = keys.self_signing_key;
 		if (keys.user_signing_key)
 			existing.user_signing_key = keys.user_signing_key;
-		this.crossSigningKeysMap.set(userId, existing);
-	}
+		crossSigningKeysMap.set(userId, existing);
+	};
 
-	async getCrossSigningKeys(userId: UserId): Promise<{
+	const getCrossSigningKeys = async (
+		userId: UserId,
+	): Promise<{
 		master_key?: CrossSigningKey;
 		self_signing_key?: CrossSigningKey;
 		user_signing_key?: CrossSigningKey;
-	}> {
-		return this.crossSigningKeysMap.get(userId) ?? {};
-	}
+	}> => {
+		return crossSigningKeysMap.get(userId) ?? {};
+	};
 
-	async storeCrossSigningSignatures(
+	const storeCrossSigningSignatures = async (
 		userId: UserId,
 		signatures: Record<string, Record<string, JsonObject>>,
 	): Promise<
 		Record<string, Record<string, { errcode: string; error: string }>>
-	> {
+	> => {
 		// Store signatures onto device keys or cross-signing keys
 		const failures: Record<
 			string,
@@ -1068,7 +1099,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 
 				// Authorization: can only sign own devices or other users' master keys
 				if (targetUserId !== userId) {
-					const targetCrossKeys = this.crossSigningKeysMap.get(
+					const targetCrossKeys = crossSigningKeysMap.get(
 						targetUserId as UserId,
 					);
 					const isMasterKey =
@@ -1092,7 +1123,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 				}
 
 				// Try updating device keys
-				const deviceKeys = await this.getDeviceKeys(
+				const deviceKeys = await getDeviceKeys(
 					targetUserId as UserId,
 					keyId as DeviceId,
 				);
@@ -1109,7 +1140,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 				}
 
 				// Try updating cross-signing keys
-				const crossKeys = this.crossSigningKeysMap.get(targetUserId as UserId);
+				const crossKeys = crossSigningKeysMap.get(targetUserId as UserId);
 				if (crossKeys) {
 					let matched = false;
 					for (const key of [
@@ -1151,26 +1182,26 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			}
 		}
 		return failures;
-	}
+	};
 
 	// Key backup
-	async createKeyBackupVersion(
+	const createKeyBackupVersion = async (
 		userId: UserId,
 		algorithm: string,
 		authData: JsonObject,
-	): Promise<string> {
-		let versions = this.keyBackupVersions.get(userId);
+	): Promise<string> => {
+		let versions = keyBackupVersions.get(userId);
 		if (!versions) {
 			versions = [];
-			this.keyBackupVersions.set(userId, versions);
+			keyBackupVersions.set(userId, versions);
 		}
-		this.keyBackupCounter++;
-		const version = String(this.keyBackupCounter);
+		keyBackupCounter++;
+		const version = String(keyBackupCounter);
 		versions.push({ version, algorithm, auth_data: authData });
 		return version;
-	}
+	};
 
-	async getKeyBackupVersion(
+	const getKeyBackupVersion = async (
 		userId: UserId,
 		version?: string,
 	): Promise<
@@ -1182,8 +1213,8 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 				etag: string;
 		  }
 		| undefined
-	> {
-		const versions = this.keyBackupVersions.get(userId);
+	> => {
+		const versions = keyBackupVersions.get(userId);
 		if (!versions || versions.length === 0) return undefined;
 
 		const v = version
@@ -1192,7 +1223,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		if (!v) return undefined;
 
 		const backupKey = `${userId}\x1f${v.version}`;
-		const rooms = this.keyBackupData.get(backupKey);
+		const rooms = keyBackupData.get(backupKey);
 		let count = 0;
 		if (rooms) {
 			for (const sessions of rooms.values()) {
@@ -1205,12 +1236,12 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			algorithm: v.algorithm,
 			auth_data: v.auth_data,
 			count,
-			etag: this.computeBackupEtag(backupKey),
+			etag: computeBackupEtag(backupKey),
 		};
-	}
+	};
 
-	private computeBackupEtag(backupKey: string): string {
-		const rooms = this.keyBackupData.get(backupKey);
+	const computeBackupEtag = (backupKey: string): string => {
+		const rooms = keyBackupData.get(backupKey);
 		if (!rooms) return "0";
 		let hash = 0;
 		for (const [roomId, sessions] of rooms) {
@@ -1221,35 +1252,35 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			}
 		}
 		return String(Math.abs(hash));
-	}
+	};
 
-	async updateKeyBackupVersion(
+	const updateKeyBackupVersion = async (
 		userId: UserId,
 		version: string,
 		authData: JsonObject,
-	): Promise<boolean> {
-		const versions = this.keyBackupVersions.get(userId);
+	): Promise<boolean> => {
+		const versions = keyBackupVersions.get(userId);
 		if (!versions) return false;
 		const v = versions.find((b) => b.version === version);
 		if (!v) return false;
 		v.auth_data = authData;
 		return true;
-	}
+	};
 
-	async deleteKeyBackupVersion(
+	const deleteKeyBackupVersion = async (
 		userId: UserId,
 		version: string,
-	): Promise<boolean> {
-		const versions = this.keyBackupVersions.get(userId);
+	): Promise<boolean> => {
+		const versions = keyBackupVersions.get(userId);
 		if (!versions) return false;
 		const idx = versions.findIndex((b) => b.version === version);
 		if (idx === -1) return false;
 		versions.splice(idx, 1);
-		this.keyBackupData.delete(`${userId}\x1f${version}`);
+		keyBackupData.delete(`${userId}\x1f${version}`);
 		return true;
-	}
+	};
 
-	async putKeyBackupKeys(
+	const putKeyBackupKeys = async (
 		userId: UserId,
 		version: string,
 		roomId: RoomId | undefined,
@@ -1260,28 +1291,28 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			| {
 					rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
 			  },
-	): Promise<{ count: number; etag: string } | undefined> {
-		const versions = this.keyBackupVersions.get(userId);
+	): Promise<{ count: number; etag: string } | undefined> => {
+		const versions = keyBackupVersions.get(userId);
 		if (!versions || versions.length === 0) return undefined;
 		const current = versions[versions.length - 1]!;
 		if (current.version !== version) return undefined;
 
 		const backupKey = `${userId}\x1f${version}`;
-		let rooms = this.keyBackupData.get(backupKey);
+		let rooms = keyBackupData.get(backupKey);
 		if (!rooms) {
 			rooms = new Map();
-			this.keyBackupData.set(backupKey, rooms);
+			keyBackupData.set(backupKey, rooms);
 		}
 
 		if (roomId && sessionId) {
 			// Single session
 			const data = keys as KeyBackupData;
-			this.mergeBackupKey(rooms, roomId, sessionId, data);
+			mergeBackupKey(rooms, roomId, sessionId, data);
 		} else if (roomId) {
 			// Room sessions
 			const roomKeys = keys as { sessions: Record<string, KeyBackupData> };
 			for (const [sid, data] of Object.entries(roomKeys.sessions)) {
-				this.mergeBackupKey(rooms, roomId, sid, data);
+				mergeBackupKey(rooms, roomId, sid, data);
 			}
 		} else {
 			// All rooms
@@ -1290,22 +1321,22 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			};
 			for (const [rid, roomData] of Object.entries(allKeys.rooms)) {
 				for (const [sid, data] of Object.entries(roomData.sessions)) {
-					this.mergeBackupKey(rooms, rid as RoomId, sid, data);
+					mergeBackupKey(rooms, rid as RoomId, sid, data);
 				}
 			}
 		}
 
 		let count = 0;
 		for (const sessions of rooms.values()) count += sessions.size;
-		return { count, etag: this.computeBackupEtag(backupKey) };
-	}
+		return { count, etag: computeBackupEtag(backupKey) };
+	};
 
-	private mergeBackupKey(
+	const mergeBackupKey = (
 		rooms: Map<RoomId, Map<string, KeyBackupData>>,
 		roomId: RoomId,
 		sessionId: string,
 		newData: KeyBackupData,
-	): void {
+	): void => {
 		let sessions = rooms.get(roomId);
 		if (!sessions) {
 			sessions = new Map();
@@ -1327,9 +1358,9 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		} else {
 			sessions.set(sessionId, newData);
 		}
-	}
+	};
 
-	async getKeyBackupKeys(
+	const getKeyBackupKeys = async (
 		userId: UserId,
 		version: string,
 		roomId?: RoomId,
@@ -1341,9 +1372,9 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 				rooms: Record<RoomId, { sessions: Record<string, KeyBackupData> }>;
 		  }
 		| undefined
-	> {
+	> => {
 		const backupKey = `${userId}\x1f${version}`;
-		const rooms = this.keyBackupData.get(backupKey);
+		const rooms = keyBackupData.get(backupKey);
 
 		if (roomId && sessionId) {
 			const sessions = rooms?.get(roomId);
@@ -1369,20 +1400,20 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			}
 			return { rooms: result };
 		}
-	}
+	};
 
-	async deleteKeyBackupKeys(
+	const deleteKeyBackupKeys = async (
 		userId: UserId,
 		version: string,
 		roomId?: RoomId,
 		sessionId?: string,
-	): Promise<{ count: number; etag: string } | undefined> {
-		const versions = this.keyBackupVersions.get(userId);
+	): Promise<{ count: number; etag: string } | undefined> => {
+		const versions = keyBackupVersions.get(userId);
 		if (!versions || !versions.some((v) => v.version === version))
 			return undefined;
 
 		const backupKey = `${userId}\x1f${version}`;
-		const rooms = this.keyBackupData.get(backupKey);
+		const rooms = keyBackupData.get(backupKey);
 		if (!rooms) return { count: 0, etag: "0" };
 
 		if (roomId && sessionId) {
@@ -1399,47 +1430,47 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 
 		let count = 0;
 		for (const sessions of rooms.values()) count += sessions.size;
-		return { count, etag: this.computeBackupEtag(backupKey) };
-	}
+		return { count, etag: computeBackupEtag(backupKey) };
+	};
 
-	async sendToDevice(
+	const sendToDevice = async (
 		userId: UserId,
 		deviceId: DeviceId,
 		event: ToDeviceEvent,
-	): Promise<void> {
+	): Promise<void> => {
 		const key = `${userId}\x1f${deviceId}`;
-		let inbox = this.toDeviceInbox.get(key);
+		let inbox = toDeviceInbox.get(key);
 		if (!inbox) {
 			inbox = [];
-			this.toDeviceInbox.set(key, inbox);
+			toDeviceInbox.set(key, inbox);
 		}
 		inbox.push(event);
-		this.wakeWaiters();
-	}
+		eph.wakeWaiters();
+	};
 
-	async getToDeviceMessages(
+	const getToDeviceMessages = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<ToDeviceEvent[]> {
-		return this.toDeviceInbox.get(`${userId}\x1f${deviceId}`) ?? [];
-	}
+	): Promise<ToDeviceEvent[]> => {
+		return toDeviceInbox.get(`${userId}\x1f${deviceId}`) ?? [];
+	};
 
-	async clearToDeviceMessages(
+	const clearToDeviceMessages = async (
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<void> {
-		this.toDeviceInbox.delete(`${userId}\x1f${deviceId}`);
-	}
+	): Promise<void> => {
+		toDeviceInbox.delete(`${userId}\x1f${deviceId}`);
+	};
 
-	async getPushers(userId: UserId): Promise<Pusher[]> {
-		return this.pushersMap.get(userId) ?? [];
-	}
+	const getPushers = async (userId: UserId): Promise<Pusher[]> => {
+		return pushersMap.get(userId) ?? [];
+	};
 
-	async setPusher(userId: UserId, pusher: Pusher): Promise<void> {
-		let userPushers = this.pushersMap.get(userId);
+	const setPusher = async (userId: UserId, pusher: Pusher): Promise<void> => {
+		let userPushers = pushersMap.get(userId);
 		if (!userPushers) {
 			userPushers = [];
-			this.pushersMap.set(userId, userPushers);
+			pushersMap.set(userId, userPushers);
 		}
 		const idx = userPushers.findIndex(
 			(p) => p.app_id === pusher.app_id && p.pushkey === pusher.pushkey,
@@ -1449,49 +1480,52 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		} else {
 			userPushers.push(pusher);
 		}
-	}
+	};
 
-	async deletePusher(
+	const deletePusher = async (
 		userId: UserId,
 		appId: string,
 		pushkey: string,
-	): Promise<void> {
-		const userPushers = this.pushersMap.get(userId);
+	): Promise<void> => {
+		const userPushers = pushersMap.get(userId);
 		if (!userPushers) return;
 		const idx = userPushers.findIndex(
 			(p) => p.app_id === appId && p.pushkey === pushkey,
 		);
 		if (idx >= 0) userPushers.splice(idx, 1);
-	}
+	};
 
-	async deletePusherByKey(appId: string, pushkey: string): Promise<void> {
-		for (const [, userPushers] of this.pushersMap) {
+	const deletePusherByKey = async (
+		appId: string,
+		pushkey: string,
+	): Promise<void> => {
+		for (const [, userPushers] of pushersMap) {
 			const idx = userPushers.findIndex(
 				(p) => p.app_id === appId && p.pushkey === pushkey,
 			);
 			if (idx >= 0) userPushers.splice(idx, 1);
 		}
-	}
+	};
 
-	async storeRelation(
+	const storeRelation = async (
 		eventId: EventId,
 		roomId: RoomId,
 		relType: string,
 		targetEventId: EventId,
 		key?: string,
-	): Promise<void> {
-		const event = this.events.get(eventId);
+	): Promise<void> => {
+		const event = eventsById.get(eventId);
 		if (!event) return;
 
-		const timeline = this.roomTimeline.get(roomId) ?? [];
+		const timeline = roomTimeline.get(roomId) ?? [];
 		const streamPos =
 			timeline.find((e) => e.eventId === eventId)?.streamPos ??
-			this.streamCounter;
+			eph.streamCounter;
 
-		let relations = this.relationsMap.get(targetEventId);
+		let relations = relationsMap.get(targetEventId);
 		if (!relations) {
 			relations = [];
-			this.relationsMap.set(targetEventId, relations);
+			relationsMap.set(targetEventId, relations);
 		}
 		relations.push({
 			eventId,
@@ -1501,9 +1535,9 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			eventType: event.type,
 			streamPos,
 		});
-	}
+	};
 
-	async getRelatedEvents(
+	const getRelatedEvents = async (
 		roomId: RoomId,
 		eventId: EventId,
 		relType?: string,
@@ -1514,8 +1548,8 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 	): Promise<{
 		events: { event: PDU; eventId: EventId }[];
 		nextBatch?: string;
-	}> {
-		let relations = this.relationsMap.get(eventId) ?? [];
+	}> => {
+		let relations = relationsMap.get(eventId) ?? [];
 
 		if (relType) relations = relations.filter((r) => r.relType === relType);
 		if (eventType)
@@ -1536,7 +1570,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		const sliced = relations.slice(0, limit);
 		const events = sliced
 			.map((r) => {
-				const event = this.events.get(r.eventId);
+				const event = eventsById.get(r.eventId);
 				if (!event || event.room_id !== roomId) return undefined;
 				return { event, eventId: r.eventId };
 			})
@@ -1548,12 +1582,12 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 				: undefined;
 
 		return { events, nextBatch };
-	}
+	};
 
-	async getAnnotationCounts(
+	const getAnnotationCounts = async (
 		eventId: EventId,
-	): Promise<{ type: string; key: string; count: number }[]> {
-		const annotations = (this.relationsMap.get(eventId) ?? []).filter(
+	): Promise<{ type: string; key: string; count: number }[]> => {
+		const annotations = (relationsMap.get(eventId) ?? []).filter(
 			(r) => r.relType === "m.annotation" && r.key,
 		);
 
@@ -1575,24 +1609,24 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			}
 		}
 		return [...counts.values()];
-	}
+	};
 
-	async getLatestEdit(
+	const getLatestEdit = async (
 		eventId: EventId,
 		sender: UserId,
-	): Promise<{ event: PDU; eventId: EventId } | undefined> {
-		const edits = (this.relationsMap.get(eventId) ?? [])
+	): Promise<{ event: PDU; eventId: EventId } | undefined> => {
+		const edits = (relationsMap.get(eventId) ?? [])
 			.filter((r) => r.relType === "m.replace" && r.sender === sender)
 			.sort((a, b) => b.streamPos - a.streamPos);
 
 		if (edits.length === 0) return undefined;
 		const latest = edits[0] as (typeof edits)[number];
-		const event = this.events.get(latest.eventId);
+		const event = eventsById.get(latest.eventId);
 		if (!event) return undefined;
 		return { event, eventId: latest.eventId };
-	}
+	};
 
-	async getThreadSummary(
+	const getThreadSummary = async (
 		eventId: EventId,
 		userId: UserId,
 	): Promise<
@@ -1602,8 +1636,8 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 				currentUserParticipated: boolean;
 		  }
 		| undefined
-	> {
-		const threadReplies = (this.relationsMap.get(eventId) ?? [])
+	> => {
+		const threadReplies = (relationsMap.get(eventId) ?? [])
 			.filter((r) => r.relType === "m.thread")
 			.sort((a, b) => a.streamPos - b.streamPos);
 
@@ -1612,7 +1646,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		const latest = threadReplies[
 			threadReplies.length - 1
 		] as (typeof threadReplies)[number];
-		const latestEvent = this.events.get(latest.eventId);
+		const latestEvent = eventsById.get(latest.eventId);
 		if (!latestEvent) return undefined;
 
 		return {
@@ -1620,16 +1654,16 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			count: threadReplies.length,
 			currentUserParticipated: threadReplies.some((r) => r.sender === userId),
 		};
-	}
+	};
 
-	async storeReport(
+	const storeReport = async (
 		userId: UserId,
 		roomId: RoomId,
 		eventId: EventId,
 		score?: number,
 		reason?: string,
-	): Promise<void> {
-		this.reports.push({
+	): Promise<void> => {
+		reports.push({
 			userId,
 			roomId,
 			eventId,
@@ -1637,68 +1671,68 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			reason,
 			ts: Date.now(),
 		});
-	}
+	};
 
-	async storeOpenIdToken(
+	const storeOpenIdToken = async (
 		token: string,
 		userId: UserId,
 		expiresAt: number,
-	): Promise<void> {
-		this.openIdTokens.set(token, { userId, expiresAt });
-	}
+	): Promise<void> => {
+		openIdTokens.set(token, { userId, expiresAt });
+	};
 
-	async getOpenIdToken(
+	const getOpenIdToken = async (
 		token: string,
-	): Promise<{ userId: UserId; expiresAt: number } | undefined> {
-		return this.openIdTokens.get(token);
-	}
+	): Promise<{ userId: UserId; expiresAt: number } | undefined> => {
+		return openIdTokens.get(token);
+	};
 
-	async getThreePids(
+	const getThreePids = async (
 		userId: UserId,
-	): Promise<{ medium: string; address: string; added_at: number }[]> {
-		return this.threePidsMap.get(userId) ?? [];
-	}
+	): Promise<{ medium: string; address: string; added_at: number }[]> => {
+		return threePidsMap.get(userId) ?? [];
+	};
 
-	async addThreePid(
+	const addThreePid = async (
 		userId: UserId,
 		medium: string,
 		address: string,
-	): Promise<void> {
-		let pids = this.threePidsMap.get(userId);
+	): Promise<void> => {
+		let pids = threePidsMap.get(userId);
 		if (!pids) {
 			pids = [];
-			this.threePidsMap.set(userId, pids);
+			threePidsMap.set(userId, pids);
 		}
 		if (pids.some((p) => p.medium === medium && p.address === address)) return;
 		pids.push({ medium, address, added_at: Date.now() });
-	}
+	};
 
-	async deleteThreePid(
+	const deleteThreePid = async (
 		userId: UserId,
 		medium: string,
 		address: string,
-	): Promise<void> {
-		const pids = this.threePidsMap.get(userId);
+	): Promise<void> => {
+		const pids = threePidsMap.get(userId);
 		if (!pids) return;
 		const idx = pids.findIndex(
 			(p) => p.medium === medium && p.address === address,
 		);
 		if (idx >= 0) pids.splice(idx, 1);
-	}
+	};
 
-	async searchUserDirectory(
+	const searchUserDirectory = async (
 		searchTerm: string,
 		limit: number,
 	): Promise<
 		{ user_id: UserId; display_name?: string; avatar_url?: string }[]
-	> {
+	> => {
 		const term = searchTerm.toLowerCase();
 		const results: {
 			user_id: UserId;
 			display_name?: string;
 			avatar_url?: string;
 		}[] = [];
-		for (const user of this.usersByFullId.values()) {
+		for (const user of usersByFullId.values()) {
 			if (user.is_deactivated) continue;
 			const matchId = user.user_id.toLowerCase().includes(term);
 			const matchName = user.displayname?.toLowerCase().includes(term) ?? false;
@@ -1712,9 +1746,9 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			if (results.length >= limit) break;
 		}
 		return results;
-	}
+	};
 
-	async getThreadRoots(
+	const getThreadRoots = async (
 		roomId: RoomId,
 		userId: UserId,
 		include: "all" | "participated",
@@ -1723,15 +1757,15 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 	): Promise<{
 		events: { event: PDU; eventId: EventId }[];
 		nextBatch?: string;
-	}> {
+	}> => {
 		const threadRoots = new Map<EventId, number>();
 		const participatedIn = new Set<EventId>();
 
-		for (const [targetId, relations] of this.relationsMap) {
+		for (const [targetId, relations] of relationsMap) {
 			const threadReplies = relations.filter((r) => r.relType === "m.thread");
 			if (threadReplies.length === 0) continue;
 
-			const targetEvent = this.events.get(targetId);
+			const targetEvent = eventsById.get(targetId);
 			if (!targetEvent || targetEvent.room_id !== roomId) continue;
 
 			threadRoots.set(
@@ -1760,7 +1794,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		const sliced = rootIds.slice(0, limit);
 		const events = sliced
 			.map(([eventId]) => {
-				const event = this.events.get(eventId);
+				const event = eventsById.get(eventId);
 				if (!event) return undefined;
 				return { event, eventId };
 			})
@@ -1772,9 +1806,9 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 				: undefined;
 
 		return { events, nextBatch };
-	}
+	};
 
-	async searchRoomEvents(
+	const searchRoomEvents = async (
 		roomIds: RoomId[],
 		searchTerm: string,
 		keys: string[],
@@ -1784,16 +1818,16 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		events: { event: PDU; eventId: EventId; streamPos: number }[];
 		count: number;
 		nextBatch?: string;
-	}> {
+	}> => {
 		const allEntries = roomIds.flatMap(
-			(roomId) => this.roomTimeline.get(roomId) ?? [],
+			(roomId) => roomTimeline.get(roomId) ?? [],
 		);
 		allEntries.sort((a, b) => b.streamPos - a.streamPos);
 
 		const allMatches: { event: PDU; eventId: EventId; streamPos: number }[] =
 			[];
 		for (const entry of allEntries) {
-			const event = this.events.get(entry.eventId);
+			const event = eventsById.get(entry.eventId);
 			if (!event) continue;
 			if (eventMatchesSearchTerm(event, keys, searchTerm)) {
 				allMatches.push({
@@ -1805,28 +1839,28 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		}
 
 		return paginateSearchMatches(allMatches, limit, from);
-	}
+	};
 
-	async storeServerKeys(
+	const storeServerKeys = async (
 		serverName: ServerName,
 		keys: ServerKeys,
-	): Promise<void> {
+	): Promise<void> => {
 		for (const [keyId, val] of Object.entries(keys.verify_keys)) {
-			this.serverKeysCache.set(`${serverName}\x1f${keyId}`, {
+			serverKeysCache.set(`${serverName}\x1f${keyId}`, {
 				key: val.key,
 				validUntil: keys.valid_until_ts,
 			});
 		}
-	}
+	};
 
-	async getServerKeys(
+	const getServerKeys = async (
 		serverName: ServerName,
 		keyId: KeyId,
-	): Promise<{ key: string; validUntil: number } | undefined> {
-		return this.serverKeysCache.get(`${serverName}\x1f${keyId}`);
-	}
+	): Promise<{ key: string; validUntil: number } | undefined> => {
+		return serverKeysCache.get(`${serverName}\x1f${keyId}`);
+	};
 
-	async getAuthChain(eventIds: EventId[]): Promise<PDU[]> {
+	const getAuthChain = async (eventIds: EventId[]): Promise<PDU[]> => {
 		const visited = new Set<EventId>();
 		const result: PDU[] = [];
 		const queue = [...eventIds];
@@ -1836,7 +1870,7 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			if (visited.has(id)) continue;
 			visited.add(id);
 
-			const event = this.events.get(id);
+			const event = eventsById.get(id);
 			if (!event) continue;
 			result.push(event);
 
@@ -1848,10 +1882,10 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 		}
 
 		return result;
-	}
+	};
 
-	async getServersInRoom(roomId: RoomId): Promise<ServerName[]> {
-		const room = this.rooms.get(roomId);
+	const getServersInRoom = async (roomId: RoomId): Promise<ServerName[]> => {
+		const room = roomsById.get(roomId);
 		if (!room) return [];
 
 		const servers = new Set<ServerName>();
@@ -1876,111 +1910,113 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			}
 		}
 
-		const ps = this.partialStateRooms.get(roomId);
+		const ps = partialStateRooms.get(roomId);
 		if (ps) for (const s of ps.servers) servers.add(s);
 		return [...servers];
-	}
+	};
 
-	private partialStateRooms = new Map<
+	const partialStateRooms = new Map<
 		string,
 		{ servers: ServerName[]; joinEventId: EventId }
 	>();
-	private partialStateWaiters = new Map<string, Set<() => void>>();
-	private unPartialStatedAt = new Map<string, number>();
+	const partialStateWaiters = new Map<string, Set<() => void>>();
+	const unPartialStatedAt = new Map<string, number>();
 
-	async getRoomUnPartialStatedAt(roomId: RoomId): Promise<number | undefined> {
-		return this.unPartialStatedAt.get(roomId);
-	}
+	const getRoomUnPartialStatedAt = async (
+		roomId: RoomId,
+	): Promise<number | undefined> => {
+		return unPartialStatedAt.get(roomId);
+	};
 
-	async setStateEventHistorical(
+	const setStateEventHistorical = async (
 		roomId: RoomId,
 		event: PDU,
 		eventId: EventId,
-	): Promise<void> {
+	): Promise<void> => {
 		// Add to current state + the event store, but NOT the room timeline, so it
 		// never appears in a forward sync/messages window.
-		this.events.set(eventId, event);
-		const room = this.rooms.get(roomId);
+		eventsById.set(eventId, event);
+		const room = roomsById.get(roomId);
 		if (room) {
 			room.state_events.set(`${event.type}\x1f${event.state_key ?? ""}`, event);
 		}
-	}
+	};
 
-	async markRoomPartialState(
+	const markRoomPartialState = async (
 		roomId: RoomId,
 		servers: ServerName[],
 		joinEventId: EventId,
-	): Promise<void> {
-		this.partialStateRooms.set(roomId, { servers, joinEventId });
-	}
+	): Promise<void> => {
+		partialStateRooms.set(roomId, { servers, joinEventId });
+	};
 
-	async clearRoomPartialState(roomId: RoomId): Promise<void> {
-		this.partialStateRooms.delete(roomId);
-		this.streamCounter++;
-		this.unPartialStatedAt.set(roomId, this.streamCounter);
-		const waiters = this.partialStateWaiters.get(roomId);
+	const clearRoomPartialState = async (roomId: RoomId): Promise<void> => {
+		partialStateRooms.delete(roomId);
+		eph.streamCounter++;
+		unPartialStatedAt.set(roomId, eph.streamCounter);
+		const waiters = partialStateWaiters.get(roomId);
 		if (waiters) {
-			this.partialStateWaiters.delete(roomId);
+			partialStateWaiters.delete(roomId);
 			for (const w of waiters) w();
 		}
-		this.wakeWaiters();
-	}
+		eph.wakeWaiters();
+	};
 
-	async getRoomPartialState(
+	const getRoomPartialState = async (
 		roomId: RoomId,
-	): Promise<{ servers: ServerName[]; joinEventId: EventId } | undefined> {
-		return this.partialStateRooms.get(roomId);
-	}
+	): Promise<{ servers: ServerName[]; joinEventId: EventId } | undefined> => {
+		return partialStateRooms.get(roomId);
+	};
 
-	async getAllPartialStateRooms(): Promise<
+	const getAllPartialStateRooms = async (): Promise<
 		{ roomId: RoomId; servers: ServerName[]; joinEventId: EventId }[]
-	> {
-		return [...this.partialStateRooms.entries()].map(([roomId, v]) => ({
+	> => {
+		return [...partialStateRooms.entries()].map(([roomId, v]) => ({
 			roomId: roomId as RoomId,
 			servers: v.servers,
 			joinEventId: v.joinEventId,
 		}));
-	}
+	};
 
-	private partialStateEvents = new Map<string, Set<EventId>>();
+	const partialStateEvents = new Map<string, Set<EventId>>();
 
-	async recordPartialStateEvent(
+	const recordPartialStateEvent = async (
 		roomId: RoomId,
 		eventId: EventId,
-	): Promise<void> {
-		let set = this.partialStateEvents.get(roomId);
+	): Promise<void> => {
+		let set = partialStateEvents.get(roomId);
 		if (!set) {
 			set = new Set();
-			this.partialStateEvents.set(roomId, set);
+			partialStateEvents.set(roomId, set);
 		}
 		set.add(eventId);
-	}
+	};
 
-	async takePartialStateEvents(roomId: RoomId): Promise<EventId[]> {
-		const set = this.partialStateEvents.get(roomId);
-		this.partialStateEvents.delete(roomId);
+	const takePartialStateEvents = async (roomId: RoomId): Promise<EventId[]> => {
+		const set = partialStateEvents.get(roomId);
+		partialStateEvents.delete(roomId);
 		return set ? [...set] : [];
-	}
-	private partialStateDevicePokes = new Map<string, Set<string>>();
+	};
+	const partialStateDevicePokes = new Map<string, Set<string>>();
 
-	async recordPartialStateDevicePoke(
+	const recordPartialStateDevicePoke = async (
 		roomId: RoomId,
 		userId: UserId,
 		deviceId: DeviceId,
-	): Promise<void> {
-		let set = this.partialStateDevicePokes.get(roomId);
+	): Promise<void> => {
+		let set = partialStateDevicePokes.get(roomId);
 		if (!set) {
 			set = new Set();
-			this.partialStateDevicePokes.set(roomId, set);
+			partialStateDevicePokes.set(roomId, set);
 		}
 		set.add(`${userId}\x1f${deviceId}`);
-	}
+	};
 
-	async takePartialStateDevicePokes(
+	const takePartialStateDevicePokes = async (
 		roomId: RoomId,
-	): Promise<{ userId: UserId; deviceId: DeviceId }[]> {
-		const set = this.partialStateDevicePokes.get(roomId);
-		this.partialStateDevicePokes.delete(roomId);
+	): Promise<{ userId: UserId; deviceId: DeviceId }[]> => {
+		const set = partialStateDevicePokes.get(roomId);
+		partialStateDevicePokes.delete(roomId);
 		return set
 			? [...set].map((s) => {
 					const sep = s.indexOf("\x1f");
@@ -1990,21 +2026,21 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 					};
 				})
 			: [];
-	}
+	};
 
-	async deleteEvent(eventId: EventId): Promise<void> {
-		const ev = this.events.get(eventId);
-		this.events.delete(eventId);
+	const deleteEvent = async (eventId: EventId): Promise<void> => {
+		const ev = eventsById.get(eventId);
+		eventsById.delete(eventId);
 		if (!ev) return;
-		const tl = this.roomTimeline.get(ev.room_id as RoomId);
+		const tl = roomTimeline.get(ev.room_id as RoomId);
 		if (tl) {
-			this.roomTimeline.set(
+			roomTimeline.set(
 				ev.room_id as RoomId,
 				tl.filter((e) => e.eventId !== eventId),
 			);
 		}
 		if (ev.state_key !== undefined) {
-			const room = this.rooms.get(ev.room_id as RoomId);
+			const room = roomsById.get(ev.room_id as RoomId);
 			if (room) {
 				const key = `${ev.type}\x1f${ev.state_key}`;
 				const cur = room.state_events.get(key);
@@ -2013,24 +2049,24 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 				}
 			}
 		}
-	}
+	};
 
-	async unrejectEvent(_eventId: EventId): Promise<void> {
+	const unrejectEvent = async (_eventId: EventId): Promise<void> => {
 		// In-memory deleteEvent is destructive (no rejected flag is kept), so a
 		// rejected event cannot be restored. No-op; the partial-state resync
 		// re-evaluation path that needs this only runs against sqlite.
-	}
+	};
 
-	async waitForPartialStateClear(
+	const waitForPartialStateClear = async (
 		roomId: RoomId,
 		timeoutMs: number,
-	): Promise<void> {
-		if (!this.partialStateRooms.has(roomId)) return;
+	): Promise<void> => {
+		if (!partialStateRooms.has(roomId)) return;
 		await new Promise<void>((resolve) => {
-			let set = this.partialStateWaiters.get(roomId);
+			let set = partialStateWaiters.get(roomId);
 			if (!set) {
 				set = new Set();
-				this.partialStateWaiters.set(roomId, set);
+				partialStateWaiters.set(roomId, set);
 			}
 			const done = () => {
 				set?.delete(done);
@@ -2040,31 +2076,37 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			const timer = setTimeout(done, timeoutMs);
 			set.add(done);
 		});
-	}
+	};
 
-	async getStateAtEvent(
+	const getStateAtEvent = async (
 		_roomId: RoomId,
 		_eventId: EventId,
-	): Promise<Map<string, PDU> | undefined> {
-		const room = this.rooms.get(_roomId);
+	): Promise<Map<string, PDU> | undefined> => {
+		const room = roomsById.get(_roomId);
 		if (!room) return undefined;
 		return new Map(room.state_events);
-	}
+	};
 
-	async getFederationTxn(origin: ServerName, txnId: string): Promise<boolean> {
-		return this.federationTxns.has(`${origin}\x1f${txnId}`);
-	}
+	const getFederationTxn = async (
+		origin: ServerName,
+		txnId: string,
+	): Promise<boolean> => {
+		return federationTxns.has(`${origin}\x1f${txnId}`);
+	};
 
-	async setFederationTxn(origin: ServerName, txnId: string): Promise<void> {
-		this.federationTxns.add(`${origin}\x1f${txnId}`);
-	}
+	const setFederationTxn = async (
+		origin: ServerName,
+		txnId: string,
+	): Promise<void> => {
+		federationTxns.add(`${origin}\x1f${txnId}`);
+	};
 
-	async enqueueFederationEdu(
+	const enqueueFederationEdu = async (
 		destination: ServerName,
 		edu: EDU,
-	): Promise<number> {
-		const id = ++this.pendingFederationEduCounter;
-		const queue = this.pendingFederationEdus.get(destination) ?? [];
+	): Promise<number> => {
+		const id = ++pendingFederationEduCounter;
+		const queue = pendingFederationEdus.get(destination) ?? [];
 		queue.push({ id, edu });
 		// Cap the per-destination queue; drop the oldest entries on overflow.
 		if (queue.length > PENDING_FEDERATION_EDU_CAP) {
@@ -2076,34 +2118,34 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 				`pendingFederationEdus: dropped ${dropped.length} EDU(s) for ${destination} (queue cap ${PENDING_FEDERATION_EDU_CAP} exceeded)`,
 			);
 		}
-		this.pendingFederationEdus.set(destination, queue);
+		pendingFederationEdus.set(destination, queue);
 		return id;
-	}
+	};
 
-	async getPendingFederationEdus(
+	const getPendingFederationEdus = async (
 		destination: ServerName,
 		limit: number,
-	): Promise<{ id: number; edu: EDU }[]> {
-		const queue = this.pendingFederationEdus.get(destination) ?? [];
+	): Promise<{ id: number; edu: EDU }[]> => {
+		const queue = pendingFederationEdus.get(destination) ?? [];
 		return queue.slice(0, limit).map((e) => ({ id: e.id, edu: e.edu }));
-	}
+	};
 
-	async deleteFederationEdu(id: number): Promise<void> {
-		for (const [dest, queue] of this.pendingFederationEdus) {
+	const deleteFederationEdu = async (id: number): Promise<void> => {
+		for (const [dest, queue] of pendingFederationEdus) {
 			const idx = queue.findIndex((e) => e.id === id);
 			if (idx !== -1) {
 				queue.splice(idx, 1);
-				if (queue.length === 0) this.pendingFederationEdus.delete(dest);
+				if (queue.length === 0) pendingFederationEdus.delete(dest);
 				return;
 			}
 		}
-	}
+	};
 
-	async getPendingFederationDestinations(): Promise<ServerName[]> {
-		return [...this.pendingFederationEdus.keys()];
-	}
+	const getPendingFederationDestinations = async (): Promise<ServerName[]> => {
+		return [...pendingFederationEdus.keys()];
+	};
 
-	async storeVerificationToken(
+	const storeVerificationToken = async (
 		sessionId: string,
 		data: {
 			medium: string;
@@ -2114,11 +2156,13 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			validated: boolean;
 			userId?: string;
 		},
-	): Promise<void> {
-		this.verificationSessions.set(sessionId, { ...data });
-	}
+	): Promise<void> => {
+		verificationSessions.set(sessionId, { ...data });
+	};
 
-	async getVerificationSession(sessionId: string): Promise<
+	const getVerificationSession = async (
+		sessionId: string,
+	): Promise<
 		| {
 				medium: string;
 				address: string;
@@ -2129,47 +2173,47 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 				userId?: string;
 		  }
 		| undefined
-	> {
-		return this.verificationSessions.get(sessionId);
-	}
+	> => {
+		return verificationSessions.get(sessionId);
+	};
 
-	async validateVerificationToken(
+	const validateVerificationToken = async (
 		sessionId: string,
 		token: string,
-	): Promise<boolean> {
-		const session = this.verificationSessions.get(sessionId);
+	): Promise<boolean> => {
+		const session = verificationSessions.get(sessionId);
 		if (!session) return false;
 		if (session.token !== token) return false;
 		session.validated = true;
 		return true;
-	}
+	};
 
-	async storeLoginToken(
+	const storeLoginToken = async (
 		token: string,
 		userId: UserId,
 		expiresAt: number,
-	): Promise<void> {
-		this.loginTokens.set(token, { userId, expiresAt });
-	}
+	): Promise<void> => {
+		loginTokens.set(token, { userId, expiresAt });
+	};
 
-	async getLoginToken(
+	const getLoginToken = async (
 		token: string,
-	): Promise<{ userId: UserId; expiresAt: number } | undefined> {
-		return this.loginTokens.get(token);
-	}
+	): Promise<{ userId: UserId; expiresAt: number } | undefined> => {
+		return loginTokens.get(token);
+	};
 
-	async deleteLoginToken(token: string): Promise<void> {
-		this.loginTokens.delete(token);
-	}
+	const deleteLoginToken = async (token: string): Promise<void> => {
+		loginTokens.delete(token);
+	};
 
-	async importRoomState(
+	const importRoomState = async (
 		roomId: RoomId,
 		roomVersion: RoomVersion,
 		stateEvents: PDU[],
 		authChain: PDU[],
-	): Promise<void> {
+	): Promise<void> => {
 		for (const event of authChain) {
-			this.events.set(computeEventId(event, roomVersion), event);
+			eventsById.set(computeEventId(event, roomVersion), event);
 		}
 
 		const stateMap = new Map<string, PDU>();
@@ -2178,21 +2222,21 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 
 		for (const event of stateEvents) {
 			const eventId = computeEventId(event, roomVersion);
-			this.events.set(eventId, event);
+			eventsById.set(eventId, event);
 
 			stateMap.set(`${event.type}\x1f${event.state_key ?? ""}`, event);
 
-			const timeline = this.roomTimeline.get(roomId) ?? [];
-			this.streamCounter++;
-			timeline.push({ eventId, streamPos: this.streamCounter });
-			this.roomTimeline.set(roomId, timeline);
+			const timeline = roomTimeline.get(roomId) ?? [];
+			eph.streamCounter++;
+			timeline.push({ eventId, streamPos: eph.streamCounter });
+			roomTimeline.set(roomId, timeline);
 
 			if (event.depth > maxDepth) maxDepth = event.depth;
 			extremities.length = 0;
 			extremities.push(eventId);
 		}
 
-		this.rooms.set(roomId, {
+		roomsById.set(roomId, {
 			room_id: roomId,
 			room_version: roomVersion,
 			state_events: stateMap,
@@ -2200,6 +2244,156 @@ export class MemoryStorage extends EphemeralMixin implements Storage {
 			forward_extremities: extremities,
 		});
 
-		this.wakeWaiters();
-	}
-}
+		eph.wakeWaiters();
+	};
+
+	return {
+		addOneTimeKeys,
+		addThreePid,
+		addUIAACompleted,
+		claimOneTimeKey,
+		clearRoomPartialState,
+		clearToDeviceMessages,
+		createFilter,
+		createKeyBackupVersion,
+		createRoom,
+		createRoomAlias,
+		createSession,
+		createUIAASession,
+		createUser,
+		deactivateUser,
+		deleteAllSessions,
+		deleteDeviceKeys,
+		deleteDeviceSession,
+		deleteEvent,
+		deleteFederationEdu,
+		deleteGlobalAccountData,
+		deleteKeyBackupKeys,
+		deleteKeyBackupVersion,
+		deleteLoginToken,
+		deletePusher,
+		deletePusherByKey,
+		deleteRoomAccountData,
+		deleteRoomAlias,
+		deleteSession,
+		deleteThreePid,
+		deleteUIAASession,
+		enqueueFederationEdu,
+		getAliasCreator,
+		getAliasesForRoom,
+		getAllDeviceKeys,
+		getAllDevices,
+		getAllGlobalAccountData,
+		getAllPartialStateRooms,
+		getAllRoomAccountData,
+		getAllState,
+		getAnnotationCounts,
+		getAuthChain,
+		getChangedDeviceUsers,
+		getCrossSigningKeys,
+		getDevice,
+		getDeviceKeys,
+		getEvent,
+		getEventsByRoom,
+		getEventsByRoomSince,
+		getFallbackKeyTypes,
+		getFederationTxn,
+		getFilter,
+		getGlobalAccountData,
+		getGlobalAccountDataSince,
+		getKeyBackupKeys,
+		getKeyBackupVersion,
+		getLatestEdit,
+		getLoginToken,
+		getMedia,
+		getMemberEvents,
+		getOneTimeKeyCounts,
+		getOpenIdToken,
+		getPendingFederationDestinations,
+		getPendingFederationEdus,
+		getProfile,
+		getPublicRoomIds,
+		getPushers,
+		getReceipts,
+		getRelatedEvents,
+		getRoom,
+		getRoomAccountData,
+		getRoomAccountDataSince,
+		getRoomByAlias,
+		getRoomPartialState,
+		getRoomsForUser,
+		getRoomsForUserWithMembership,
+		getRoomUnPartialStatedAt,
+		getRoomVisibility,
+		getServerKeys,
+		getServersInRoom,
+		getSessionByAccessToken,
+		getSessionByRefreshToken,
+		getSessionsByUser,
+		getStateAtEvent,
+		getStateEvent,
+		getStreamPosition,
+		getStrippedState,
+		getThreadRoots,
+		getThreadSummary,
+		getThreePids,
+		getToDeviceMessages,
+		getTxnEventId,
+		getUIAASession,
+		getUserById,
+		getUserByLocalpart,
+		getVerificationSession,
+		importRoomState,
+		markRoomPartialState,
+		putKeyBackupKeys,
+		recordDeviceKeyChange,
+		recordPartialStateDevicePoke,
+		recordPartialStateEvent,
+		reserveMedia,
+		rotateToken,
+		searchRoomEvents,
+		searchUserDirectory,
+		sendToDevice,
+		setAvatarUrl,
+		setCrossSigningKeys,
+		setDeviceKeys,
+		setDisplayName,
+		setFallbackKeys,
+		setFederationTxn,
+		setGlobalAccountData,
+		setPusher,
+		setReceipt,
+		setRoomAccountData,
+		setRoomVisibility,
+		setStateEvent,
+		setStateEventHistorical,
+		setTxnEventId,
+		storeCrossSigningSignatures,
+		storeEvent,
+		storeLoginToken,
+		storeMedia,
+		storeOpenIdToken,
+		storeRelation,
+		storeReport,
+		storeServerKeys,
+		storeVerificationToken,
+		takePartialStateDevicePokes,
+		takePartialStateEvents,
+		touchSession,
+		unrejectEvent,
+		updateDeviceDisplayName,
+		updateEvent,
+		updateKeyBackupVersion,
+		updateMediaContent,
+		updatePassword,
+		validateVerificationToken,
+		waitForPartialStateClear,
+		waitForEvents: eph.waitForEvents,
+		setTyping: eph.setTyping,
+		getTypingUsers: eph.getTypingUsers,
+		getTypingChangedAt: eph.getTypingChangedAt,
+		setPresence: eph.setPresence,
+		getPresenceChangedAt: eph.getPresenceChangedAt,
+		getPresence: eph.getPresence,
+	};
+};

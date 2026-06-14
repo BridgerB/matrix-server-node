@@ -12,7 +12,7 @@ import { sendDeviceListUpdate } from "./e2ee.ts";
  * The full type is this prefix concatenated with the device ID, e.g.
  * `org.matrix.msc3890.local_notification_settings.ABCDEF`.
  */
-const LOCAL_NOTIFICATION_SETTINGS_PREFIX =
+export const LOCAL_NOTIFICATION_SETTINGS_PREFIX =
 	"org.matrix.msc3890.local_notification_settings.";
 
 /**

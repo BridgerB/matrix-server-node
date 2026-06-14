@@ -30,7 +30,7 @@ const REGISTRATION_FLOWS: { stages: AuthType[] }[] = [
 // with M_WEAK_PASSWORD. Keep it at 1 so only an empty password is rejected
 // (empty is also caught earlier by the missing-field check).
 const MIN_PASSWORD_LENGTH = 1;
-const USERNAME_RE = /^[a-z0-9._=\-/]+$/;
+export const USERNAME_RE = /^[a-z0-9._=\-/]+$/;
 
 export const postRegister =
 	(storage: Storage, serverName: string): Handler =>

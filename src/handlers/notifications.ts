@@ -4,6 +4,7 @@ import type { Handler } from "../router.ts";
 import type { Storage } from "../storage/interface.ts";
 import type { UserId } from "../types/index.ts";
 import type { RoomPowerLevelsContent } from "../types/state-events.ts";
+import { parseLimit } from "./query-params.ts";
 
 export const getNotifications =
 	(storage: Storage): Handler =>
@@ -11,7 +12,7 @@ export const getNotifications =
 		const userId = req.userId as string;
 		const fromStr = req.query.get("from");
 		const limitStr = req.query.get("limit");
-		const limit = Math.min(Math.max(parseInt(limitStr ?? "20", 10), 1), 100);
+		const limit = parseLimit(limitStr, 20);
 		const onlyHighlights = req.query.get("only") === "highlight";
 
 		const userRules = await getOrInitRules(storage, userId);

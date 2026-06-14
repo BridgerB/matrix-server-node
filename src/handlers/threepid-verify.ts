@@ -4,7 +4,7 @@ import { badJson, MatrixError } from "../errors.ts";
 import type { Handler } from "../router.ts";
 import { getSmtpConfig, sendEmail } from "../smtp.ts";
 import type { Storage } from "../storage/interface.ts";
-import type { JsonObject } from "../types/json.ts";
+import { USERNAME_RE } from "./register.ts";
 
 /** Generate a random 6-digit verification token. */
 const generateVerificationToken = (): string => {
@@ -174,8 +174,6 @@ export const getRegistrationTokenValidity = (): Handler => async (_req) => {
 	return { status: 200, body: { valid: false } };
 };
 
-const USERNAME_RE = /^[a-z0-9._=\-/]+$/;
-
 /** GET /_matrix/client/v3/register/available */
 export const getRegisterAvailable =
 	(storage: Storage): Handler =>
@@ -275,53 +273,4 @@ export const getAdminWhois =
 				devices,
 			},
 		};
-	};
-
-/** POST /_matrix/client/v3/knock/:roomIdOrAlias */
-export const postKnock =
-	(storage: Storage, serverName: string): Handler =>
-	async (req) => {
-		const roomIdOrAlias = req.params.roomIdOrAlias!;
-		const body = (req.body ?? {}) as { reason?: string };
-		const userId = req.userId!;
-
-		let roomId: string;
-		if (roomIdOrAlias.startsWith("#")) {
-			const resolved = await storage.getRoomByAlias(roomIdOrAlias);
-			if (!resolved) {
-				throw new MatrixError(
-					"M_NOT_FOUND",
-					`Room alias ${roomIdOrAlias} not found`,
-					404,
-				);
-			}
-			roomId = resolved.room_id;
-		} else {
-			roomId = roomIdOrAlias;
-		}
-
-		const room = await storage.getRoom(roomId);
-		if (!room) throw new MatrixError("M_NOT_FOUND", "Room not found", 404);
-
-		const { sendStateEvent } = await import("../events.ts");
-		const knockContent: JsonObject = { membership: "knock" };
-		if (body.reason) knockContent.reason = body.reason;
-
-		const ctx = {
-			roomState: room,
-			depth: room.depth,
-			prevEvents: [...room.forward_extremities],
-		};
-
-		await sendStateEvent(
-			storage,
-			serverName,
-			ctx,
-			userId,
-			"m.room.member",
-			userId,
-			knockContent,
-		);
-
-		return { status: 200, body: { room_id: roomId } };
 	};

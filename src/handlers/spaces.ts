@@ -1,5 +1,10 @@
 import { notFound } from "../errors.ts";
-import { countJoinedMembers, getMembership } from "../events.ts";
+import {
+	contentField,
+	getMembership,
+	roomSummaryFields,
+	toStripped,
+} from "../events.ts";
 import type { FederationClient } from "../federation/client.ts";
 import { domainOf } from "../ids.ts";
 import type { Handler } from "../router.ts";
@@ -8,6 +13,7 @@ import type { SpaceHierarchyRoom } from "../types/directory.ts";
 import type { PDU, StrippedStateEvent } from "../types/events.ts";
 import type { RoomId, ServerName, UserId } from "../types/index.ts";
 import { getAllowedRoomIds } from "./federation/spaces.ts";
+import { parseLimit } from "./query-params.ts";
 
 const MAX_ROOMS = 50;
 
@@ -16,9 +22,6 @@ type RoomState = NonNullable<Awaited<ReturnType<Storage["getRoom"]>>>;
 interface HierarchyRoom extends SpaceHierarchyRoom {
 	allowed_room_ids?: string[];
 }
-
-const contentField = (event: PDU | undefined, field: string): unknown =>
-	event ? (event.content as Record<string, unknown>)[field] : undefined;
 
 type Child = { state: StrippedStateEvent; roomId: RoomId };
 
@@ -30,12 +33,7 @@ const extractChildren = (stateEvents: Map<string, PDU>): Child[] =>
 				Array.isArray((event.content as Record<string, unknown>).via),
 		)
 		.map(([, event]) => ({
-			state: {
-				content: event.content,
-				sender: event.sender,
-				state_key: event.state_key ?? "",
-				type: event.type,
-			},
+			state: toStripped(event),
 			roomId: (event.state_key ?? "") as RoomId,
 		}));
 
@@ -43,46 +41,11 @@ const buildHierarchyRoom = (
 	room: RoomState,
 	roomId: RoomId,
 	childrenState: StrippedStateEvent[],
-): HierarchyRoom => {
-	const histVis = contentField(
-		room.state_events.get("m.room.history_visibility\x1f"),
-		"history_visibility",
-	);
-	const guestAccess = contentField(
-		room.state_events.get("m.room.guest_access\x1f"),
-		"guest_access",
-	);
-
-	return {
-		room_id: roomId,
-		name: contentField(room.state_events.get("m.room.name\x1f"), "name") as
-			| string
-			| undefined,
-		topic: contentField(room.state_events.get("m.room.topic\x1f"), "topic") as
-			| string
-			| undefined,
-		avatar_url: contentField(
-			room.state_events.get("m.room.avatar\x1f"),
-			"url",
-		) as string | undefined,
-		canonical_alias: contentField(
-			room.state_events.get("m.room.canonical_alias\x1f"),
-			"alias",
-		) as string | undefined,
-		num_joined_members: countJoinedMembers(room.state_events),
-		world_readable: histVis === "world_readable",
-		guest_can_join: guestAccess === "can_join",
-		join_rule: contentField(
-			room.state_events.get("m.room.join_rules\x1f"),
-			"join_rule",
-		) as string | undefined,
-		room_type: contentField(
-			room.state_events.get("m.room.create\x1f"),
-			"type",
-		) as string | undefined,
-		children_state: childrenState,
-	};
-};
+): HierarchyRoom => ({
+	room_id: roomId,
+	...roomSummaryFields(room),
+	children_state: childrenState,
+});
 
 /**
  * Whether a local room should be shown to the requesting user. Mirrors
@@ -204,11 +167,7 @@ export const getSpaceHierarchy =
 		const rootRoomId = req.params.roomId as RoomId;
 		const userId = req.userId as UserId;
 
-		const limitStr = req.query.get("limit");
-		const limit = Math.min(
-			Math.max(parseInt(limitStr ?? String(MAX_ROOMS), 10), 1),
-			MAX_ROOMS,
-		);
+		const limit = parseLimit(req.query.get("limit"), MAX_ROOMS, MAX_ROOMS);
 		const maxDepth = Math.max(
 			parseInt(req.query.get("max_depth") ?? "50", 10),
 			0,

@@ -14,13 +14,18 @@ import {
 	computeEventId,
 	computeRoomIdV12,
 	type EventContext,
+	findAuthorisingLocalUser,
+	getJoinRule,
 	getMembership,
 	getPowerLevels,
 	getUserPowerLevel,
 	isRoomVersion12Plus,
+	iterMembers,
 	membershipOf,
 	selectAuthEvents,
 	sendStateEvent,
+	serverHasMember,
+	userSatisfiesRestrictedAllow,
 	validateAdditionalCreators,
 } from "../events.ts";
 import type { FederationClient } from "../federation/client.ts";
@@ -64,44 +69,6 @@ import { copyPredecessorPushRulesOnJoin } from "./room-upgrade.ts";
  * only marginally meets the invite level), which is the safest authoriser to
  * record so the join passes auth on every participating server.
  */
-const findAuthorisingLocalUser = (
-	room: RoomState,
-	localServerName: string,
-): UserId | undefined => {
-	const pl = getPowerLevels(room);
-	const invitePl = pl.invite ?? 0;
-
-	let best: UserId | undefined;
-	let bestPl = -Infinity;
-
-	for (const [key, event] of room.state_events) {
-		if (!key.startsWith("m.room.member\x1f")) continue;
-		const membership = (event.content as Record<string, unknown>).membership as
-			| string
-			| undefined;
-		if (membership !== "join") continue;
-
-		const memberId = key.slice("m.room.member\x1f".length) as UserId;
-		const memberServer = domainOf(memberId);
-		if (memberServer !== localServerName) continue;
-
-		const memberPl = getUserPowerLevel(memberId, room);
-		if (memberPl < invitePl) continue;
-
-		// Prefer the highest power level; break ties deterministically by the
-		// lexicographically smallest user ID so the same authoriser is chosen on
-		// every invocation regardless of Map iteration order.
-		if (
-			memberPl > bestPl ||
-			(memberPl === bestPl && (!best || memberId < best))
-		) {
-			best = memberId;
-			bestPl = memberPl;
-		}
-	}
-	return best;
-};
-
 /**
  * Compute the set of REMOTE servers (excluding our own) that currently have a
  * joined user able to issue invites in this room. When our server is resident in
@@ -121,17 +88,11 @@ const serversThatCanIssueInvite = (
 	const invitePl = pl.invite ?? 0;
 
 	const servers: ServerName[] = [];
-	for (const [key, event] of room.state_events) {
-		if (!key.startsWith("m.room.member\x1f")) continue;
-		const membership = (event.content as Record<string, unknown>).membership as
-			| string
-			| undefined;
+	for (const { userId, membership } of iterMembers(room.state_events)) {
 		if (membership !== "join") continue;
+		if (getUserPowerLevel(userId, room) < invitePl) continue;
 
-		const memberId = key.slice("m.room.member\x1f".length) as UserId;
-		if (getUserPowerLevel(memberId, room) < invitePl) continue;
-
-		const memberServer = domainOf(memberId);
+		const memberServer = domainOf(userId);
 		if (!memberServer || memberServer === localServerName) continue;
 		if (!servers.includes(memberServer as ServerName)) {
 			servers.push(memberServer as ServerName);
@@ -159,46 +120,7 @@ const isServerResidentInRoom = (
 	// build valid events locally.
 	if (!room.state_events.has("m.room.create\x1f")) return false;
 
-	for (const [key, event] of room.state_events) {
-		if (!key.startsWith("m.room.member\x1f")) continue;
-		const membership = (event.content as Record<string, unknown>).membership as
-			| string
-			| undefined;
-		if (membership !== "join") continue;
-		const memberId = key.slice("m.room.member\x1f".length);
-		const memberServer = domainOf(memberId);
-		if (memberServer === localServerName) return true;
-	}
-	return false;
-};
-
-/**
- * Determine whether `userId` satisfies a restricted room's allow conditions,
- * i.e. they are joined to one of the rooms listed under
- * m.room.join_rules content.allow with type "m.room_membership".
- */
-const userSatisfiesRestrictedAllow = async (
-	storage: Storage,
-	room: RoomState,
-	userId: UserId,
-): Promise<boolean> => {
-	const joinRulesEvent = room.state_events.get("m.room.join_rules\x1f");
-	if (!joinRulesEvent) return false;
-	const allow = (joinRulesEvent.content as Record<string, unknown>).allow;
-	if (!Array.isArray(allow)) return false;
-
-	for (const entry of allow) {
-		if (!entry || typeof entry !== "object") continue;
-		const e = entry as Record<string, unknown>;
-		if (e.type !== "m.room_membership") continue;
-		const allowedRoomId = e.room_id;
-		if (typeof allowedRoomId !== "string") continue;
-
-		const allowedRoom = await storage.getRoom(allowedRoomId as RoomId);
-		if (!allowedRoom) continue;
-		if (getMembership(allowedRoom, userId) === "join") return true;
-	}
-	return false;
+	return serverHasMember(room.state_events, localServerName, "join");
 };
 
 /**
@@ -221,6 +143,7 @@ const collectMembershipDestinations = async (
 	serverName: string,
 	roomId: RoomId,
 	targetUserId: UserId,
+	sender?: string,
 ): Promise<ServerName[]> => {
 	const destinations = new Set<ServerName>();
 
@@ -237,6 +160,45 @@ const collectMembershipDestinations = async (
 	const targetServer = domainOf(targetUserId);
 	if (targetServer && targetServer !== serverName) {
 		destinations.add(targetServer as ServerName);
+
+		// A server that knows the room ONLY through the target's pending invite
+		// (out-of-band) hears about a change to that invite only from the original
+		// inviter. A third party kicking the invitee must NOT reach the invitee's
+		// otherwise-non-resident server — from that server's view the invite still
+		// stands (TestFederationRoomsInvite "Non-invitee user cannot rescind invite
+		// over federation"). We therefore drop the target's server when (a) the
+		// caller named a `sender`, (b) the target is merely invited, (c) that
+		// sender is not the inviter, and (d) the server has no OTHER member keeping
+		// it in the room. The inviter's own rescission, a change to a joined
+		// target, or another resident member all keep the server as a destination.
+		if (sender) {
+			const members = await storage.getMemberEvents(roomId);
+			let targetMembership: string | undefined;
+			let targetInviter: string | undefined;
+			let otherMemberOnTargetServer = false;
+			for (const { event } of members) {
+				const sk = event.state_key;
+				if (!sk) continue;
+				const m = membershipOf(event);
+				if (sk === targetUserId) {
+					targetMembership = m;
+					targetInviter = event.sender;
+				} else if (
+					(m === "join" || m === "invite" || m === "knock") &&
+					domainOf(sk) === targetServer
+				) {
+					otherMemberOnTargetServer = true;
+				}
+			}
+			const inviteOnly = targetMembership === "invite";
+			if (
+				inviteOnly &&
+				targetInviter !== sender &&
+				!otherMemberOnTargetServer
+			) {
+				destinations.delete(targetServer as ServerName);
+			}
+		}
 	}
 
 	return [...destinations];
@@ -757,6 +719,7 @@ const sendMembershipEvent = async (
 					serverName,
 					roomId,
 					targetUserId,
+					sender,
 				)
 			: [];
 
@@ -1077,11 +1040,7 @@ export const postJoin =
 			// content.join_authorised_via_users_server. Without it the join event
 			// fails auth.
 			const joinContent: JsonObject = { ...extraJoinContent };
-			const joinRulesEvent = room.state_events.get("m.room.join_rules\x1f");
-			const joinRule = joinRulesEvent
-				? ((joinRulesEvent.content as Record<string, unknown>)
-						.join_rule as string)
-				: "invite";
+			const joinRule = getJoinRule(room);
 			const currentMembership = getMembership(room, userId);
 			if (
 				(joinRule === "restricted" || joinRule === "knock_restricted") &&
@@ -1715,10 +1674,9 @@ const resyncPartialStateRoom = async (
 			const reconciledRoom = await storage.getRoom(roomId);
 			const currentMembership = new Map<string, string | undefined>();
 			if (reconciledRoom) {
-				for (const [k, ev] of reconciledRoom.state_events) {
-					if (!k.startsWith("m.room.member\x1f")) continue;
-					const sk = ev.state_key ?? "";
-					const membership = membershipOf(ev);
+				for (const { userId: sk, membership } of iterMembers(
+					reconciledRoom.state_events,
+				)) {
 					currentMembership.set(sk, membership);
 					if (membership === "join") addMemberServer(sk);
 				}
@@ -2403,6 +2361,7 @@ export const postKick =
 			serverName,
 			roomId as RoomId,
 			body.user_id as UserId,
+			req.userId as string,
 		);
 
 		const eventId = await sendMembershipEvent(

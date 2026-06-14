@@ -37,62 +37,102 @@ export const eventToStrippedState = (event: {
 	};
 };
 
-export abstract class EphemeralMixin {
-	protected streamCounter = 0;
-	protected filterCounter = 0;
-	protected eventWaiters = new Set<() => void>();
-	protected roomCache = new Map<RoomId, RoomState>();
-	protected typingTimers = new Map<
+export interface EphemeralStore {
+	/** Monotonic stream position; every persisted change advances it. */
+	streamCounter: number;
+	/** Monotonic filter id counter. */
+	filterCounter: number;
+	/** Resolve callbacks for in-flight long-poll /sync requests. */
+	readonly eventWaiters: Set<() => void>;
+	/** Hot cache of room state, keyed by room id. */
+	readonly roomCache: Map<RoomId, RoomState>;
+	wakeWaiters(): void;
+	waitForEvents(since: number, timeoutMs: number): Promise<void>;
+	setTyping(
+		roomId: RoomId,
+		userId: UserId,
+		typing: boolean,
+		timeout?: number,
+	): Promise<void>;
+	getTypingUsers(roomId: RoomId): Promise<UserId[]>;
+	getTypingChangedAt(roomId: RoomId): Promise<number>;
+	setPresence(
+		userId: UserId,
+		presence: PresenceState,
+		statusMsg?: string,
+	): Promise<void>;
+	getPresenceChangedAt(userId: UserId): Promise<number>;
+	getPresence(userId: UserId): Promise<
+		| {
+				presence: PresenceState;
+				status_msg?: string;
+				last_active_ts?: Timestamp;
+		  }
+		| undefined
+	>;
+}
+
+/**
+ * In-memory ephemeral state shared by every storage backend: the monotonic
+ * stream/filter counters, the long-poll waiter set, the room-state cache, and
+ * transient typing/presence. Backends compose this and touch the counters,
+ * roomCache and wakeWaiters directly; typing/presence live entirely behind its
+ * methods. None of this is persisted — it is rebuilt on startup.
+ */
+export const createEphemeralStore = (): EphemeralStore => {
+	let streamCounter = 0;
+	let filterCounter = 0;
+	const eventWaiters = new Set<() => void>();
+	const roomCache = new Map<RoomId, RoomState>();
+	const typingTimers = new Map<
 		RoomId,
 		Map<UserId, ReturnType<typeof setTimeout>>
 	>();
-	/** Stream position at which each room's typing set last changed. Lets
-	 * incremental /sync surface a room when typing changed (incl. to empty)
-	 * since the `since` token, without re-reporting unchanged rooms. */
-	protected typingChangedAt = new Map<RoomId, number>();
-	protected presenceMap = new Map<
+	// Stream position at which each room's typing set last changed — lets
+	// incremental /sync surface a room when typing changed (incl. to empty)
+	// since the `since` token, without re-reporting unchanged rooms.
+	const typingChangedAt = new Map<RoomId, number>();
+	const presenceMap = new Map<
 		UserId,
 		{ presence: PresenceState; status_msg?: string; last_active_ts?: Timestamp }
 	>();
-	/** Stream position at which each user's presence last changed. Lets
-	 * incremental /sync surface presence updates to users sharing a room since
-	 * the `since` token (TestPresence), without re-reporting unchanged presence. */
-	protected presenceChangedAt = new Map<UserId, number>();
+	// Stream position at which each user's presence last changed.
+	const presenceChangedAt = new Map<UserId, number>();
 
-	protected wakeWaiters(): void {
-		for (const waiter of this.eventWaiters) waiter();
-	}
+	const wakeWaiters = (): void => {
+		for (const waiter of eventWaiters) waiter();
+	};
 
-	async waitForEvents(since: number, timeoutMs: number): Promise<void> {
-		if (this.streamCounter > since) return;
-		if (timeoutMs <= 0) return;
+	const waitForEvents = (since: number, timeoutMs: number): Promise<void> => {
+		if (streamCounter > since) return Promise.resolve();
+		if (timeoutMs <= 0) return Promise.resolve();
 
 		return new Promise<void>((resolve) => {
 			const timer = setTimeout(() => {
-				this.eventWaiters.delete(wake);
+				eventWaiters.delete(wake);
 				resolve();
 			}, timeoutMs);
 
 			const wake = () => {
 				clearTimeout(timer);
-				this.eventWaiters.delete(wake);
+				eventWaiters.delete(wake);
 				resolve();
 			};
 
-			this.eventWaiters.add(wake);
+			eventWaiters.add(wake);
 		});
-	}
+	};
 
-	async setTyping(
+	const setTyping = async (
 		roomId: RoomId,
 		userId: UserId,
 		typing: boolean,
 		timeout?: number,
-	): Promise<void> {
-		let roomTyping = this.typingTimers.get(roomId);
+	): Promise<void> => {
+		let roomTyping = typingTimers.get(roomId);
 		if (!roomTyping) {
 			roomTyping = new Map();
-			this.typingTimers.set(roomId, roomTyping);
+			typingTimers.set(roomId, roomTyping);
 		}
 
 		const wasTyping = roomTyping.has(userId);
@@ -106,59 +146,70 @@ export abstract class EphemeralMixin {
 			const ms = Math.min(timeout ?? 30000, 120000);
 			const timer = setTimeout(() => {
 				roomTyping?.delete(userId);
-				this.typingChangedAt.set(roomId, ++this.streamCounter);
-				this.wakeWaiters();
+				typingChangedAt.set(roomId, ++streamCounter);
+				wakeWaiters();
 			}, ms);
 			roomTyping.set(userId, timer);
 		}
 
 		// The typing set changed iff the user's typing membership flipped.
 		if (wasTyping !== typing) {
-			this.typingChangedAt.set(roomId, ++this.streamCounter);
+			typingChangedAt.set(roomId, ++streamCounter);
 		}
-		this.wakeWaiters();
-	}
+		wakeWaiters();
+	};
 
-	async getTypingUsers(roomId: RoomId): Promise<UserId[]> {
-		const roomTyping = this.typingTimers.get(roomId);
-		if (!roomTyping) return [];
-		return [...roomTyping.keys()];
-	}
+	const getTypingUsers = async (roomId: RoomId): Promise<UserId[]> => {
+		const roomTyping = typingTimers.get(roomId);
+		return roomTyping ? [...roomTyping.keys()] : [];
+	};
 
-	/** Stream position at which `roomId`'s typing set last changed (0 if never). */
-	async getTypingChangedAt(roomId: RoomId): Promise<number> {
-		return this.typingChangedAt.get(roomId) ?? 0;
-	}
+	const getTypingChangedAt = async (roomId: RoomId): Promise<number> =>
+		typingChangedAt.get(roomId) ?? 0;
 
-	async setPresence(
+	const setPresence = async (
 		userId: UserId,
 		presence: PresenceState,
 		statusMsg?: string,
-	): Promise<void> {
-		this.presenceMap.set(userId, {
+	): Promise<void> => {
+		presenceMap.set(userId, {
 			presence,
 			status_msg: statusMsg,
 			last_active_ts: Date.now(),
 		});
 		// Advance the stream so long-polling /sync wakes and surfaces the change,
 		// and record the position so incremental sync knows which users changed.
-		this.presenceChangedAt.set(userId, ++this.streamCounter);
-		this.wakeWaiters();
-	}
+		presenceChangedAt.set(userId, ++streamCounter);
+		wakeWaiters();
+	};
 
-	/** Stream position at which `userId`'s presence last changed (0 if never). */
-	async getPresenceChangedAt(userId: UserId): Promise<number> {
-		return this.presenceChangedAt.get(userId) ?? 0;
-	}
+	const getPresenceChangedAt = async (userId: UserId): Promise<number> =>
+		presenceChangedAt.get(userId) ?? 0;
 
-	async getPresence(userId: UserId): Promise<
-		| {
-				presence: PresenceState;
-				status_msg?: string;
-				last_active_ts?: Timestamp;
-		  }
-		| undefined
-	> {
-		return this.presenceMap.get(userId);
-	}
-}
+	const getPresence = async (userId: UserId) => presenceMap.get(userId);
+
+	return {
+		get streamCounter() {
+			return streamCounter;
+		},
+		set streamCounter(v: number) {
+			streamCounter = v;
+		},
+		get filterCounter() {
+			return filterCounter;
+		},
+		set filterCounter(v: number) {
+			filterCounter = v;
+		},
+		eventWaiters,
+		roomCache,
+		wakeWaiters,
+		waitForEvents,
+		setTyping,
+		getTypingUsers,
+		getTypingChangedAt,
+		setPresence,
+		getPresenceChangedAt,
+		getPresence,
+	};
+};

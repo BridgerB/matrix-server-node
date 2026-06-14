@@ -49,7 +49,9 @@ import type {
 	UserId,
 } from "../types/index.ts";
 import type { JsonObject } from "../types/json.ts";
+import { parseLimit } from "./query-params.ts";
 import { migrateRoomPushRules } from "./room-upgrade.ts";
+import { FORGOTTEN_ROOM_MARKER } from "./rooms.ts";
 
 /**
  * Access control for single-event fetch endpoints (`/event/:eventId`,
@@ -502,9 +504,6 @@ export const putStateEvent =
 		return { status: 200, body: { event_id: eventId } };
 	};
 
-/** Per-user marker (room account data) set when a user forgets a room. */
-const FORGOTTEN_ROOM_MARKER = "m.internal.forgotten";
-
 /** Throw 403 if the user has forgotten this room (read endpoints reject it). */
 const assertNotForgotten = async (
 	storage: Storage,
@@ -895,7 +894,7 @@ export const getMessages =
 				? parseInt(fromStr, 10)
 				: undefined;
 		const limitStr = req.query.get("limit");
-		const limit = Math.min(Math.max(parseInt(limitStr ?? "10", 10), 1), 100);
+		const limit = parseLimit(limitStr, 10);
 
 		const filter = parseRoomEventFilter(req.query.get("filter"));
 
