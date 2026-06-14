@@ -51,6 +51,7 @@ import {
 	encodeDevicePoke,
 	flattenKeyBackupEntries,
 	keyBackupEtag,
+	rowsToCrossSigningKeys,
 	rowToSession,
 	rowToStoredMedia,
 	rowToUser,
@@ -1430,19 +1431,9 @@ export const createPostgresStorage = async (
 			"SELECT key_type, key_json FROM cross_signing_keys WHERE user_id = $1",
 			[userId],
 		);
-		const result: {
-			master_key?: CrossSigningKey;
-			self_signing_key?: CrossSigningKey;
-			user_signing_key?: CrossSigningKey;
-		} = {};
-		for (const r of rows) {
-			const key =
-				typeof r.key_json === "string" ? JSON.parse(r.key_json) : r.key_json;
-			if (r.key_type === "master_key") result.master_key = key;
-			else if (r.key_type === "self_signing_key") result.self_signing_key = key;
-			else if (r.key_type === "user_signing_key") result.user_signing_key = key;
-		}
-		return result;
+		return rowsToCrossSigningKeys(rows, (j) =>
+			typeof j === "string" ? JSON.parse(j) : (j as CrossSigningKey),
+		);
 	};
 
 	const storeCrossSigningSignatures = async (

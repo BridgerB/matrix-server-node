@@ -53,6 +53,7 @@ import {
 	encodeDevicePoke,
 	flattenKeyBackupEntries,
 	keyBackupEtag,
+	rowsToCrossSigningKeys,
 	rowToSession,
 	rowToStoredMedia,
 	rowToUser,
@@ -1536,20 +1537,7 @@ export const createSqliteStorage = (dbPath: string): Storage => {
 				"SELECT key_type, key_json FROM cross_signing_keys WHERE user_id = ?",
 			)
 			.all(userId) as { key_type: string; key_json: string }[];
-		const result: {
-			master_key?: CrossSigningKey;
-			self_signing_key?: CrossSigningKey;
-			user_signing_key?: CrossSigningKey;
-		} = {};
-		for (const row of rows) {
-			if (row.key_type === "master_key")
-				result.master_key = JSON.parse(row.key_json);
-			else if (row.key_type === "self_signing_key")
-				result.self_signing_key = JSON.parse(row.key_json);
-			else if (row.key_type === "user_signing_key")
-				result.user_signing_key = JSON.parse(row.key_json);
-		}
-		return result;
+		return rowsToCrossSigningKeys(rows, (j) => JSON.parse(j as string));
 	};
 
 	const storeCrossSigningSignatures = async (

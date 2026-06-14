@@ -1,4 +1,4 @@
-import type { KeyBackupData } from "../types/e2ee.ts";
+import type { CrossSigningKey, KeyBackupData } from "../types/e2ee.ts";
 import type {
 	AccessToken,
 	DeviceId,
@@ -10,6 +10,32 @@ import type {
 } from "../types/index.ts";
 import type { StoredMedia } from "../types/internal.ts";
 import type { StoredSession } from "./interface.ts";
+
+export interface CrossSigningKeys {
+	master_key?: CrossSigningKey;
+	self_signing_key?: CrossSigningKey;
+	user_signing_key?: CrossSigningKey;
+}
+
+/**
+ * Assemble a user's cross-signing keys from `cross_signing_keys` rows. `parse`
+ * is the backend's JSON decoder (sqlite/mysql parse a string column, postgres
+ * may already hand back a JSONB object).
+ */
+export const rowsToCrossSigningKeys = (
+	rows: Record<string, unknown>[],
+	parse: (json: unknown) => CrossSigningKey,
+): CrossSigningKeys => {
+	const result: CrossSigningKeys = {};
+	for (const r of rows) {
+		if (r.key_type === "master_key") result.master_key = parse(r.key_json);
+		else if (r.key_type === "self_signing_key")
+			result.self_signing_key = parse(r.key_json);
+		else if (r.key_type === "user_signing_key")
+			result.user_signing_key = parse(r.key_json);
+	}
+	return result;
+};
 
 export const rowToStoredMedia = (
 	row: Record<string, unknown>,
