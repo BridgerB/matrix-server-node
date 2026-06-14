@@ -1,5 +1,5 @@
 {
-  "name": "matrix-server-node",
+  "name": "strix",
   "version": "0.0.1",
   "description": "Matrix homeserver implementation in Node.js",
   "type": "module",

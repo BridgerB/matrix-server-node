@@ -35,7 +35,7 @@ if (!existsSync(join(complementDir, "go.mod"))) {
 	process.exit(1);
 }
 
-const imageName = "complement-matrix-server-node";
+const imageName = "complement-strix";
 
 console.log("Building Complement Docker image...");
 const build = spawnSync(

@@ -190,7 +190,7 @@ export const getFederationVersion = (): Handler => () => ({
 	status: 200,
 	body: {
 		server: {
-			name: "matrix-server-node",
+			name: "strix",
 			version: "0.0.1",
 		},
 	},

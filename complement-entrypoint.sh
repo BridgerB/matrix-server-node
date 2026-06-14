@@ -8,7 +8,7 @@ SERVER_NAME="${SERVER_NAME:-localhost}"
 PORT="${PORT:-8008}"
 FED_PORT="${FED_PORT:-8448}"
 
-echo "Starting matrix-server-node for Complement"
+echo "Starting strix for Complement"
 echo "  SERVER_NAME=$SERVER_NAME"
 echo "  Client API: :$PORT (HTTP)"
 echo "  Federation: :$FED_PORT (HTTPS)"
