@@ -46,7 +46,14 @@ import {
 	collapseReceiptsMsc4102,
 	PENDING_FEDERATION_EDU_CAP,
 } from "./interface.ts";
-import { keyBackupEtag, rowToSession, rowToUser } from "./sql-helpers.ts";
+import {
+	decodeDevicePoke,
+	encodeDevicePoke,
+	keyBackupEtag,
+	rowToSession,
+	rowToUser,
+	shouldReplaceBackupKey,
+} from "./sql-helpers.ts";
 
 export const createMysqlStorage = async (
 	connectionString: string,
@@ -1795,18 +1802,7 @@ export const createMysqlStorage = async (
 			)) as Record<string, unknown>[];
 			if (existingRows[0]) {
 				const existing = parseJson(existingRows[0].key_json) as KeyBackupData;
-				if (
-					!(data.is_verified && !existing.is_verified) &&
-					!(
-						data.is_verified === existing.is_verified &&
-						data.first_message_index < existing.first_message_index
-					) &&
-					!(
-						data.is_verified === existing.is_verified &&
-						data.first_message_index === existing.first_message_index &&
-						data.forwarded_count < existing.forwarded_count
-					)
-				) {
+				if (!shouldReplaceBackupKey(data, existing)) {
 					continue;
 				}
 			}
@@ -2463,7 +2459,7 @@ export const createMysqlStorage = async (
 			set = new Set();
 			partialStateDevicePokes.set(roomId, set);
 		}
-		set.add(`${userId}\x1f${deviceId}`);
+		set.add(encodeDevicePoke(userId, deviceId));
 	};
 
 	const takePartialStateDevicePokes = async (
@@ -2471,15 +2467,7 @@ export const createMysqlStorage = async (
 	): Promise<{ userId: UserId; deviceId: DeviceId }[]> => {
 		const set = partialStateDevicePokes.get(roomId);
 		partialStateDevicePokes.delete(roomId);
-		return set
-			? [...set].map((s) => {
-					const sep = s.indexOf("\x1f");
-					return {
-						userId: s.slice(0, sep) as UserId,
-						deviceId: s.slice(sep + 1) as DeviceId,
-					};
-				})
-			: [];
+		return set ? [...set].map(decodeDevicePoke) : [];
 	};
 
 	const deleteEvent = async (eventId: EventId): Promise<void> => {

@@ -46,7 +46,14 @@ import {
 	collapseReceiptsMsc4102,
 	PENDING_FEDERATION_EDU_CAP,
 } from "./interface.ts";
-import { keyBackupEtag, rowToSession, rowToUser } from "./sql-helpers.ts";
+import {
+	decodeDevicePoke,
+	encodeDevicePoke,
+	keyBackupEtag,
+	rowToSession,
+	rowToUser,
+	shouldReplaceBackupKey,
+} from "./sql-helpers.ts";
 
 export const createPostgresStorage = async (
 	connectionString: string,
@@ -1713,14 +1720,7 @@ export const createPostgresStorage = async (
 				typeof rows[0].key_json === "string"
 					? (JSON.parse(rows[0].key_json) as KeyBackupData)
 					: (rows[0].key_json as KeyBackupData);
-			const shouldReplace =
-				(newData.is_verified && !existing.is_verified) ||
-				(newData.is_verified === existing.is_verified &&
-					newData.first_message_index < existing.first_message_index) ||
-				(newData.is_verified === existing.is_verified &&
-					newData.first_message_index === existing.first_message_index &&
-					newData.forwarded_count < existing.forwarded_count);
-			if (!shouldReplace) return;
+			if (!shouldReplaceBackupKey(newData, existing)) return;
 		}
 		await pool.query(
 			"INSERT INTO key_backup_data (user_id, version, room_id, session_id, key_json) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (user_id, version, room_id, session_id) DO UPDATE SET key_json = EXCLUDED.key_json",
@@ -2368,7 +2368,7 @@ export const createPostgresStorage = async (
 			set = new Set();
 			partialStateDevicePokes.set(roomId, set);
 		}
-		set.add(`${userId}\x1f${deviceId}`);
+		set.add(encodeDevicePoke(userId, deviceId));
 	};
 
 	const takePartialStateDevicePokes = async (
@@ -2376,15 +2376,7 @@ export const createPostgresStorage = async (
 	): Promise<{ userId: UserId; deviceId: DeviceId }[]> => {
 		const set = partialStateDevicePokes.get(roomId);
 		partialStateDevicePokes.delete(roomId);
-		return set
-			? [...set].map((s) => {
-					const sep = s.indexOf("\x1f");
-					return {
-						userId: s.slice(0, sep) as UserId,
-						deviceId: s.slice(sep + 1) as DeviceId,
-					};
-				})
-			: [];
+		return set ? [...set].map(decodeDevicePoke) : [];
 	};
 
 	const deleteEvent = async (eventId: EventId): Promise<void> => {

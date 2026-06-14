@@ -24,6 +24,45 @@ export const keyBackupEtag = (rows: Record<string, unknown>[]): string => {
 	return String(Math.abs(hash));
 };
 
+/** Pack a partial-state device-list poke (a user/device pair) for set storage. */
+export const encodeDevicePoke = (userId: string, deviceId: string): string =>
+	`${userId}\x1f${deviceId}`;
+
+/** Unpack a device-list poke produced by {@link encodeDevicePoke}. */
+export const decodeDevicePoke = (
+	s: string,
+): { userId: UserId; deviceId: DeviceId } => {
+	const sep = s.indexOf("\x1f");
+	return {
+		userId: s.slice(0, sep) as UserId,
+		deviceId: s.slice(sep + 1) as DeviceId,
+	};
+};
+
+/**
+ * Key-backup merge priority: a newly-uploaded session replaces the stored one
+ * iff it is verified and the old one was not, or (same verification) has a lower
+ * first_message_index, or (same again) a lower forwarded_count.
+ */
+export const shouldReplaceBackupKey = (
+	next: {
+		is_verified: boolean;
+		first_message_index: number;
+		forwarded_count: number;
+	},
+	prev: {
+		is_verified: boolean;
+		first_message_index: number;
+		forwarded_count: number;
+	},
+): boolean =>
+	(next.is_verified && !prev.is_verified) ||
+	(next.is_verified === prev.is_verified &&
+		next.first_message_index < prev.first_message_index) ||
+	(next.is_verified === prev.is_verified &&
+		next.first_message_index === prev.first_message_index &&
+		next.forwarded_count < prev.forwarded_count);
+
 export const rowToUser = (
 	row: Record<string, unknown>,
 	booleanAsInt = false,

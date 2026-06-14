@@ -48,7 +48,14 @@ import {
 	collapseReceiptsMsc4102,
 	PENDING_FEDERATION_EDU_CAP,
 } from "./interface.ts";
-import { keyBackupEtag, rowToSession, rowToUser } from "./sql-helpers.ts";
+import {
+	decodeDevicePoke,
+	encodeDevicePoke,
+	keyBackupEtag,
+	rowToSession,
+	rowToUser,
+	shouldReplaceBackupKey,
+} from "./sql-helpers.ts";
 
 export const createSqliteStorage = (dbPath: string): Storage => {
 	const eph = createEphemeralStore();
@@ -1806,19 +1813,10 @@ export const createSqliteStorage = (dbPath: string): Storage => {
 						"SELECT key_json FROM key_backup_data WHERE user_id = ? AND version = ? AND room_id = ? AND session_id = ?",
 					)
 					.get(userId, version, rid, sid) as { key_json: string } | undefined;
-				if (existing) {
-					const old = JSON.parse(existing.key_json) as KeyBackupData;
-					if (
-						(data.is_verified && !old.is_verified) ||
-						(data.is_verified === old.is_verified &&
-							data.first_message_index < old.first_message_index) ||
-						(data.is_verified === old.is_verified &&
-							data.first_message_index === old.first_message_index &&
-							data.forwarded_count < old.forwarded_count)
-					) {
-						upsert.run(userId, version, rid, sid, JSON.stringify(data));
-					}
-				} else {
+				const old = existing
+					? (JSON.parse(existing.key_json) as KeyBackupData)
+					: undefined;
+				if (!old || shouldReplaceBackupKey(data, old)) {
 					upsert.run(userId, version, rid, sid, JSON.stringify(data));
 				}
 			}
@@ -2543,7 +2541,7 @@ export const createSqliteStorage = (dbPath: string): Storage => {
 			set = new Set();
 			partialStateDevicePokes.set(roomId, set);
 		}
-		set.add(`${userId}\x1f${deviceId}`);
+		set.add(encodeDevicePoke(userId, deviceId));
 	};
 
 	const takePartialStateDevicePokes = async (
@@ -2551,15 +2549,7 @@ export const createSqliteStorage = (dbPath: string): Storage => {
 	): Promise<{ userId: UserId; deviceId: DeviceId }[]> => {
 		const set = partialStateDevicePokes.get(roomId);
 		partialStateDevicePokes.delete(roomId);
-		return set
-			? [...set].map((s) => {
-					const sep = s.indexOf("\x1f");
-					return {
-						userId: s.slice(0, sep) as UserId,
-						deviceId: s.slice(sep + 1) as DeviceId,
-					};
-				})
-			: [];
+		return set ? [...set].map(decodeDevicePoke) : [];
 	};
 
 	const deleteEvent = async (eventId: EventId): Promise<void> => {
