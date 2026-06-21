@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { MatrixError } from "./errors.ts";
+import { CORS_HEADERS } from "./middleware/cors.ts";
 import type {
 	AccessToken,
 	DeviceId,
@@ -62,6 +63,7 @@ const respondJson = (
 	res.writeHead(status, {
 		"Content-Type": "application/json",
 		"Content-Length": Buffer.byteLength(json),
+		...CORS_HEADERS,
 		...headers,
 	});
 	res.end(json);
@@ -111,7 +113,7 @@ export const createRouter = (): Router => {
 
 	const respond = (res: ServerResponse, response: RouterResponse): void => {
 		if (Buffer.isBuffer(response.body)) {
-			res.writeHead(response.status, response.headers);
+			res.writeHead(response.status, { ...CORS_HEADERS, ...response.headers });
 			res.end(response.body);
 			return;
 		}
