@@ -36,6 +36,7 @@ import type { FederationClient } from "../federation/client.ts";
 import { fanoutEvent } from "../federation/outbound.ts";
 import { verifyOriginSignature } from "../federation/verify.ts";
 import { getIgnoredUsers } from "../ignored-users.ts";
+import { dispatchPushNotifications } from "../push-notify.ts";
 import { bundleAggregations, indexRelation } from "../relations.ts";
 import type { Handler } from "../router.ts";
 import type { SigningKey } from "../signing.ts";
@@ -375,6 +376,17 @@ export const putSendEvent =
 				eventId,
 			);
 		}
+
+		// Push-gateway dispatch for local members with HTTP pushers. Truly
+		// fire-and-forget (external gateways must not delay the send response);
+		// the function swallows its own errors.
+		void dispatchPushNotifications(
+			storage,
+			serverName,
+			event,
+			eventId,
+			room,
+		).catch(() => {});
 
 		return { status: 200, body: { event_id: eventId } };
 	};
